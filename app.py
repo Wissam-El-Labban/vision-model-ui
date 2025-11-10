@@ -3,6 +3,37 @@ import requests
 import base64
 from pathlib import Path
 import json
+import atexit
+import signal
+import sys
+
+# Function to unload all running Ollama models
+def cleanup_ollama_models():
+    """Unload all running Ollama models on exit"""
+    try:
+        ollama_url = st.session_state.get("ollama_url", "http://localhost:11434")
+        # Get list of running models
+        response = requests.get(f"{ollama_url}/api/ps", timeout=5)
+        if response.status_code == 200:
+            running_models = response.json().get("models", [])
+            # Unload each model
+            for model_info in running_models:
+                model_name = model_info.get("name", "")
+                if model_name:
+                    try:
+                        requests.post(
+                            f"{ollama_url}/api/generate",
+                            json={"model": model_name, "keep_alive": 0},
+                            timeout=5
+                        )
+                        print(f"Unloaded model: {model_name}")
+                    except:
+                        pass
+    except:
+        pass
+
+# Register cleanup function
+atexit.register(cleanup_ollama_models)
 
 # Page configuration
 st.set_page_config(
@@ -19,6 +50,9 @@ st.markdown("Upload an image and ask questions about it using Qwen3-VL or LLaVA 
 with st.sidebar:
     st.header("⚙️ Settings")
     ollama_url = st.text_input("Ollama API URL", value="http://localhost:11434")
+    
+    # Store ollama_url in session state for cleanup function
+    st.session_state.ollama_url = ollama_url
     
     # Function to get available models from Ollama
     @st.cache_data(ttl=60)
@@ -63,6 +97,53 @@ with st.sidebar:
         st.caption("Make sure Ollama is running and you have vision models installed.")
     
     temperature = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.7, step=0.1)
+    
+    st.divider()
+    
+    # Model cleanup section
+    st.markdown("### 🧹 Model Management")
+    col_cleanup1, col_cleanup2 = st.columns(2)
+    
+    with col_cleanup1:
+        if st.button("🗑️ Unload Models", help="Unload all running Ollama models to free up VRAM"):
+            with st.spinner("Unloading models..."):
+                try:
+                    response = requests.get(f"{ollama_url}/api/ps", timeout=5)
+                    if response.status_code == 200:
+                        running_models = response.json().get("models", [])
+                        if running_models:
+                            for model_info in running_models:
+                                model_name_to_unload = model_info.get("name", "")
+                                if model_name_to_unload:
+                                    requests.post(
+                                        f"{ollama_url}/api/generate",
+                                        json={"model": model_name_to_unload, "keep_alive": 0},
+                                        timeout=5
+                                    )
+                            st.success(f"Unloaded {len(running_models)} model(s)")
+                        else:
+                            st.info("No models currently loaded")
+                    else:
+                        st.error("Could not connect to Ollama")
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+    
+    with col_cleanup2:
+        if st.button("📊 Show Running", help="Show currently loaded models"):
+            try:
+                response = requests.get(f"{ollama_url}/api/ps", timeout=5)
+                if response.status_code == 200:
+                    running_models = response.json().get("models", [])
+                    if running_models:
+                        st.write("**Running Models:**")
+                        for model_info in running_models:
+                            st.text(f"• {model_info.get('name', 'Unknown')}")
+                    else:
+                        st.info("No models currently loaded")
+                else:
+                    st.error("Could not connect to Ollama")
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
     
     st.divider()
     st.markdown("### About")
