@@ -6,27 +6,69 @@ import json
 
 # Page configuration
 st.set_page_config(
-    page_title="Qwen3-VL Image Analysis",
+    page_title="Vision Model Image Analysis",
     page_icon="🖼️",
     layout="wide"
 )
 
 # Title and description
-st.title("🖼️ Qwen3-VL Image Analysis")
-st.markdown("Upload an image and ask questions about it using the Qwen3-VL:4b model")
+st.title("🖼️ Vision Model Image Analysis")
+st.markdown("Upload an image and ask questions about it using Qwen3-VL or LLaVA models")
 
 # Sidebar for settings
 with st.sidebar:
     st.header("⚙️ Settings")
     ollama_url = st.text_input("Ollama API URL", value="http://localhost:11434")
-    model_name = st.text_input("Model Name", value="qwen3-vl:4b")
+    
+    # Function to get available models from Ollama
+    @st.cache_data(ttl=60)
+    def get_available_models(url):
+        try:
+            response = requests.get(f"{url}/api/tags", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                models = data.get("models", [])
+                # Filter for vision models (those with "vision", "vl", "llava", "qwen" in name)
+                vision_keywords = ["vision", "vl", "llava", "qwen", "moondream", "minicpm"]
+                vision_models = [
+                    m["name"] for m in models 
+                    if any(keyword in m["name"].lower() for keyword in vision_keywords)
+                ]
+                return sorted(vision_models) if vision_models else []
+            return []
+        except:
+            return []
+    
+    # Get available models
+    available_models = get_available_models(ollama_url)
+    
+    if available_models:
+        st.success(f"✅ Found {len(available_models)} vision model(s)")
+        
+        # Add a refresh button
+        if st.button("🔄 Refresh Models"):
+            st.cache_data.clear()
+            st.rerun()
+        
+        # Model selection from available models
+        model_name = st.selectbox(
+            "Select Vision Model",
+            options=available_models,
+            index=0
+        )
+        st.info(f"Using: `{model_name}`")
+    else:
+        st.warning("⚠️ No vision models detected. Using manual entry.")
+        model_name = st.text_input("Model Name", value="qwen3-vl:4b")
+        st.caption("Make sure Ollama is running and you have vision models installed.")
+    
     temperature = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.7, step=0.1)
     
     st.divider()
     st.markdown("### About")
-    st.markdown("This app uses Ollama's Qwen3-VL model to analyze images and answer questions.")
-    st.markdown("Make sure Ollama is running and the model is installed:")
-    st.code("ollama pull qwen3-vl:4b", language="bash")
+    st.markdown("This app uses Ollama's vision models to analyze images and answer questions.")
+    st.markdown("Make sure Ollama is running and your chosen model is installed:")
+    st.code(f"ollama pull {model_name}", language="bash")
 
 # Initialize session state for chat history
 if "messages" not in st.session_state:
@@ -137,7 +179,7 @@ st.divider()
 st.markdown(
     """
     <div style='text-align: center; color: gray;'>
-    Powered by Qwen3-VL and Ollama | Built with Streamlit
+    Powered by Ollama Vision Models | Built with Streamlit
     </div>
     """,
     unsafe_allow_html=True
