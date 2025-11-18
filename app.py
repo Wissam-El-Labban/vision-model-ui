@@ -234,15 +234,39 @@ with col2:
                 with st.chat_message("user"):
                     st.markdown(prompt)
             
-            # Call Ollama API with streaming
+            # Call Ollama API with streaming and conversation memory
             try:
-                api_endpoint = f"{ollama_url}/api/generate"
+                api_endpoint = f"{ollama_url}/api/chat"  # Use chat endpoint instead of generate
+                
+                # Build messages array with full conversation history
+                messages = []
+                
+                # Add all previous messages from chat history with image on user messages
+                for msg in st.session_state.messages:
+                    if msg["role"] == "user":
+                        # Include image with every user message for better context
+                        messages.append({
+                            "role": msg["role"],
+                            "content": msg["content"],
+                            "images": [st.session_state.current_image_b64]
+                        })
+                    else:
+                        messages.append({
+                            "role": msg["role"],
+                            "content": msg["content"]
+                        })
+                
+                # Add the current user message with image
+                messages.append({
+                    "role": "user",
+                    "content": prompt,
+                    "images": [st.session_state.current_image_b64]
+                })
                 
                 payload = {
                     "model": model_name,
-                    "prompt": prompt,
-                    "images": [st.session_state.current_image_b64],
-                    "stream": True,  # Enable streaming
+                    "messages": messages,  # Send full conversation history
+                    "stream": True,
                     "options": {
                         "temperature": temperature
                     }
@@ -262,8 +286,8 @@ with col2:
                         if line:
                             try:
                                 chunk = json.loads(line)
-                                if "response" in chunk:
-                                    full_response += chunk["response"]
+                                if "message" in chunk and "content" in chunk["message"]:
+                                    full_response += chunk["message"]["content"]
                                     # Update the placeholder with current response
                                     message_placeholder.markdown(full_response + "▌")
                             except json.JSONDecodeError:
