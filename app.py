@@ -164,10 +164,37 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.header("Upload Image")
+    
+    # Add custom CSS for better drag and drop visibility
+    st.markdown("""
+        <style>
+        [data-testid="stFileUploader"] {
+            border: 3px dashed #4CAF50;
+            border-radius: 10px;
+            padding: 30px;
+            background-color: rgba(76, 175, 80, 0.05);
+            text-align: center;
+        }
+        [data-testid="stFileUploader"]:hover {
+            border-color: #45a049;
+            background-color: rgba(76, 175, 80, 0.1);
+        }
+        [data-testid="stFileUploader"] section {
+            padding: 20px;
+        }
+        [data-testid="stFileUploader"] section > div {
+            font-size: 1.1em;
+            color: #4CAF50;
+            font-weight: bold;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
     uploaded_file = st.file_uploader(
-        "Choose an image file",
+        "Drag and drop an image here, or click to browse",
         type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
-        help="Upload an image to analyze"
+        help="Upload an image to analyze",
+        label_visibility="collapsed"
     )
     
     if uploaded_file is not None:
@@ -187,8 +214,8 @@ with col1:
 with col2:
     st.header("Chat")
     
-    # Display chat history
-    chat_container = st.container(height=400)
+    # Display chat history with full height
+    chat_container = st.container(height=800)
     with chat_container:
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
