@@ -207,47 +207,59 @@ with col2:
                 with st.chat_message("user"):
                     st.markdown(prompt)
             
-            # Call Ollama API
-            with st.spinner("Analyzing image..."):
-                try:
-                    api_endpoint = f"{ollama_url}/api/generate"
-                    
-                    payload = {
-                        "model": model_name,
-                        "prompt": prompt,
-                        "images": [st.session_state.current_image_b64],
-                        "stream": False,
-                        "options": {
-                            "temperature": temperature
-                        }
+            # Call Ollama API with streaming
+            try:
+                api_endpoint = f"{ollama_url}/api/generate"
+                
+                payload = {
+                    "model": model_name,
+                    "prompt": prompt,
+                    "images": [st.session_state.current_image_b64],
+                    "stream": True,  # Enable streaming
+                    "options": {
+                        "temperature": temperature
                     }
+                }
+                
+                # Create placeholder for streaming response
+                with chat_container:
+                    with st.chat_message("assistant"):
+                        message_placeholder = st.empty()
+                
+                # Stream the response
+                full_response = ""
+                response = requests.post(api_endpoint, json=payload, stream=True, timeout=120)
+                
+                if response.status_code == 200:
+                    for line in response.iter_lines():
+                        if line:
+                            try:
+                                chunk = json.loads(line)
+                                if "response" in chunk:
+                                    full_response += chunk["response"]
+                                    # Update the placeholder with current response
+                                    message_placeholder.markdown(full_response + "▌")
+                            except json.JSONDecodeError:
+                                continue
                     
-                    response = requests.post(api_endpoint, json=payload, timeout=120)
+                    # Final update without cursor
+                    message_placeholder.markdown(full_response)
                     
-                    if response.status_code == 200:
-                        result = response.json()
-                        assistant_response = result.get("response", "No response received")
-                        
-                        # Add assistant response to chat history
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": assistant_response
-                        })
-                        
-                        # Display assistant response
-                        with chat_container:
-                            with st.chat_message("assistant"):
-                                st.markdown(assistant_response)
-                    else:
-                        error_msg = f"Error: {response.status_code} - {response.text}"
-                        st.error(error_msg)
-                        
-                except requests.exceptions.ConnectionError:
-                    st.error("❌ Could not connect to Ollama. Make sure it's running on " + ollama_url)
-                except requests.exceptions.Timeout:
-                    st.error("⏱️ Request timed out. The model might be taking too long to respond.")
-                except Exception as e:
-                    st.error(f"An error occurred: {str(e)}")
+                    # Add complete response to chat history
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": full_response
+                    })
+                else:
+                    error_msg = f"Error: {response.status_code} - {response.text}"
+                    st.error(error_msg)
+                    
+            except requests.exceptions.ConnectionError:
+                st.error("❌ Could not connect to Ollama. Make sure it's running on " + ollama_url)
+            except requests.exceptions.Timeout:
+                st.error("⏱️ Request timed out. The model might be taking too long to respond.")
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
 
 # Clear chat button
 if st.session_state.messages:
