@@ -300,27 +300,42 @@ with col2:
                 # Build messages array with full conversation history
                 messages = []
                 
-                # Add all previous messages from chat history with image on user messages
-                for msg in st.session_state.messages:
+                # Add all previous messages from chat history
+                # Only include image with the FIRST user message to avoid redundant encoding
+                for i, msg in enumerate(st.session_state.messages):
                     if msg["role"] == "user":
-                        # Include image with every user message for better context
-                        messages.append({
-                            "role": msg["role"],
-                            "content": msg["content"],
-                            "images": [st.session_state.current_image_b64]
-                        })
+                        if i == 0:
+                            # First message: include image
+                            messages.append({
+                                "role": msg["role"],
+                                "content": msg["content"],
+                                "images": [st.session_state.current_image_b64]
+                            })
+                        else:
+                            # Subsequent messages: text only (image already in context)
+                            messages.append({
+                                "role": msg["role"],
+                                "content": msg["content"]
+                            })
                     else:
                         messages.append({
                             "role": msg["role"],
                             "content": msg["content"]
                         })
                 
-                # Add the current user message with image
-                messages.append({
-                    "role": "user",
-                    "content": prompt,
-                    "images": [st.session_state.current_image_b64]
-                })
+                # Add the current user message
+                # Only include image if this is the first message in the conversation
+                if len(st.session_state.messages) == 0:
+                    messages.append({
+                        "role": "user",
+                        "content": prompt,
+                        "images": [st.session_state.current_image_b64]
+                    })
+                else:
+                    messages.append({
+                        "role": "user",
+                        "content": prompt
+                    })
                 
                 payload = {
                     "model": model_name,
@@ -457,14 +472,23 @@ with tab2:
                 api_endpoint = f"{ollama_url}/api/chat"
                 
                 # Build messages for dual mode
+                # Only include image with the FIRST user message to avoid redundant encoding
                 messages_dual = []
-                for msg in st.session_state.messages_dual:
+                for i, msg in enumerate(st.session_state.messages_dual):
                     if msg["role"] == "user":
-                        messages_dual.append({
-                            "role": msg["role"],
-                            "content": msg["content"],
-                            "images": [st.session_state.combined_image_b64]
-                        })
+                        if i == 0:
+                            # First message: include combined image
+                            messages_dual.append({
+                                "role": msg["role"],
+                                "content": msg["content"],
+                                "images": [st.session_state.combined_image_b64]
+                            })
+                        else:
+                            # Subsequent messages: text only (image already in context)
+                            messages_dual.append({
+                                "role": msg["role"],
+                                "content": msg["content"]
+                            })
                     else:
                         messages_dual.append({
                             "role": msg["role"],
@@ -472,11 +496,18 @@ with tab2:
                         })
                 
                 # Add current message
-                messages_dual.append({
-                    "role": "user",
-                    "content": prompt_dual,
-                    "images": [st.session_state.combined_image_b64]
-                })
+                # Only include image if this is the first message in the conversation
+                if len(st.session_state.messages_dual) == 0:
+                    messages_dual.append({
+                        "role": "user",
+                        "content": prompt_dual,
+                        "images": [st.session_state.combined_image_b64]
+                    })
+                else:
+                    messages_dual.append({
+                        "role": "user",
+                        "content": prompt_dual
+                    })
                 
                 payload = {
                     "model": model_name,
