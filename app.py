@@ -37,6 +37,55 @@ def cleanup_ollama_models():
 # Register cleanup function
 atexit.register(cleanup_ollama_models)
 
+# Function to combine three images side by side
+def combine_three_images_side_by_side(image1_bytes, image2_bytes, image3_bytes):
+    """Combine three images horizontally into one composite image"""
+    try:
+        # Open images
+        img1 = Image.open(io.BytesIO(image1_bytes))
+        img2 = Image.open(io.BytesIO(image2_bytes))
+        img3 = Image.open(io.BytesIO(image3_bytes))
+        
+        # Convert to RGB if needed
+        if img1.mode != 'RGB':
+            img1 = img1.convert('RGB')
+        if img2.mode != 'RGB':
+            img2 = img2.convert('RGB')
+        if img3.mode != 'RGB':
+            img3 = img3.convert('RGB')
+        
+        # Resize images to same height (use smallest height)
+        target_height = min(img1.height, img2.height, img3.height)
+        
+        # Calculate new widths maintaining aspect ratio
+        img1_new_width = int(img1.width * (target_height / img1.height))
+        img2_new_width = int(img2.width * (target_height / img2.height))
+        img3_new_width = int(img3.width * (target_height / img3.height))
+        
+        # Resize images
+        img1_resized = img1.resize((img1_new_width, target_height), Image.LANCZOS)
+        img2_resized = img2.resize((img2_new_width, target_height), Image.LANCZOS)
+        img3_resized = img3.resize((img3_new_width, target_height), Image.LANCZOS)
+        
+        # Create new combined image
+        combined_width = img1_resized.width + img2_resized.width + img3_resized.width
+        combined_image = Image.new('RGB', (combined_width, target_height))
+        
+        # Paste images side by side
+        combined_image.paste(img1_resized, (0, 0))
+        combined_image.paste(img2_resized, (img1_resized.width, 0))
+        combined_image.paste(img3_resized, (img1_resized.width + img2_resized.width, 0))
+        
+        # Convert to bytes
+        output = io.BytesIO()
+        combined_image.save(output, format='JPEG', quality=95)
+        output.seek(0)
+        
+        return output.getvalue(), combined_image
+    except Exception as e:
+        st.error(f"Error combining images: {str(e)}")
+        return None, None
+
 # Function to combine two images side by side
 def combine_images_side_by_side(image1_bytes, image2_bytes):
     """Combine two images horizontally into one composite image"""
@@ -215,8 +264,16 @@ if "combined_image_b64" not in st.session_state:
 if "combined_image_pil" not in st.session_state:
     st.session_state.combined_image_pil = None
 
+# Initialize session state for triple image mode
+if "messages_triple" not in st.session_state:
+    st.session_state.messages_triple = []
+if "combined_image_triple_b64" not in st.session_state:
+    st.session_state.combined_image_triple_b64 = None
+if "combined_image_triple_pil" not in st.session_state:
+    st.session_state.combined_image_triple_pil = None
+
 # Create tabs
-tab1, tab2 = st.tabs(["📷 Single Image", "🖼️🖼️ Dual Image Compare"])
+tab1, tab2, tab3 = st.tabs(["📷 Single Image", "🖼️🖼️ Dual Image Compare", "🖼️🖼️🖼️ Triple Image Compare"])
 
 # TAB 1: Single Image Analysis
 with tab1:
@@ -581,6 +638,208 @@ with tab2:
             - "Describe what you see in each image"
             - "What's similar and what's different?"
             - "Which image is more professional looking?"
+            """)
+
+# TAB 3: Triple Image Analysis
+with tab3:
+    st.markdown("### Compare Three Images Side-by-Side")
+    st.caption("Upload three images and they will be combined into one for comparison analysis")
+    
+    # Upload section
+    upload_col1, upload_col2, upload_col3 = st.columns([1, 1, 1])
+    
+    with upload_col1:
+        st.subheader("Image 1")
+        uploaded_file_t1 = st.file_uploader(
+            "Upload first image",
+            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
+            help="First image for comparison",
+            key="triple_image1"
+        )
+        if uploaded_file_t1:
+            st.image(uploaded_file_t1, caption="Image 1", use_container_width=True)
+    
+    with upload_col2:
+        st.subheader("Image 2")
+        uploaded_file_t2 = st.file_uploader(
+            "Upload second image",
+            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
+            help="Second image for comparison",
+            key="triple_image2"
+        )
+        if uploaded_file_t2:
+            st.image(uploaded_file_t2, caption="Image 2", use_container_width=True)
+    
+    with upload_col3:
+        st.subheader("Image 3")
+        uploaded_file_t3 = st.file_uploader(
+            "Upload third image",
+            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
+            help="Third image for comparison",
+            key="triple_image3"
+        )
+        if uploaded_file_t3:
+            st.image(uploaded_file_t3, caption="Image 3", use_container_width=True)
+    
+    # Process and combine images
+    if uploaded_file_t1 and uploaded_file_t2 and uploaded_file_t3:
+        # Read image bytes
+        image1_bytes = uploaded_file_t1.read()
+        image2_bytes = uploaded_file_t2.read()
+        image3_bytes = uploaded_file_t3.read()
+        uploaded_file_t1.seek(0)
+        uploaded_file_t2.seek(0)
+        uploaded_file_t3.seek(0)
+        
+        # Combine images
+        combined_bytes_triple, combined_img_triple = combine_three_images_side_by_side(image1_bytes, image2_bytes, image3_bytes)
+        
+        if combined_bytes_triple:
+            # Convert to base64
+            st.session_state.combined_image_triple_b64 = base64.b64encode(combined_bytes_triple).decode('utf-8')
+            st.session_state.combined_image_triple_pil = combined_img_triple
+            st.success("✅ Images combined! Ask questions about all three images below.")
+    
+    # Chat interface with combined image side-by-side
+    st.divider()
+    
+    # Create two columns: one for combined image, one for chat
+    triple_col1, triple_col2 = st.columns([1, 1])
+    
+    with triple_col1:
+        st.subheader("Combined View")
+        if st.session_state.get("combined_image_triple_pil"):
+            st.image(st.session_state.combined_image_triple_pil, caption="Combined Side-by-Side", use_container_width=True)
+        else:
+            st.info("Upload all three images to see combined view")
+    
+    with triple_col2:
+        st.subheader("Chat About All Three Images")
+        
+        # Display chat history
+        chat_container_triple = st.container(height=800)
+        with chat_container_triple:
+            for message in st.session_state.messages_triple:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+        
+        # Chat input
+        if prompt_triple := st.chat_input("Ask about all three images (e.g., 'What are the differences?')", key="triple_chat"):
+            if not st.session_state.combined_image_triple_b64:
+                st.error("Please upload all three images first!")
+            else:
+                # Add user message to chat history
+                st.session_state.messages_triple.append({"role": "user", "content": prompt_triple})
+                
+                # Display user message
+                with chat_container_triple:
+                    with st.chat_message("user"):
+                        st.markdown(prompt_triple)
+                
+                # Call Ollama API with combined image
+                try:
+                    api_endpoint = f"{ollama_url}/api/chat"
+                    
+                    # Build messages for triple mode
+                    # Only include image with the FIRST user message to avoid redundant encoding
+                    messages_triple = []
+                    for i, msg in enumerate(st.session_state.messages_triple):
+                        if msg["role"] == "user":
+                            if i == 0:
+                                # First message: include combined image
+                                messages_triple.append({
+                                    "role": msg["role"],
+                                    "content": msg["content"],
+                                    "images": [st.session_state.combined_image_triple_b64]
+                                })
+                            else:
+                                # Subsequent messages: text only (image already in context)
+                                messages_triple.append({
+                                    "role": msg["role"],
+                                    "content": msg["content"]
+                                })
+                        else:
+                            messages_triple.append({
+                                "role": msg["role"],
+                                "content": msg["content"]
+                            })
+                    
+                    # Add current message
+                    # Only include image if this is the first message in the conversation
+                    if len(st.session_state.messages_triple) == 0:
+                        messages_triple.append({
+                            "role": "user",
+                            "content": prompt_triple,
+                            "images": [st.session_state.combined_image_triple_b64]
+                        })
+                    else:
+                        messages_triple.append({
+                            "role": "user",
+                            "content": prompt_triple
+                        })
+                    
+                    payload = {
+                        "model": model_name,
+                        "messages": messages_triple,
+                        "stream": True,
+                        "options": {
+                            "temperature": temperature
+                        }
+                    }
+                    
+                    # Create placeholder for streaming response
+                    with chat_container_triple:
+                        with st.chat_message("assistant"):
+                            message_placeholder_triple = st.empty()
+                    
+                    # Stream the response
+                    full_response_triple = ""
+                    response = requests.post(api_endpoint, json=payload, stream=True, timeout=120)
+                    
+                    if response.status_code == 200:
+                        for line in response.iter_lines():
+                            if line:
+                                try:
+                                    chunk = json.loads(line)
+                                    if "message" in chunk and "content" in chunk["message"]:
+                                        full_response_triple += chunk["message"]["content"]
+                                        message_placeholder_triple.markdown(full_response_triple + "▌")
+                                except json.JSONDecodeError:
+                                    continue
+                        
+                        # Final update
+                        message_placeholder_triple.markdown(full_response_triple)
+                        
+                        # Add to chat history
+                        st.session_state.messages_triple.append({
+                            "role": "assistant",
+                            "content": full_response_triple
+                        })
+                    else:
+                        st.error(f"Error: {response.status_code} - {response.text}")
+                        
+                except requests.exceptions.ConnectionError:
+                    st.error("❌ Could not connect to Ollama. Make sure it's running on " + ollama_url)
+                except requests.exceptions.Timeout:
+                    st.error("⏱️ Request timed out.")
+                except Exception as e:
+                    st.error(f"An error occurred: {str(e)}")
+        
+        # Clear triple chat button
+        if st.session_state.messages_triple:
+            if st.button("🗑️ Clear Triple Chat History", key="clear_triple"):
+                st.session_state.messages_triple = []
+                st.rerun()
+        
+        # Example questions
+        with st.expander("💡 Example Questions for Triple Images"):
+            st.markdown("""
+            - "What are the main differences between these three images?"
+            - "Compare and contrast all three images"
+            - "Which image has the best quality?"
+            - "Describe what you see in each of the three images"
+            - "What's common across all three images?"
+            - "Rank these three images by professionalism"
             """)
 
 # Clear chat button
