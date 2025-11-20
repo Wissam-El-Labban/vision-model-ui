@@ -212,6 +212,8 @@ if "messages_dual" not in st.session_state:
     st.session_state.messages_dual = []
 if "combined_image_b64" not in st.session_state:
     st.session_state.combined_image_b64 = None
+if "combined_image_pil" not in st.session_state:
+    st.session_state.combined_image_pil = None
 
 # Create tabs
 tab1, tab2 = st.tabs(["📷 Single Image", "🖼️🖼️ Dual Image Compare"])
@@ -397,9 +399,10 @@ with tab2:
     st.markdown("### Compare Two Images Side-by-Side")
     st.caption("Upload two images and they will be combined into one for comparison analysis")
     
-    col1, col2, col3 = st.columns([1, 1, 1])
+    # Upload section
+    upload_col1, upload_col2 = st.columns([1, 1])
     
-    with col1:
+    with upload_col1:
         st.subheader("Image 1")
         uploaded_file1 = st.file_uploader(
             "Upload first image",
@@ -410,7 +413,7 @@ with tab2:
         if uploaded_file1:
             st.image(uploaded_file1, caption="Image 1", use_container_width=True)
     
-    with col2:
+    with upload_col2:
         st.subheader("Image 2")
         uploaded_file2 = st.file_uploader(
             "Upload second image",
@@ -421,157 +424,164 @@ with tab2:
         if uploaded_file2:
             st.image(uploaded_file2, caption="Image 2", use_container_width=True)
     
-    with col3:
+    # Process and combine images
+    if uploaded_file1 and uploaded_file2:
+        # Read image bytes
+        image1_bytes = uploaded_file1.read()
+        image2_bytes = uploaded_file2.read()
+        uploaded_file1.seek(0)
+        uploaded_file2.seek(0)
+        
+        # Combine images
+        combined_bytes, combined_img = combine_images_side_by_side(image1_bytes, image2_bytes)
+        
+        if combined_bytes:
+            # Convert to base64
+            st.session_state.combined_image_b64 = base64.b64encode(combined_bytes).decode('utf-8')
+            st.session_state.combined_image_pil = combined_img
+            st.success("✅ Images combined! Ask questions about both images below.")
+    
+    # Chat interface with combined image side-by-side
+    st.divider()
+    
+    # Create two columns: one for combined image, one for chat
+    dual_col1, dual_col2 = st.columns([1, 1])
+    
+    with dual_col1:
         st.subheader("Combined View")
-        if uploaded_file1 and uploaded_file2:
-            # Read image bytes
-            image1_bytes = uploaded_file1.read()
-            image2_bytes = uploaded_file2.read()
-            uploaded_file1.seek(0)
-            uploaded_file2.seek(0)
-            
-            # Combine images
-            combined_bytes, combined_img = combine_images_side_by_side(image1_bytes, image2_bytes)
-            
-            if combined_bytes:
-                # Display combined image
-                st.image(combined_img, caption="Combined Side-by-Side", use_container_width=True)
-                
-                # Convert to base64
-                st.session_state.combined_image_b64 = base64.b64encode(combined_bytes).decode('utf-8')
-                st.success("✅ Images combined! Ask questions about both images below.")
+        if st.session_state.get("combined_image_pil"):
+            st.image(st.session_state.combined_image_pil, caption="Combined Side-by-Side", use_container_width=True)
         else:
             st.info("Upload both images to see combined view")
     
-    # Chat interface for dual image
-    st.divider()
-    st.subheader("Chat About Both Images")
-    
-    # Display chat history
-    chat_container_dual = st.container(height=600)
-    with chat_container_dual:
-        for message in st.session_state.messages_dual:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-    
-    # Chat input
-    if prompt_dual := st.chat_input("Ask about both images (e.g., 'What are the differences?')", key="dual_chat"):
-        if not st.session_state.combined_image_b64:
-            st.error("Please upload both images first!")
-        else:
-            # Add user message to chat history
-            st.session_state.messages_dual.append({"role": "user", "content": prompt_dual})
-            
-            # Display user message
-            with chat_container_dual:
-                with st.chat_message("user"):
-                    st.markdown(prompt_dual)
-            
-            # Call Ollama API with combined image
-            try:
-                api_endpoint = f"{ollama_url}/api/chat"
+    with dual_col2:
+        st.subheader("Chat About Both Images")
+        
+        # Display chat history
+        chat_container_dual = st.container(height=800)
+        with chat_container_dual:
+            for message in st.session_state.messages_dual:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+        
+        # Chat input
+        if prompt_dual := st.chat_input("Ask about both images (e.g., 'What are the differences?')", key="dual_chat"):
+            if not st.session_state.combined_image_b64:
+                st.error("Please upload both images first!")
+            else:
+                # Add user message to chat history
+                st.session_state.messages_dual.append({"role": "user", "content": prompt_dual})
                 
-                # Build messages for dual mode
-                # Only include image with the FIRST user message to avoid redundant encoding
-                messages_dual = []
-                for i, msg in enumerate(st.session_state.messages_dual):
-                    if msg["role"] == "user":
-                        if i == 0:
-                            # First message: include combined image
-                            messages_dual.append({
-                                "role": msg["role"],
-                                "content": msg["content"],
-                                "images": [st.session_state.combined_image_b64]
-                            })
+                # Display user message
+                with chat_container_dual:
+                    with st.chat_message("user"):
+                        st.markdown(prompt_dual)
+                
+                # Call Ollama API with combined image
+                try:
+                    api_endpoint = f"{ollama_url}/api/chat"
+                    
+                    # Build messages for dual mode
+                    # Only include image with the FIRST user message to avoid redundant encoding
+                    messages_dual = []
+                    for i, msg in enumerate(st.session_state.messages_dual):
+                        if msg["role"] == "user":
+                            if i == 0:
+                                # First message: include combined image
+                                messages_dual.append({
+                                    "role": msg["role"],
+                                    "content": msg["content"],
+                                    "images": [st.session_state.combined_image_b64]
+                                })
+                            else:
+                                # Subsequent messages: text only (image already in context)
+                                messages_dual.append({
+                                    "role": msg["role"],
+                                    "content": msg["content"]
+                                })
                         else:
-                            # Subsequent messages: text only (image already in context)
                             messages_dual.append({
                                 "role": msg["role"],
                                 "content": msg["content"]
                             })
+                    
+                    # Add current message
+                    # Only include image if this is the first message in the conversation
+                    if len(st.session_state.messages_dual) == 0:
+                        messages_dual.append({
+                            "role": "user",
+                            "content": prompt_dual,
+                            "images": [st.session_state.combined_image_b64]
+                        })
                     else:
                         messages_dual.append({
-                            "role": msg["role"],
-                            "content": msg["content"]
+                            "role": "user",
+                            "content": prompt_dual
                         })
-                
-                # Add current message
-                # Only include image if this is the first message in the conversation
-                if len(st.session_state.messages_dual) == 0:
-                    messages_dual.append({
-                        "role": "user",
-                        "content": prompt_dual,
-                        "images": [st.session_state.combined_image_b64]
-                    })
-                else:
-                    messages_dual.append({
-                        "role": "user",
-                        "content": prompt_dual
-                    })
-                
-                payload = {
-                    "model": model_name,
-                    "messages": messages_dual,
-                    "stream": True,
-                    "options": {
-                        "temperature": temperature
+                    
+                    payload = {
+                        "model": model_name,
+                        "messages": messages_dual,
+                        "stream": True,
+                        "options": {
+                            "temperature": temperature
+                        }
                     }
-                }
-                
-                # Create placeholder for streaming response
-                with chat_container_dual:
-                    with st.chat_message("assistant"):
-                        message_placeholder_dual = st.empty()
-                
-                # Stream the response
-                full_response_dual = ""
-                response = requests.post(api_endpoint, json=payload, stream=True, timeout=120)
-                
-                if response.status_code == 200:
-                    for line in response.iter_lines():
-                        if line:
-                            try:
-                                chunk = json.loads(line)
-                                if "message" in chunk and "content" in chunk["message"]:
-                                    full_response_dual += chunk["message"]["content"]
-                                    message_placeholder_dual.markdown(full_response_dual + "▌")
-                            except json.JSONDecodeError:
-                                continue
                     
-                    # Final update
-                    message_placeholder_dual.markdown(full_response_dual)
+                    # Create placeholder for streaming response
+                    with chat_container_dual:
+                        with st.chat_message("assistant"):
+                            message_placeholder_dual = st.empty()
                     
-                    # Add to chat history
-                    st.session_state.messages_dual.append({
-                        "role": "assistant",
-                        "content": full_response_dual
-                    })
-                else:
-                    st.error(f"Error: {response.status_code} - {response.text}")
+                    # Stream the response
+                    full_response_dual = ""
+                    response = requests.post(api_endpoint, json=payload, stream=True, timeout=120)
                     
-            except requests.exceptions.ConnectionError:
-                st.error("❌ Could not connect to Ollama. Make sure it's running on " + ollama_url)
-            except requests.exceptions.Timeout:
-                st.error("⏱️ Request timed out.")
-            except Exception as e:
-                st.error(f"An error occurred: {str(e)}")
-    
-    # Clear dual chat button
-    if st.session_state.messages_dual:
-        if st.button("🗑️ Clear Dual Chat History", key="clear_dual"):
-            st.session_state.messages_dual = []
-            st.rerun()
-    
-    # Example questions
-    with st.expander("💡 Example Questions for Dual Images"):
-        st.markdown("""
-        - "What are the main differences between these two images?"
-        - "Compare and contrast the images on the left and right"
-        - "Which image has better quality?"
-        - "Describe what you see in each image"
-        - "What's similar and what's different?"
-        - "Which image is more professional looking?"
-        """)
+                    if response.status_code == 200:
+                        for line in response.iter_lines():
+                            if line:
+                                try:
+                                    chunk = json.loads(line)
+                                    if "message" in chunk and "content" in chunk["message"]:
+                                        full_response_dual += chunk["message"]["content"]
+                                        message_placeholder_dual.markdown(full_response_dual + "▌")
+                                except json.JSONDecodeError:
+                                    continue
+                        
+                        # Final update
+                        message_placeholder_dual.markdown(full_response_dual)
+                        
+                        # Add to chat history
+                        st.session_state.messages_dual.append({
+                            "role": "assistant",
+                            "content": full_response_dual
+                        })
+                    else:
+                        st.error(f"Error: {response.status_code} - {response.text}")
+                        
+                except requests.exceptions.ConnectionError:
+                    st.error("❌ Could not connect to Ollama. Make sure it's running on " + ollama_url)
+                except requests.exceptions.Timeout:
+                    st.error("⏱️ Request timed out.")
+                except Exception as e:
+                    st.error(f"An error occurred: {str(e)}")
+        
+        # Clear dual chat button
+        if st.session_state.messages_dual:
+            if st.button("🗑️ Clear Dual Chat History", key="clear_dual"):
+                st.session_state.messages_dual = []
+                st.rerun()
+        
+        # Example questions
+        with st.expander("💡 Example Questions for Dual Images"):
+            st.markdown("""
+            - "What are the main differences between these two images?"
+            - "Compare and contrast the images on the left and right"
+            - "Which image has better quality?"
+            - "Describe what you see in each image"
+            - "What's similar and what's different?"
+            - "Which image is more professional looking?"
+            """)
 
 # Clear chat button
 if st.session_state.messages:
