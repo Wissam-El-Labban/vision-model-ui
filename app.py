@@ -132,6 +132,13 @@ def combine_images_side_by_side(image1_bytes, image2_bytes):
 # Register cleanup function
 atexit.register(cleanup_ollama_models)
 
+# Helper function to encode images to base64
+def encode_image_to_base64(image_file):
+    """Convert uploaded image to base64"""
+    image_bytes = image_file.read()
+    image_file.seek(0)
+    return base64.b64encode(image_bytes).decode('utf-8')
+
 # Page configuration
 st.set_page_config(
     page_title="Vision Model Image Analysis",
@@ -255,6 +262,8 @@ if "current_image" not in st.session_state:
     st.session_state.current_image = None
 if "current_image_b64" not in st.session_state:
     st.session_state.current_image_b64 = None
+if "pending_attachment" not in st.session_state:
+    st.session_state.pending_attachment = None
 
 # Initialize session state for dual image mode
 if "messages_dual" not in st.session_state:
@@ -332,25 +341,60 @@ with col1:
 with col2:
     st.header("Chat")
     
-    # Display chat history with full height
-    chat_container = st.container(height=800)
+    # Display chat history
+    chat_container = st.container(height=600)
     with chat_container:
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
+                # Show attached image if it exists in message
+                if "attached_image" in message and message["attached_image"]:
+                    st.image(message["attached_image"], width=200, caption="Attached image")
+    
+    # Optional image attachment with compact layout
+    with st.expander("📎 Attach additional image (optional)", expanded=False):
+        additional_image = st.file_uploader(
+            "Add context image",
+            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
+            key="additional_image_single",
+            help="Upload an additional image to include with your next question"
+        )
+        if additional_image:
+            st.session_state.pending_attachment = additional_image
+            st.image(additional_image, width=200, caption="Will be attached to next message")
+        elif st.session_state.pending_attachment is None and "additional_image_single" in st.session_state:
+            # User cleared the uploader
+            st.session_state.pending_attachment = None
+    
+    # Use pending attachment if available
+    attachment_to_use = st.session_state.pending_attachment
     
     # Chat input
     if prompt := st.chat_input("Ask a question about the image..."):
         if not st.session_state.current_image_b64:
             st.error("Please upload an image first!")
         else:
+            # Encode additional image if provided
+            additional_image_b64 = None
+            if attachment_to_use:
+                additional_image_b64 = encode_image_to_base64(attachment_to_use)
+            
             # Add user message to chat history
-            st.session_state.messages.append({"role": "user", "content": prompt})
+            st.session_state.messages.append({
+                "role": "user",
+                "content": prompt,
+                "attached_image": attachment_to_use if attachment_to_use else None
+            })
+            
+            # Clear the pending attachment after sending
+            st.session_state.pending_attachment = None
             
             # Display user message
             with chat_container:
                 with st.chat_message("user"):
                     st.markdown(prompt)
+                    if attachment_to_use:
+                        st.image(attachment_to_use, width=200, caption="Attached image")
             
             # Call Ollama API with streaming and conversation memory
             try:
@@ -363,38 +407,56 @@ with col2:
                 # Only include image with the FIRST user message to avoid redundant encoding
                 for i, msg in enumerate(st.session_state.messages):
                     if msg["role"] == "user":
+                        # Prepare the user message
+                        user_msg = {
+                            "role": msg["role"],
+                            "content": msg["content"]
+                        }
+                        
+                        # Check if THIS message should have images
                         if i == 0:
-                            # First message: include image
-                            messages.append({
-                                "role": msg["role"],
-                                "content": msg["content"],
-                                "images": [st.session_state.current_image_b64]
-                            })
-                        else:
-                            # Subsequent messages: text only (image already in context)
-                            messages.append({
-                                "role": msg["role"],
-                                "content": msg["content"]
-                            })
+                            # First message: always include primary image
+                            user_msg["images"] = [st.session_state.current_image_b64]
+                        elif "attached_image" in msg and msg["attached_image"] is not None:
+                            # This message had an attachment - re-encode and include it
+                            try:
+                                attached_b64 = encode_image_to_base64(msg["attached_image"])
+                                user_msg["images"] = [
+                                    st.session_state.current_image_b64,  # Keep primary for context
+                                    attached_b64  # Include the attachment from this message
+                                ]
+                            except:
+                                # If re-encoding fails, just include primary
+                                pass
+                        # else: No images for this message (text-only follow-up)
+                        
+                        messages.append(user_msg)
                     else:
                         messages.append({
                             "role": msg["role"],
                             "content": msg["content"]
                         })
                 
-                # Add the current user message
-                # Only include image if this is the first message in the conversation
-                if len(st.session_state.messages) == 0:
-                    messages.append({
-                        "role": "user",
-                        "content": prompt,
-                        "images": [st.session_state.current_image_b64]
-                    })
-                else:
-                    messages.append({
-                        "role": "user",
-                        "content": prompt
-                    })
+                # Add the current user message with images
+                current_message = {
+                    "role": "user",
+                    "content": prompt
+                }
+                
+                # Handle images for current message
+                if len(st.session_state.messages) == 1:  # First message (just added)
+                    # First message: use primary image
+                    current_message["images"] = [st.session_state.current_image_b64]
+                elif additional_image_b64:
+                    # Follow-up message with additional image attached
+                    # Include BOTH primary and additional images for context
+                    current_message["images"] = [
+                        st.session_state.current_image_b64,  # Keep primary for context
+                        additional_image_b64  # Add new image
+                    ]
+                # If no additional image on follow-up, no images field (uses context)
+                
+                messages.append(current_message)
                 
                 payload = {
                     "model": model_name,
@@ -434,6 +496,9 @@ with col2:
                         "role": "assistant",
                         "content": full_response
                     })
+                    
+                    # Force rerun to clear the file uploader
+                    st.rerun()
                 else:
                     error_msg = f"Error: {response.status_code} - {response.text}"
                     st.error(error_msg)
