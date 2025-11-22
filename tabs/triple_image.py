@@ -1,7 +1,8 @@
 import streamlit as st
 import requests
 import json
-from utils import encode_image_to_base64, combine_three_images_side_by_side
+import base64
+from utils import combine_three_images_side_by_side
 
 class TripleImageTab:
     def __init__(self, ollama_url, model_name, temperature):
@@ -72,9 +73,16 @@ class TripleImageTab:
         )
         
         if image1 and image2 and image3:
-            combined_pil = combine_three_images_side_by_side(image1, image2, image3)
+            image1_bytes = image1.read()
+            image2_bytes = image2.read()
+            image3_bytes = image3.read()
+            image1.seek(0)
+            image2.seek(0)
+            image3.seek(0)
+            
+            combined_bytes, combined_pil = combine_three_images_side_by_side(image1_bytes, image2_bytes, image3_bytes)
             st.session_state.combined_image_triple_pil = combined_pil
-            st.session_state.combined_image_triple_b64 = encode_image_to_base64(combined_pil)
+            st.session_state.combined_image_triple_b64 = base64.b64encode(combined_bytes).decode('utf-8')
             
             st.markdown("### Combined View")
             st.image(combined_pil, caption="Three Images Side by Side", use_container_width=True)

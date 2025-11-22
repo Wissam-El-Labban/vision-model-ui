@@ -1,7 +1,8 @@
 import streamlit as st
 import requests
 import json
-from utils import encode_image_to_base64, combine_images_side_by_side
+import base64
+from utils import combine_images_side_by_side
 
 class DualImageTab:
     def __init__(self, ollama_url, model_name, temperature):
@@ -64,9 +65,14 @@ class DualImageTab:
         )
         
         if image1 and image2:
-            combined_pil = combine_images_side_by_side(image1, image2)
+            image1_bytes = image1.read()
+            image2_bytes = image2.read()
+            image1.seek(0)
+            image2.seek(0)
+            
+            combined_bytes, combined_pil = combine_images_side_by_side(image1_bytes, image2_bytes)
             st.session_state.combined_image_pil = combined_pil
-            st.session_state.combined_image_b64 = encode_image_to_base64(combined_pil)
+            st.session_state.combined_image_b64 = base64.b64encode(combined_bytes).decode('utf-8')
             
             st.markdown("### Combined View")
             st.image(combined_pil, caption="Images Side by Side", use_container_width=True)
