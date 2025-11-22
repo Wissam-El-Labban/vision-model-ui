@@ -35,6 +35,8 @@ with st.sidebar:
             options=available_models,
             help="Select which vision model to use for analysis"
         )
+        # Display selected model
+        st.info(f"**Selected Model:** `{model_name}`")
     else:
         st.warning("⚠️ No vision models found. Make sure Ollama is running and you have vision models installed.")
         model_name = st.text_input(
@@ -42,6 +44,8 @@ with st.sidebar:
             value="llava:latest",
             help="Manually enter the model name"
         )
+        if model_name:
+            st.info(f"**Selected Model:** `{model_name}`")
     
     # Temperature setting
     st.markdown("### 🌡️ Temperature")

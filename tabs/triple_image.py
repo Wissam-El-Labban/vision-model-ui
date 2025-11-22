@@ -20,16 +20,20 @@ class TripleImageTab:
     
     def render(self):
         """Render the triple image tab"""
+        # Upload section at the top
+        self._render_upload_inputs()
+        
+        # Combined view and chat side by side
         col1, col2 = st.columns([1, 1])
         
         with col1:
-            self._render_upload_section()
+            self._render_combined_view()
         
         with col2:
             self._render_chat_section()
     
-    def _render_upload_section(self):
-        """Render the triple image upload section"""
+    def _render_upload_inputs(self):
+        """Render the image upload inputs at the top"""
         st.header("Upload Three Images")
         
         # Add custom CSS
@@ -48,29 +52,40 @@ class TripleImageTab:
             </style>
         """, unsafe_allow_html=True)
         
-        st.markdown("### First Image")
-        image1 = st.file_uploader(
-            "Upload first image",
-            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
-            key="triple_image1",
-            label_visibility="collapsed"
-        )
+        col1, col2, col3 = st.columns(3)
         
-        st.markdown("### Second Image")
-        image2 = st.file_uploader(
-            "Upload second image",
-            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
-            key="triple_image2",
-            label_visibility="collapsed"
-        )
+        with col1:
+            st.markdown("### First Image")
+            image1 = st.file_uploader(
+                "Upload first image",
+                type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
+                key="triple_image1",
+                label_visibility="collapsed"
+            )
+            if image1:
+                st.image(image1, caption="First Image", use_container_width=True)
         
-        st.markdown("### Third Image")
-        image3 = st.file_uploader(
-            "Upload third image",
-            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
-            key="triple_image3",
-            label_visibility="collapsed"
-        )
+        with col2:
+            st.markdown("### Second Image")
+            image2 = st.file_uploader(
+                "Upload second image",
+                type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
+                key="triple_image2",
+                label_visibility="collapsed"
+            )
+            if image2:
+                st.image(image2, caption="Second Image", use_container_width=True)
+        
+        with col3:
+            st.markdown("### Third Image")
+            image3 = st.file_uploader(
+                "Upload third image",
+                type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
+                key="triple_image3",
+                label_visibility="collapsed"
+            )
+            if image3:
+                st.image(image3, caption="Third Image", use_container_width=True)
         
         if image1 and image2 and image3:
             image1_bytes = image1.read()
@@ -83,12 +98,16 @@ class TripleImageTab:
             combined_bytes, combined_pil = combine_three_images_side_by_side(image1_bytes, image2_bytes, image3_bytes)
             st.session_state.combined_image_triple_pil = combined_pil
             st.session_state.combined_image_triple_b64 = base64.b64encode(combined_bytes).decode('utf-8')
-            
-            st.markdown("### Combined View")
-            st.image(combined_pil, caption="Three Images Side by Side", use_container_width=True)
-        elif st.session_state.combined_image_triple_pil:
-            st.markdown("### Combined View")
+        
+        st.markdown("---")
+    
+    def _render_combined_view(self):
+        """Render the combined image view"""
+        st.header("Combined View")
+        if st.session_state.combined_image_triple_pil:
             st.image(st.session_state.combined_image_triple_pil, caption="Three Images Side by Side", use_container_width=True)
+        else:
+            st.info("Upload all three images to see the combined view")
     
     def _render_chat_section(self):
         """Render the chat interface"""

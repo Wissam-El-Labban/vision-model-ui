@@ -20,16 +20,20 @@ class DualImageTab:
     
     def render(self):
         """Render the dual image tab"""
+        # Upload section at the top
+        self._render_upload_inputs()
+        
+        # Combined view and chat side by side
         col1, col2 = st.columns([1, 1])
         
         with col1:
-            self._render_upload_section()
+            self._render_combined_view()
         
         with col2:
             self._render_chat_section()
     
-    def _render_upload_section(self):
-        """Render the dual image upload section"""
+    def _render_upload_inputs(self):
+        """Render the image upload inputs at the top"""
         st.header("Upload Two Images")
         
         # Add custom CSS
@@ -48,21 +52,29 @@ class DualImageTab:
             </style>
         """, unsafe_allow_html=True)
         
-        st.markdown("### First Image")
-        image1 = st.file_uploader(
-            "Upload first image",
-            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
-            key="dual_image1",
-            label_visibility="collapsed"
-        )
+        col1, col2 = st.columns(2)
         
-        st.markdown("### Second Image")
-        image2 = st.file_uploader(
-            "Upload second image",
-            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
-            key="dual_image2",
-            label_visibility="collapsed"
-        )
+        with col1:
+            st.markdown("### First Image")
+            image1 = st.file_uploader(
+                "Upload first image",
+                type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
+                key="dual_image1",
+                label_visibility="collapsed"
+            )
+            if image1:
+                st.image(image1, caption="First Image", use_container_width=True)
+        
+        with col2:
+            st.markdown("### Second Image")
+            image2 = st.file_uploader(
+                "Upload second image",
+                type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
+                key="dual_image2",
+                label_visibility="collapsed"
+            )
+            if image2:
+                st.image(image2, caption="Second Image", use_container_width=True)
         
         if image1 and image2:
             image1_bytes = image1.read()
@@ -73,12 +85,16 @@ class DualImageTab:
             combined_bytes, combined_pil = combine_images_side_by_side(image1_bytes, image2_bytes)
             st.session_state.combined_image_pil = combined_pil
             st.session_state.combined_image_b64 = base64.b64encode(combined_bytes).decode('utf-8')
-            
-            st.markdown("### Combined View")
-            st.image(combined_pil, caption="Images Side by Side", use_container_width=True)
-        elif st.session_state.combined_image_pil:
-            st.markdown("### Combined View")
+        
+        st.markdown("---")
+    
+    def _render_combined_view(self):
+        """Render the combined image view"""
+        st.header("Combined View")
+        if st.session_state.combined_image_pil:
             st.image(st.session_state.combined_image_pil, caption="Images Side by Side", use_container_width=True)
+        else:
+            st.info("Upload both images to see the combined view")
     
     def _render_chat_section(self):
         """Render the chat interface"""
