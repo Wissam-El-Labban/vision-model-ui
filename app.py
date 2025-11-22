@@ -1,925 +1,147 @@
 import streamlit as st
 import requests
-import base64
-from pathlib import Path
-import json
-import atexit
-import signal
-import sys
-from PIL import Image
-import io
-
-# Function to unload all running Ollama models
-def cleanup_ollama_models():
-    """Unload all running Ollama models on exit"""
-    try:
-        ollama_url = st.session_state.get("ollama_url", "http://localhost:11434")
-        # Get list of running models
-        response = requests.get(f"{ollama_url}/api/ps", timeout=5)
-        if response.status_code == 200:
-            running_models = response.json().get("models", [])
-            # Unload each model
-            for model_info in running_models:
-                model_name = model_info.get("name", "")
-                if model_name:
-                    try:
-                        requests.post(
-                            f"{ollama_url}/api/generate",
-                            json={"model": model_name, "keep_alive": 0},
-                            timeout=5
-                        )
-                        print(f"Unloaded model: {model_name}")
-                    except:
-                        pass
-    except:
-        pass
-
-# Register cleanup function
-atexit.register(cleanup_ollama_models)
-
-# Function to combine three images side by side
-def combine_three_images_side_by_side(image1_bytes, image2_bytes, image3_bytes):
-    """Combine three images horizontally into one composite image"""
-    try:
-        # Open images
-        img1 = Image.open(io.BytesIO(image1_bytes))
-        img2 = Image.open(io.BytesIO(image2_bytes))
-        img3 = Image.open(io.BytesIO(image3_bytes))
-        
-        # Convert to RGB if needed
-        if img1.mode != 'RGB':
-            img1 = img1.convert('RGB')
-        if img2.mode != 'RGB':
-            img2 = img2.convert('RGB')
-        if img3.mode != 'RGB':
-            img3 = img3.convert('RGB')
-        
-        # Resize images to same height (use smallest height)
-        target_height = min(img1.height, img2.height, img3.height)
-        
-        # Calculate new widths maintaining aspect ratio
-        img1_new_width = int(img1.width * (target_height / img1.height))
-        img2_new_width = int(img2.width * (target_height / img2.height))
-        img3_new_width = int(img3.width * (target_height / img3.height))
-        
-        # Resize images
-        img1_resized = img1.resize((img1_new_width, target_height), Image.LANCZOS)
-        img2_resized = img2.resize((img2_new_width, target_height), Image.LANCZOS)
-        img3_resized = img3.resize((img3_new_width, target_height), Image.LANCZOS)
-        
-        # Create new combined image
-        combined_width = img1_resized.width + img2_resized.width + img3_resized.width
-        combined_image = Image.new('RGB', (combined_width, target_height))
-        
-        # Paste images side by side
-        combined_image.paste(img1_resized, (0, 0))
-        combined_image.paste(img2_resized, (img1_resized.width, 0))
-        combined_image.paste(img3_resized, (img1_resized.width + img2_resized.width, 0))
-        
-        # Convert to bytes
-        output = io.BytesIO()
-        combined_image.save(output, format='JPEG', quality=95)
-        output.seek(0)
-        
-        return output.getvalue(), combined_image
-    except Exception as e:
-        st.error(f"Error combining images: {str(e)}")
-        return None, None
-
-# Function to combine two images side by side
-def combine_images_side_by_side(image1_bytes, image2_bytes):
-    """Combine two images horizontally into one composite image"""
-    try:
-        # Open images
-        img1 = Image.open(io.BytesIO(image1_bytes))
-        img2 = Image.open(io.BytesIO(image2_bytes))
-        
-        # Convert to RGB if needed
-        if img1.mode != 'RGB':
-            img1 = img1.convert('RGB')
-        if img2.mode != 'RGB':
-            img2 = img2.convert('RGB')
-        
-        # Resize images to same height (use smaller height)
-        target_height = min(img1.height, img2.height)
-        
-        # Calculate new widths maintaining aspect ratio
-        img1_new_width = int(img1.width * (target_height / img1.height))
-        img2_new_width = int(img2.width * (target_height / img2.height))
-        
-        # Resize images
-        img1_resized = img1.resize((img1_new_width, target_height), Image.LANCZOS)
-        img2_resized = img2.resize((img2_new_width, target_height), Image.LANCZOS)
-        
-        # Create new combined image
-        combined_width = img1_resized.width + img2_resized.width
-        combined_image = Image.new('RGB', (combined_width, target_height))
-        
-        # Paste images side by side
-        combined_image.paste(img1_resized, (0, 0))
-        combined_image.paste(img2_resized, (img1_resized.width, 0))
-        
-        # Convert to bytes
-        output = io.BytesIO()
-        combined_image.save(output, format='JPEG', quality=95)
-        output.seek(0)
-        
-        return output.getvalue(), combined_image
-    except Exception as e:
-        st.error(f"Error combining images: {str(e)}")
-        return None, None
-
-# Register cleanup function
-atexit.register(cleanup_ollama_models)
-
-# Helper function to encode images to base64
-def encode_image_to_base64(image_file):
-    """Convert uploaded image to base64"""
-    image_bytes = image_file.read()
-    image_file.seek(0)
-    return base64.b64encode(image_bytes).decode('utf-8')
+from tabs import SingleImageTab, DualImageTab, TripleImageTab
+from utils import get_available_models
 
 # Page configuration
 st.set_page_config(
-    page_title="Vision Model Image Analysis",
-    page_icon="🖼️",
-    layout="wide"
+    page_title="Vision Model Chat",
+    page_icon="👁️",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
-
-# Title and description
-st.title("🖼️ Vision Model Image Analysis")
-st.markdown("Upload an image and ask questions about it using Qwen3-VL or LLaVA models")
 
 # Sidebar for settings
 with st.sidebar:
-    st.header("⚙️ Settings")
-    ollama_url = st.text_input("Ollama API URL", value="http://localhost:11434")
+    st.title("⚙️ Settings")
     
-    # Store ollama_url in session state for cleanup function
-    st.session_state.ollama_url = ollama_url
+    # Ollama URL
+    st.markdown("### 🌐 Ollama Connection")
+    ollama_url = st.text_input(
+        "Ollama URL",
+        value="http://localhost:11434",
+        help="The URL where Ollama is running"
+    )
     
-    # Function to get available models from Ollama
-    @st.cache_data(ttl=60)
-    def get_available_models(url):
-        try:
-            response = requests.get(f"{url}/api/tags", timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                models = data.get("models", [])
-                # Filter for vision models (those with "vision", "vl", "llava", "qwen" in name)
-                vision_keywords = ["vision", "vl", "llava", "qwen", "moondream", "minicpm"]
-                vision_models = [
-                    m["name"] for m in models 
-                    if any(keyword in m["name"].lower() for keyword in vision_keywords)
-                ]
-                return sorted(vision_models) if vision_models else []
-            return []
-        except:
-            return []
+    # Model selection
+    st.markdown("### 🤖 Model Selection")
     
     # Get available models
     available_models = get_available_models(ollama_url)
     
     if available_models:
-        st.success(f"✅ Found {len(available_models)} vision model(s)")
-        
-        # Add a refresh button
-        if st.button("🔄 Refresh Models"):
-            st.cache_data.clear()
-            st.rerun()
-        
-        # Model selection from available models
         model_name = st.selectbox(
-            "Select Vision Model",
+            "Choose a vision model",
             options=available_models,
-            index=0
+            help="Select which vision model to use for analysis"
         )
-        st.info(f"Using: `{model_name}`")
     else:
-        st.warning("⚠️ No vision models detected. Using manual entry.")
-        model_name = st.text_input("Model Name", value="qwen3-vl:4b")
-        st.caption("Make sure Ollama is running and you have vision models installed.")
+        st.warning("⚠️ No vision models found. Make sure Ollama is running and you have vision models installed.")
+        model_name = st.text_input(
+            "Model name",
+            value="llava:latest",
+            help="Manually enter the model name"
+        )
     
-    temperature = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.7, step=0.1)
-    
-    st.divider()
-    
-    # Model cleanup section
-    st.markdown("### 🧹 Model Management")
-    col_cleanup1, col_cleanup2 = st.columns(2)
-    
-    with col_cleanup1:
-        if st.button("🗑️ Unload Models", help="Unload all running Ollama models to free up VRAM"):
-            with st.spinner("Unloading models..."):
-                try:
-                    response = requests.get(f"{ollama_url}/api/ps", timeout=5)
-                    if response.status_code == 200:
-                        running_models = response.json().get("models", [])
-                        if running_models:
-                            for model_info in running_models:
-                                model_name_to_unload = model_info.get("name", "")
-                                if model_name_to_unload:
-                                    requests.post(
-                                        f"{ollama_url}/api/generate",
-                                        json={"model": model_name_to_unload, "keep_alive": 0},
-                                        timeout=5
-                                    )
-                            st.success(f"Unloaded {len(running_models)} model(s)")
-                        else:
-                            st.info("No models currently loaded")
-                    else:
-                        st.error("Could not connect to Ollama")
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
-    
-    with col_cleanup2:
-        if st.button("📊 Show Running", help="Show currently loaded models"):
-            try:
-                response = requests.get(f"{ollama_url}/api/ps", timeout=5)
-                if response.status_code == 200:
-                    running_models = response.json().get("models", [])
-                    if running_models:
-                        st.write("**Running Models:**")
-                        for model_info in running_models:
-                            st.text(f"• {model_info.get('name', 'Unknown')}")
-                    else:
-                        st.info("No models currently loaded")
-                else:
-                    st.error("Could not connect to Ollama")
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
-    
-    st.divider()
-    st.markdown("### About")
-    st.markdown("This app uses Ollama's vision models to analyze images and answer questions.")
-    st.markdown("Make sure Ollama is running and your chosen model is installed:")
-    st.code(f"ollama pull {model_name}", language="bash")
-
-# Initialize session state for chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "current_image" not in st.session_state:
-    st.session_state.current_image = None
-if "current_image_b64" not in st.session_state:
-    st.session_state.current_image_b64 = None
-if "pending_attachment" not in st.session_state:
-    st.session_state.pending_attachment = None
-
-# Initialize session state for dual image mode
-if "messages_dual" not in st.session_state:
-    st.session_state.messages_dual = []
-if "combined_image_b64" not in st.session_state:
-    st.session_state.combined_image_b64 = None
-if "combined_image_pil" not in st.session_state:
-    st.session_state.combined_image_pil = None
-
-# Initialize session state for triple image mode
-if "messages_triple" not in st.session_state:
-    st.session_state.messages_triple = []
-if "combined_image_triple_b64" not in st.session_state:
-    st.session_state.combined_image_triple_b64 = None
-if "combined_image_triple_pil" not in st.session_state:
-    st.session_state.combined_image_triple_pil = None
-
-# Create tabs
-tab1, tab2, tab3 = st.tabs(["📷 Single Image", "🖼️🖼️ Dual Image Compare", "🖼️🖼️🖼️ Triple Image Compare"])
-
-# TAB 1: Single Image Analysis
-with tab1:
-    # Main layout
-    col1, col2 = st.columns([1, 1])
-
-with col1:
-    st.header("Upload Image")
-    
-    # Add custom CSS for better drag and drop visibility
-    st.markdown("""
-        <style>
-        [data-testid="stFileUploader"] {
-            border: 3px dashed #4CAF50;
-            border-radius: 10px;
-            padding: 30px;
-            background-color: rgba(76, 175, 80, 0.05);
-            text-align: center;
-        }
-        [data-testid="stFileUploader"]:hover {
-            border-color: #45a049;
-            background-color: rgba(76, 175, 80, 0.1);
-        }
-        [data-testid="stFileUploader"] section {
-            padding: 20px;
-        }
-        [data-testid="stFileUploader"] section > div {
-            font-size: 1.1em;
-            color: #4CAF50;
-            font-weight: bold;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-    
-    uploaded_file = st.file_uploader(
-        "Drag and drop an image here, or click to browse",
-        type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
-        help="Upload an image to analyze",
-        label_visibility="collapsed"
+    # Temperature setting
+    st.markdown("### 🌡️ Temperature")
+    temperature = st.slider(
+        "Model Temperature",
+        min_value=0.0,
+        max_value=2.0,
+        value=0.7,
+        step=0.1,
+        help="Higher values make output more random, lower values more focused"
     )
     
-    if uploaded_file is not None:
-        # Display the uploaded image
-        st.image(uploaded_file, caption="Uploaded Image", width="stretch")
-        
-        # Convert image to base64
-        image_bytes = uploaded_file.read()
-        st.session_state.current_image_b64 = base64.b64encode(image_bytes).decode('utf-8')
-        st.session_state.current_image = uploaded_file.name
-        
-        # Reset to beginning for potential re-reading
-        uploaded_file.seek(0)
-    elif st.session_state.current_image:
-        st.info(f"Current image: {st.session_state.current_image}")
-
-with col2:
-    st.header("Chat")
+    # Model management section
+    st.markdown("---")
+    st.markdown("### 🔧 Model Management")
     
-    # Display chat history
-    chat_container = st.container(height=600)
-    with chat_container:
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-                # Show attached image if it exists in message
-                if "attached_image" in message and message["attached_image"]:
-                    st.image(message["attached_image"], width=200, caption="Attached image")
-    
-    # Optional image attachment with compact layout
-    with st.expander("📎 Attach additional image (optional)", expanded=False):
-        additional_image = st.file_uploader(
-            "Add context image",
-            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
-            key="additional_image_single",
-            help="Upload an additional image to include with your next question"
-        )
-        if additional_image:
-            st.session_state.pending_attachment = additional_image
-            st.image(additional_image, width=200, caption="Will be attached to next message")
-        elif st.session_state.pending_attachment is None and "additional_image_single" in st.session_state:
-            # User cleared the uploader
-            st.session_state.pending_attachment = None
-    
-    # Use pending attachment if available
-    attachment_to_use = st.session_state.pending_attachment
-    
-    # Chat input
-    if prompt := st.chat_input("Ask a question about the image..."):
-        if not st.session_state.current_image_b64:
-            st.error("Please upload an image first!")
-        else:
-            # Encode additional image if provided
-            additional_image_b64 = None
-            if attachment_to_use:
-                additional_image_b64 = encode_image_to_base64(attachment_to_use)
-            
-            # Add user message to chat history
-            st.session_state.messages.append({
-                "role": "user",
-                "content": prompt,
-                "attached_image": attachment_to_use if attachment_to_use else None
-            })
-            
-            # Clear the pending attachment after sending
-            st.session_state.pending_attachment = None
-            
-            # Display user message
-            with chat_container:
-                with st.chat_message("user"):
-                    st.markdown(prompt)
-                    if attachment_to_use:
-                        st.image(attachment_to_use, width=200, caption="Attached image")
-            
-            # Call Ollama API with streaming and conversation memory
-            try:
-                api_endpoint = f"{ollama_url}/api/chat"  # Use chat endpoint instead of generate
-                
-                # Build messages array with full conversation history
-                messages = []
-                
-                # Add all previous messages from chat history
-                # Only include image with the FIRST user message to avoid redundant encoding
-                for i, msg in enumerate(st.session_state.messages):
-                    if msg["role"] == "user":
-                        # Prepare the user message
-                        user_msg = {
-                            "role": msg["role"],
-                            "content": msg["content"]
-                        }
-                        
-                        # Check if THIS message should have images
-                        if i == 0:
-                            # First message: always include primary image
-                            user_msg["images"] = [st.session_state.current_image_b64]
-                        elif "attached_image" in msg and msg["attached_image"] is not None:
-                            # This message had an attachment - re-encode and include it
-                            try:
-                                attached_b64 = encode_image_to_base64(msg["attached_image"])
-                                user_msg["images"] = [
-                                    st.session_state.current_image_b64,  # Keep primary for context
-                                    attached_b64  # Include the attachment from this message
-                                ]
-                            except:
-                                # If re-encoding fails, just include primary
-                                pass
-                        # else: No images for this message (text-only follow-up)
-                        
-                        messages.append(user_msg)
-                    else:
-                        messages.append({
-                            "role": msg["role"],
-                            "content": msg["content"]
-                        })
-                
-                # Add the current user message with images
-                current_message = {
-                    "role": "user",
-                    "content": prompt
-                }
-                
-                # Handle images for current message
-                if len(st.session_state.messages) == 1:  # First message (just added)
-                    # First message: use primary image
-                    current_message["images"] = [st.session_state.current_image_b64]
-                elif additional_image_b64:
-                    # Follow-up message with additional image attached
-                    # Include BOTH primary and additional images for context
-                    current_message["images"] = [
-                        st.session_state.current_image_b64,  # Keep primary for context
-                        additional_image_b64  # Add new image
-                    ]
-                # If no additional image on follow-up, no images field (uses context)
-                
-                messages.append(current_message)
-                
-                payload = {
-                    "model": model_name,
-                    "messages": messages,  # Send full conversation history
-                    "stream": True,
-                    "options": {
-                        "temperature": temperature
-                    }
-                }
-                
-                # Create placeholder for streaming response
-                with chat_container:
-                    with st.chat_message("assistant"):
-                        message_placeholder = st.empty()
-                
-                # Stream the response
-                full_response = ""
-                response = requests.post(api_endpoint, json=payload, stream=True, timeout=120)
-                
-                if response.status_code == 200:
-                    for line in response.iter_lines():
-                        if line:
-                            try:
-                                chunk = json.loads(line)
-                                if "message" in chunk and "content" in chunk["message"]:
-                                    full_response += chunk["message"]["content"]
-                                    # Update the placeholder with current response
-                                    message_placeholder.markdown(full_response + "▌")
-                            except json.JSONDecodeError:
-                                continue
-                    
-                    # Final update without cursor
-                    message_placeholder.markdown(full_response)
-                    
-                    # Add complete response to chat history
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": full_response
-                    })
-                    
-                    # Force rerun to clear the file uploader
-                    st.rerun()
+    # Unload all models button
+    if st.button("🔄 Unload All Models", help="Free VRAM by unloading all loaded models"):
+        try:
+            response = requests.get(f"{ollama_url}/api/ps")
+            if response.status_code == 200:
+                running_models = response.json().get('models', [])
+                if running_models:
+                    for model in running_models:
+                        model_name_to_unload = model.get('name', '')
+                        if model_name_to_unload:
+                            unload_response = requests.post(
+                                f"{ollama_url}/api/generate",
+                                json={
+                                    "model": model_name_to_unload,
+                                    "keep_alive": 0
+                                }
+                            )
+                            if unload_response.status_code == 200:
+                                st.success(f"✅ Unloaded: {model_name_to_unload}")
+                            else:
+                                st.error(f"❌ Failed to unload: {model_name_to_unload}")
+                    st.info("All models have been unloaded from memory.")
                 else:
-                    error_msg = f"Error: {response.status_code} - {response.text}"
-                    st.error(error_msg)
-                    
-            except requests.exceptions.ConnectionError:
-                st.error("❌ Could not connect to Ollama. Make sure it's running on " + ollama_url)
-            except requests.exceptions.Timeout:
-                st.error("⏱️ Request timed out. The model might be taking too long to respond.")
-            except Exception as e:
-                st.error(f"An error occurred: {str(e)}")
+                    st.info("No models currently loaded in memory.")
+            else:
+                st.error(f"Failed to get running models: {response.status_code}")
+        except requests.exceptions.ConnectionError:
+            st.error(f"❌ Could not connect to Ollama at {ollama_url}")
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+    
+    # Show running models
+    if st.button("👀 Show Running Models", help="Display all currently loaded models"):
+        try:
+            response = requests.get(f"{ollama_url}/api/ps")
+            if response.status_code == 200:
+                running_models = response.json().get('models', [])
+                if running_models:
+                    st.markdown("**Currently loaded models:**")
+                    for model in running_models:
+                        model_name_display = model.get('name', 'Unknown')
+                        model_size = model.get('size', 0) / (1024**3)  # Convert to GB
+                        st.write(f"• {model_name_display} ({model_size:.2f} GB)")
+                else:
+                    st.info("No models currently loaded in memory.")
+            else:
+                st.error(f"Failed to get running models: {response.status_code}")
+        except requests.exceptions.ConnectionError:
+            st.error(f"❌ Could not connect to Ollama at {ollama_url}")
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+    
+    # Info section
+    st.markdown("---")
+    st.markdown("### ℹ️ Info")
+    st.info("""
+    **Tips:**
+    - Single Image Chat: Upload one image and ask questions with optional additional context images
+    - Dual Image Compare: Upload two images side-by-side for comparison
+    - Triple Image Compare: Upload three images for comprehensive analysis
+    - Use temperature to control response randomness
+    - Unload models when switching to free VRAM
+    """)
 
-    # Clear chat button
-    if st.session_state.messages:
-        if st.button("🗑️ Clear Chat History", key="clear_single"):
-            st.session_state.messages = []
-            st.rerun()
+# Main content area
+st.title("👁️ Vision Model Chat Interface")
+st.markdown("Upload images and chat with vision models powered by Ollama")
 
-# TAB 2: Dual Image Analysis
+# Create tabs
+tab1, tab2, tab3 = st.tabs([
+    "📷 Single Image Chat",
+    "🖼️🖼️ Dual Image Compare",
+    "🖼️🖼️🖼️ Triple Image Compare"
+])
+
+# Render each tab
+with tab1:
+    single_image_tab = SingleImageTab(ollama_url, model_name, temperature)
+    single_image_tab.render()
+
 with tab2:
-    st.markdown("### Compare Two Images Side-by-Side")
-    st.caption("Upload two images and they will be combined into one for comparison analysis")
-    
-    # Upload section
-    upload_col1, upload_col2 = st.columns([1, 1])
-    
-    with upload_col1:
-        st.subheader("Image 1")
-        uploaded_file1 = st.file_uploader(
-            "Upload first image",
-            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
-            help="First image for comparison",
-            key="dual_image1"
-        )
-        if uploaded_file1:
-            st.image(uploaded_file1, caption="Image 1", use_container_width=True)
-    
-    with upload_col2:
-        st.subheader("Image 2")
-        uploaded_file2 = st.file_uploader(
-            "Upload second image",
-            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
-            help="Second image for comparison",
-            key="dual_image2"
-        )
-        if uploaded_file2:
-            st.image(uploaded_file2, caption="Image 2", use_container_width=True)
-    
-    # Process and combine images
-    if uploaded_file1 and uploaded_file2:
-        # Read image bytes
-        image1_bytes = uploaded_file1.read()
-        image2_bytes = uploaded_file2.read()
-        uploaded_file1.seek(0)
-        uploaded_file2.seek(0)
-        
-        # Combine images
-        combined_bytes, combined_img = combine_images_side_by_side(image1_bytes, image2_bytes)
-        
-        if combined_bytes:
-            # Convert to base64
-            st.session_state.combined_image_b64 = base64.b64encode(combined_bytes).decode('utf-8')
-            st.session_state.combined_image_pil = combined_img
-            st.success("✅ Images combined! Ask questions about both images below.")
-    
-    # Chat interface with combined image side-by-side
-    st.divider()
-    
-    # Create two columns: one for combined image, one for chat
-    dual_col1, dual_col2 = st.columns([1, 1])
-    
-    with dual_col1:
-        st.subheader("Combined View")
-        if st.session_state.get("combined_image_pil"):
-            st.image(st.session_state.combined_image_pil, caption="Combined Side-by-Side", use_container_width=True)
-        else:
-            st.info("Upload both images to see combined view")
-    
-    with dual_col2:
-        st.subheader("Chat About Both Images")
-        
-        # Display chat history
-        chat_container_dual = st.container(height=800)
-        with chat_container_dual:
-            for message in st.session_state.messages_dual:
-                with st.chat_message(message["role"]):
-                    st.markdown(message["content"])
-        
-        # Chat input
-        if prompt_dual := st.chat_input("Ask about both images (e.g., 'What are the differences?')", key="dual_chat"):
-            if not st.session_state.combined_image_b64:
-                st.error("Please upload both images first!")
-            else:
-                # Add user message to chat history
-                st.session_state.messages_dual.append({"role": "user", "content": prompt_dual})
-                
-                # Display user message
-                with chat_container_dual:
-                    with st.chat_message("user"):
-                        st.markdown(prompt_dual)
-                
-                # Call Ollama API with combined image
-                try:
-                    api_endpoint = f"{ollama_url}/api/chat"
-                    
-                    # Build messages for dual mode
-                    # Only include image with the FIRST user message to avoid redundant encoding
-                    messages_dual = []
-                    for i, msg in enumerate(st.session_state.messages_dual):
-                        if msg["role"] == "user":
-                            if i == 0:
-                                # First message: include combined image
-                                messages_dual.append({
-                                    "role": msg["role"],
-                                    "content": msg["content"],
-                                    "images": [st.session_state.combined_image_b64]
-                                })
-                            else:
-                                # Subsequent messages: text only (image already in context)
-                                messages_dual.append({
-                                    "role": msg["role"],
-                                    "content": msg["content"]
-                                })
-                        else:
-                            messages_dual.append({
-                                "role": msg["role"],
-                                "content": msg["content"]
-                            })
-                    
-                    # Add current message
-                    # Only include image if this is the first message in the conversation
-                    if len(st.session_state.messages_dual) == 0:
-                        messages_dual.append({
-                            "role": "user",
-                            "content": prompt_dual,
-                            "images": [st.session_state.combined_image_b64]
-                        })
-                    else:
-                        messages_dual.append({
-                            "role": "user",
-                            "content": prompt_dual
-                        })
-                    
-                    payload = {
-                        "model": model_name,
-                        "messages": messages_dual,
-                        "stream": True,
-                        "options": {
-                            "temperature": temperature
-                        }
-                    }
-                    
-                    # Create placeholder for streaming response
-                    with chat_container_dual:
-                        with st.chat_message("assistant"):
-                            message_placeholder_dual = st.empty()
-                    
-                    # Stream the response
-                    full_response_dual = ""
-                    response = requests.post(api_endpoint, json=payload, stream=True, timeout=120)
-                    
-                    if response.status_code == 200:
-                        for line in response.iter_lines():
-                            if line:
-                                try:
-                                    chunk = json.loads(line)
-                                    if "message" in chunk and "content" in chunk["message"]:
-                                        full_response_dual += chunk["message"]["content"]
-                                        message_placeholder_dual.markdown(full_response_dual + "▌")
-                                except json.JSONDecodeError:
-                                    continue
-                        
-                        # Final update
-                        message_placeholder_dual.markdown(full_response_dual)
-                        
-                        # Add to chat history
-                        st.session_state.messages_dual.append({
-                            "role": "assistant",
-                            "content": full_response_dual
-                        })
-                    else:
-                        st.error(f"Error: {response.status_code} - {response.text}")
-                        
-                except requests.exceptions.ConnectionError:
-                    st.error("❌ Could not connect to Ollama. Make sure it's running on " + ollama_url)
-                except requests.exceptions.Timeout:
-                    st.error("⏱️ Request timed out.")
-                except Exception as e:
-                    st.error(f"An error occurred: {str(e)}")
-        
-        # Clear dual chat button
-        if st.session_state.messages_dual:
-            if st.button("🗑️ Clear Dual Chat History", key="clear_dual"):
-                st.session_state.messages_dual = []
-                st.rerun()
-        
-        # Example questions
-        with st.expander("💡 Example Questions for Dual Images"):
-            st.markdown("""
-            - "What are the main differences between these two images?"
-            - "Compare and contrast the images on the left and right"
-            - "Which image has better quality?"
-            - "Describe what you see in each image"
-            - "What's similar and what's different?"
-            - "Which image is more professional looking?"
-            """)
+    dual_image_tab = DualImageTab(ollama_url, model_name, temperature)
+    dual_image_tab.render()
 
-# TAB 3: Triple Image Analysis
 with tab3:
-    st.markdown("### Compare Three Images Side-by-Side")
-    st.caption("Upload three images and they will be combined into one for comparison analysis")
-    
-    # Upload section
-    upload_col1, upload_col2, upload_col3 = st.columns([1, 1, 1])
-    
-    with upload_col1:
-        st.subheader("Image 1")
-        uploaded_file_t1 = st.file_uploader(
-            "Upload first image",
-            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
-            help="First image for comparison",
-            key="triple_image1"
-        )
-        if uploaded_file_t1:
-            st.image(uploaded_file_t1, caption="Image 1", use_container_width=True)
-    
-    with upload_col2:
-        st.subheader("Image 2")
-        uploaded_file_t2 = st.file_uploader(
-            "Upload second image",
-            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
-            help="Second image for comparison",
-            key="triple_image2"
-        )
-        if uploaded_file_t2:
-            st.image(uploaded_file_t2, caption="Image 2", use_container_width=True)
-    
-    with upload_col3:
-        st.subheader("Image 3")
-        uploaded_file_t3 = st.file_uploader(
-            "Upload third image",
-            type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
-            help="Third image for comparison",
-            key="triple_image3"
-        )
-        if uploaded_file_t3:
-            st.image(uploaded_file_t3, caption="Image 3", use_container_width=True)
-    
-    # Process and combine images
-    if uploaded_file_t1 and uploaded_file_t2 and uploaded_file_t3:
-        # Read image bytes
-        image1_bytes = uploaded_file_t1.read()
-        image2_bytes = uploaded_file_t2.read()
-        image3_bytes = uploaded_file_t3.read()
-        uploaded_file_t1.seek(0)
-        uploaded_file_t2.seek(0)
-        uploaded_file_t3.seek(0)
-        
-        # Combine images
-        combined_bytes_triple, combined_img_triple = combine_three_images_side_by_side(image1_bytes, image2_bytes, image3_bytes)
-        
-        if combined_bytes_triple:
-            # Convert to base64
-            st.session_state.combined_image_triple_b64 = base64.b64encode(combined_bytes_triple).decode('utf-8')
-            st.session_state.combined_image_triple_pil = combined_img_triple
-            st.success("✅ Images combined! Ask questions about all three images below.")
-    
-    # Chat interface with combined image side-by-side
-    st.divider()
-    
-    # Create two columns: one for combined image, one for chat
-    triple_col1, triple_col2 = st.columns([1, 1])
-    
-    with triple_col1:
-        st.subheader("Combined View")
-        if st.session_state.get("combined_image_triple_pil"):
-            st.image(st.session_state.combined_image_triple_pil, caption="Combined Side-by-Side", use_container_width=True)
-        else:
-            st.info("Upload all three images to see combined view")
-    
-    with triple_col2:
-        st.subheader("Chat About All Three Images")
-        
-        # Display chat history
-        chat_container_triple = st.container(height=800)
-        with chat_container_triple:
-            for message in st.session_state.messages_triple:
-                with st.chat_message(message["role"]):
-                    st.markdown(message["content"])
-        
-        # Chat input
-        if prompt_triple := st.chat_input("Ask about all three images (e.g., 'What are the differences?')", key="triple_chat"):
-            if not st.session_state.combined_image_triple_b64:
-                st.error("Please upload all three images first!")
-            else:
-                # Add user message to chat history
-                st.session_state.messages_triple.append({"role": "user", "content": prompt_triple})
-                
-                # Display user message
-                with chat_container_triple:
-                    with st.chat_message("user"):
-                        st.markdown(prompt_triple)
-                
-                # Call Ollama API with combined image
-                try:
-                    api_endpoint = f"{ollama_url}/api/chat"
-                    
-                    # Build messages for triple mode
-                    # Only include image with the FIRST user message to avoid redundant encoding
-                    messages_triple = []
-                    for i, msg in enumerate(st.session_state.messages_triple):
-                        if msg["role"] == "user":
-                            if i == 0:
-                                # First message: include combined image
-                                messages_triple.append({
-                                    "role": msg["role"],
-                                    "content": msg["content"],
-                                    "images": [st.session_state.combined_image_triple_b64]
-                                })
-                            else:
-                                # Subsequent messages: text only (image already in context)
-                                messages_triple.append({
-                                    "role": msg["role"],
-                                    "content": msg["content"]
-                                })
-                        else:
-                            messages_triple.append({
-                                "role": msg["role"],
-                                "content": msg["content"]
-                            })
-                    
-                    # Add current message
-                    # Only include image if this is the first message in the conversation
-                    if len(st.session_state.messages_triple) == 0:
-                        messages_triple.append({
-                            "role": "user",
-                            "content": prompt_triple,
-                            "images": [st.session_state.combined_image_triple_b64]
-                        })
-                    else:
-                        messages_triple.append({
-                            "role": "user",
-                            "content": prompt_triple
-                        })
-                    
-                    payload = {
-                        "model": model_name,
-                        "messages": messages_triple,
-                        "stream": True,
-                        "options": {
-                            "temperature": temperature
-                        }
-                    }
-                    
-                    # Create placeholder for streaming response
-                    with chat_container_triple:
-                        with st.chat_message("assistant"):
-                            message_placeholder_triple = st.empty()
-                    
-                    # Stream the response
-                    full_response_triple = ""
-                    response = requests.post(api_endpoint, json=payload, stream=True, timeout=120)
-                    
-                    if response.status_code == 200:
-                        for line in response.iter_lines():
-                            if line:
-                                try:
-                                    chunk = json.loads(line)
-                                    if "message" in chunk and "content" in chunk["message"]:
-                                        full_response_triple += chunk["message"]["content"]
-                                        message_placeholder_triple.markdown(full_response_triple + "▌")
-                                except json.JSONDecodeError:
-                                    continue
-                        
-                        # Final update
-                        message_placeholder_triple.markdown(full_response_triple)
-                        
-                        # Add to chat history
-                        st.session_state.messages_triple.append({
-                            "role": "assistant",
-                            "content": full_response_triple
-                        })
-                    else:
-                        st.error(f"Error: {response.status_code} - {response.text}")
-                        
-                except requests.exceptions.ConnectionError:
-                    st.error("❌ Could not connect to Ollama. Make sure it's running on " + ollama_url)
-                except requests.exceptions.Timeout:
-                    st.error("⏱️ Request timed out.")
-                except Exception as e:
-                    st.error(f"An error occurred: {str(e)}")
-        
-        # Clear triple chat button
-        if st.session_state.messages_triple:
-            if st.button("🗑️ Clear Triple Chat History", key="clear_triple"):
-                st.session_state.messages_triple = []
-                st.rerun()
-        
-        # Example questions
-        with st.expander("💡 Example Questions for Triple Images"):
-            st.markdown("""
-            - "What are the main differences between these three images?"
-            - "Compare and contrast all three images"
-            - "Which image has the best quality?"
-            - "Describe what you see in each of the three images"
-            - "What's common across all three images?"
-            - "Rank these three images by professionalism"
-            """)
-
-# Clear chat button
-if st.session_state.messages:
-    if st.button("🗑️ Clear Chat History"):
-        st.session_state.messages = []
-        st.rerun()
-
-# Footer
-st.divider()
-st.markdown(
-    """
-    <div style='text-align: center; color: gray;'>
-    Powered by Ollama Vision Models | Built with Streamlit
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+    triple_image_tab = TripleImageTab(ollama_url, model_name, temperature)
+    triple_image_tab.render()
