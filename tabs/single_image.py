@@ -2,6 +2,8 @@ import streamlit as st
 import requests
 import json
 import base64
+from PIL import Image
+import io
 from utils import encode_image_to_base64
 
 class SingleImageTab:
@@ -19,6 +21,8 @@ class SingleImageTab:
             st.session_state.current_image_b64 = None
         if "pending_attachment" not in st.session_state:
             st.session_state.pending_attachment = None
+        if "single_image_rotation" not in st.session_state:
+            st.session_state.single_image_rotation = 0
     
     def render(self):
         """Render the single image tab"""
@@ -68,11 +72,45 @@ class SingleImageTab:
         )
         
         if uploaded_file is not None:
-            st.image(uploaded_file, caption="Uploaded Image", use_container_width=True)
+            # Rotation controls
+            st.markdown("**Rotate Image:**")
+            col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+            with col_r1:
+                if st.button("↺ 90°", key="rotate_single_90"):
+                    st.session_state.single_image_rotation = (st.session_state.single_image_rotation - 90) % 360
+            with col_r2:
+                if st.button("↻ 90°", key="rotate_single_neg90"):
+                    st.session_state.single_image_rotation = (st.session_state.single_image_rotation + 90) % 360
+            with col_r3:
+                if st.button("↻ 180°", key="rotate_single_180"):
+                    st.session_state.single_image_rotation = (st.session_state.single_image_rotation + 180) % 360
+            with col_r4:
+                if st.button("Reset", key="rotate_single_reset"):
+                    st.session_state.single_image_rotation = 0
+            
+            if st.session_state.single_image_rotation != 0:
+                st.caption(f"Current rotation: {st.session_state.single_image_rotation}°")
+            
+            # Read and rotate image
             image_bytes = uploaded_file.read()
+            uploaded_file.seek(0)
+            
+            if st.session_state.single_image_rotation != 0:
+                # Apply rotation
+                image = Image.open(io.BytesIO(image_bytes))
+                rotated_image = image.rotate(-st.session_state.single_image_rotation, expand=True)
+                
+                # Convert back to bytes
+                buffer = io.BytesIO()
+                rotated_image.save(buffer, format=image.format if image.format else 'PNG')
+                image_bytes = buffer.getvalue()
+            
+            # Display rotated image
+            st.image(image_bytes, caption="Uploaded Image", use_container_width=True)
+            
+            # Encode rotated image
             st.session_state.current_image_b64 = base64.b64encode(image_bytes).decode('utf-8')
             st.session_state.current_image = uploaded_file.name
-            uploaded_file.seek(0)
         elif st.session_state.current_image:
             st.info(f"Current image: {st.session_state.current_image}")
     

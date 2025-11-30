@@ -2,6 +2,8 @@ import streamlit as st
 import requests
 import json
 import base64
+from PIL import Image
+import io
 from utils import combine_images_side_by_side
 
 class DualImageTab:
@@ -17,6 +19,10 @@ class DualImageTab:
             st.session_state.combined_image_b64 = None
         if "combined_image_pil" not in st.session_state:
             st.session_state.combined_image_pil = None
+        if "dual_image1_rotation" not in st.session_state:
+            st.session_state.dual_image1_rotation = 0
+        if "dual_image2_rotation" not in st.session_state:
+            st.session_state.dual_image2_rotation = 0
     
     def render(self):
         """Render the dual image tab"""
@@ -63,6 +69,21 @@ class DualImageTab:
                 label_visibility="collapsed"
             )
             if image1:
+                # Rotation controls
+                r1, r2, r3 = st.columns(3)
+                with r1:
+                    if st.button("↺ 90°", key="dual_img1_rot90"):
+                        st.session_state.dual_image1_rotation = (st.session_state.dual_image1_rotation - 90) % 360
+                with r2:
+                    if st.button("↻ 90°", key="dual_img1_rotn90"):
+                        st.session_state.dual_image1_rotation = (st.session_state.dual_image1_rotation + 90) % 360
+                with r3:
+                    if st.button("Reset", key="dual_img1_reset"):
+                        st.session_state.dual_image1_rotation = 0
+                
+                if st.session_state.dual_image1_rotation != 0:
+                    st.caption(f"Rotation: {st.session_state.dual_image1_rotation}°")
+                
                 st.image(image1, caption="First Image", use_container_width=True)
         
         with col2:
@@ -74,6 +95,21 @@ class DualImageTab:
                 label_visibility="collapsed"
             )
             if image2:
+                # Rotation controls
+                r1, r2, r3 = st.columns(3)
+                with r1:
+                    if st.button("↺ 90°", key="dual_img2_rot90"):
+                        st.session_state.dual_image2_rotation = (st.session_state.dual_image2_rotation - 90) % 360
+                with r2:
+                    if st.button("↻ 90°", key="dual_img2_rotn90"):
+                        st.session_state.dual_image2_rotation = (st.session_state.dual_image2_rotation + 90) % 360
+                with r3:
+                    if st.button("Reset", key="dual_img2_reset"):
+                        st.session_state.dual_image2_rotation = 0
+                
+                if st.session_state.dual_image2_rotation != 0:
+                    st.caption(f"Rotation: {st.session_state.dual_image2_rotation}°")
+                
                 st.image(image2, caption="Second Image", use_container_width=True)
         
         if image1 and image2:
@@ -81,6 +117,22 @@ class DualImageTab:
             image2_bytes = image2.read()
             image1.seek(0)
             image2.seek(0)
+            
+            # Apply rotation to image 1
+            if st.session_state.dual_image1_rotation != 0:
+                img1 = Image.open(io.BytesIO(image1_bytes))
+                img1 = img1.rotate(-st.session_state.dual_image1_rotation, expand=True)
+                buffer1 = io.BytesIO()
+                img1.save(buffer1, format=img1.format if img1.format else 'PNG')
+                image1_bytes = buffer1.getvalue()
+            
+            # Apply rotation to image 2
+            if st.session_state.dual_image2_rotation != 0:
+                img2 = Image.open(io.BytesIO(image2_bytes))
+                img2 = img2.rotate(-st.session_state.dual_image2_rotation, expand=True)
+                buffer2 = io.BytesIO()
+                img2.save(buffer2, format=img2.format if img2.format else 'PNG')
+                image2_bytes = buffer2.getvalue()
             
             combined_bytes, combined_pil = combine_images_side_by_side(image1_bytes, image2_bytes)
             st.session_state.combined_image_pil = combined_pil

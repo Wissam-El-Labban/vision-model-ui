@@ -2,6 +2,8 @@ import streamlit as st
 import requests
 import json
 import base64
+from PIL import Image
+import io
 from utils import combine_three_images_side_by_side
 
 class TripleImageTab:
@@ -17,6 +19,12 @@ class TripleImageTab:
             st.session_state.combined_image_triple_b64 = None
         if "combined_image_triple_pil" not in st.session_state:
             st.session_state.combined_image_triple_pil = None
+        if "triple_image1_rotation" not in st.session_state:
+            st.session_state.triple_image1_rotation = 0
+        if "triple_image2_rotation" not in st.session_state:
+            st.session_state.triple_image2_rotation = 0
+        if "triple_image3_rotation" not in st.session_state:
+            st.session_state.triple_image3_rotation = 0
     
     def render(self):
         """Render the triple image tab"""
@@ -63,6 +71,16 @@ class TripleImageTab:
                 label_visibility="collapsed"
             )
             if image1:
+                # Rotation controls
+                r1, r2 = st.columns(2)
+                with r1:
+                    if st.button("↻ 90°", key="tri_img1_rot"):
+                        st.session_state.triple_image1_rotation = (st.session_state.triple_image1_rotation + 90) % 360
+                with r2:
+                    if st.button("Reset", key="tri_img1_reset"):
+                        st.session_state.triple_image1_rotation = 0
+                if st.session_state.triple_image1_rotation != 0:
+                    st.caption(f"{st.session_state.triple_image1_rotation}°")
                 st.image(image1, caption="First Image", use_container_width=True)
         
         with col2:
@@ -74,6 +92,16 @@ class TripleImageTab:
                 label_visibility="collapsed"
             )
             if image2:
+                # Rotation controls
+                r1, r2 = st.columns(2)
+                with r1:
+                    if st.button("↻ 90°", key="tri_img2_rot"):
+                        st.session_state.triple_image2_rotation = (st.session_state.triple_image2_rotation + 90) % 360
+                with r2:
+                    if st.button("Reset", key="tri_img2_reset"):
+                        st.session_state.triple_image2_rotation = 0
+                if st.session_state.triple_image2_rotation != 0:
+                    st.caption(f"{st.session_state.triple_image2_rotation}°")
                 st.image(image2, caption="Second Image", use_container_width=True)
         
         with col3:
@@ -85,6 +113,16 @@ class TripleImageTab:
                 label_visibility="collapsed"
             )
             if image3:
+                # Rotation controls
+                r1, r2 = st.columns(2)
+                with r1:
+                    if st.button("↻ 90°", key="tri_img3_rot"):
+                        st.session_state.triple_image3_rotation = (st.session_state.triple_image3_rotation + 90) % 360
+                with r2:
+                    if st.button("Reset", key="tri_img3_reset"):
+                        st.session_state.triple_image3_rotation = 0
+                if st.session_state.triple_image3_rotation != 0:
+                    st.caption(f"{st.session_state.triple_image3_rotation}°")
                 st.image(image3, caption="Third Image", use_container_width=True)
         
         if image1 and image2 and image3:
@@ -94,6 +132,30 @@ class TripleImageTab:
             image1.seek(0)
             image2.seek(0)
             image3.seek(0)
+            
+            # Apply rotation to image 1
+            if st.session_state.triple_image1_rotation != 0:
+                img1 = Image.open(io.BytesIO(image1_bytes))
+                img1 = img1.rotate(-st.session_state.triple_image1_rotation, expand=True)
+                buffer1 = io.BytesIO()
+                img1.save(buffer1, format=img1.format if img1.format else 'PNG')
+                image1_bytes = buffer1.getvalue()
+            
+            # Apply rotation to image 2
+            if st.session_state.triple_image2_rotation != 0:
+                img2 = Image.open(io.BytesIO(image2_bytes))
+                img2 = img2.rotate(-st.session_state.triple_image2_rotation, expand=True)
+                buffer2 = io.BytesIO()
+                img2.save(buffer2, format=img2.format if img2.format else 'PNG')
+                image2_bytes = buffer2.getvalue()
+            
+            # Apply rotation to image 3
+            if st.session_state.triple_image3_rotation != 0:
+                img3 = Image.open(io.BytesIO(image3_bytes))
+                img3 = img3.rotate(-st.session_state.triple_image3_rotation, expand=True)
+                buffer3 = io.BytesIO()
+                img3.save(buffer3, format=img3.format if img3.format else 'PNG')
+                image3_bytes = buffer3.getvalue()
             
             combined_bytes, combined_pil = combine_three_images_side_by_side(image1_bytes, image2_bytes, image3_bytes)
             st.session_state.combined_image_triple_pil = combined_pil
