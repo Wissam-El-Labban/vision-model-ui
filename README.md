@@ -38,8 +38,16 @@ This script will automatically:
 - Create a Python virtual environment if one doesn't exist
 - Install all required dependencies
 - Install Ollama (Linux only) if it's not already installed
+- **Check for Ollama updates** and install them if a new version is available
 - Start the Ollama service if it's not running
 - Launch the Streamlit application
+
+**Smart Update Handling:**
+- Only checks for updates when internet is available
+- Compares current version with latest GitHub release
+- Only updates if a newer version is actually available
+- Gracefully handles offline scenarios and API failures
+- Automatic updates on Linux, manual notification on macOS
 
 The application will open at http://localhost:8501 in your browser.
 
