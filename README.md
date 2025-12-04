@@ -26,7 +26,28 @@ A modular Streamlit web application for analyzing images using Ollama-powered vi
 - Streaming responses for real-time feedback
 - Memory-optimized image handling (images sent only once per conversation)
 
-## Prerequisites
+## Quick Start (Automated)
+
+The easiest way to run the application is using the provided shell script:
+
+```bash
+./run.sh
+```
+
+This script will automatically:
+- Create a Python virtual environment if one doesn't exist
+- Install all required dependencies
+- Install Ollama (Linux only) if it's not already installed
+- Start the Ollama service if it's not running
+- Launch the Streamlit application
+
+The application will open at http://localhost:8501 in your browser.
+
+## Manual Installation
+
+If you prefer to set up the environment manually:
+
+### Prerequisites
 
 1. **Install Ollama**
    ```bash
@@ -47,14 +68,22 @@ A modular Streamlit web application for analyzing images using Ollama-powered vi
    ollama serve
    ```
 
-## Installation
+### Installation Steps
 
-1. **Install Python dependencies**
+1. **Create a virtual environment** (recommended)
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate  # On Linux/macOS
+   # or
+   venv\Scripts\activate     # On Windows
+   ```
+
+2. **Install Python dependencies**
    ```bash
    pip install -r requirements.txt
    ```
 
-## Usage
+### Running the Application
 
 1. **Run the Streamlit app**
    ```bash
@@ -63,17 +92,19 @@ A modular Streamlit web application for analyzing images using Ollama-powered vi
 
 2. **Open your browser** to the URL shown (usually http://localhost:8501)
 
-3. **Configure settings** in the sidebar:
+## Usage
+
+1. **Configure settings** in the sidebar:
    - Set Ollama URL (default: `http://localhost:11434`)
    - Select a vision model from the dropdown
    - Adjust temperature (0.0 = focused, 2.0 = creative)
 
-4. **Choose a tab**:
+2. **Choose a tab**:
    - **Single Image Chat**: Upload one image and ask questions
    - **Dual Image Compare**: Upload two images for side-by-side analysis
    - **Triple Image Compare**: Upload three images for comprehensive comparison
 
-5. **Upload image(s)** and start chatting!
+3. **Upload image(s)** and start chatting!
 
 ## Example Questions
 
