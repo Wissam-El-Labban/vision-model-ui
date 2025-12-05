@@ -106,19 +106,66 @@ def combine_three_images_side_by_side(image1_bytes, image2_bytes, image3_bytes):
         st.error(f"Error combining images: {str(e)}")
         return None, None
 
+def is_vision_model(url, model_name):
+    """Check if a model supports vision by inspecting its details"""
+    try:
+        response = requests.post(
+            f"{url}/api/show",
+            json={"name": model_name},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            model_info = response.json()
+            
+            # Check multiple indicators of vision capability
+            modelfile = model_info.get('modelfile', '').lower()
+            template = model_info.get('template', '').lower()
+            parameters = model_info.get('parameters', '').lower()
+            
+            # Vision models typically have:
+            # 1. Image-related parameters in modelfile
+            # 2. Vision-related keywords in template
+            # 3. Multimodal projector parameters
+            vision_indicators = [
+                'image' in modelfile,
+                'vision' in modelfile,
+                'visual' in modelfile,
+                'image' in template,
+                '[img' in template,  # Common image token pattern
+                'clip' in modelfile,  # CLIP vision encoder
+                'mm_projector' in modelfile,  # Multimodal projector
+                'vision_tower' in modelfile,
+                'image_processor' in modelfile,
+            ]
+            
+            return any(vision_indicators)
+        return False
+    except:
+        return False
+
 @st.cache_data(ttl=60)
 def get_available_models(url):
-    """Get available vision models from Ollama"""
+    """Get available vision models from Ollama by checking model details"""
     try:
         response = requests.get(f"{url}/api/tags", timeout=5)
         if response.status_code == 200:
             data = response.json()
             models = data.get("models", [])
-            vision_keywords = ["vision", "vl", "llava", "qwen", "moondream", "minicpm"]
-            vision_models = [
-                m["name"] for m in models 
-                if any(keyword in m["name"].lower() for keyword in vision_keywords)
-            ]
+            
+            if not models:
+                return []
+            
+            vision_models = []
+            
+            # Check each model for vision capabilities
+            for model in models:
+                model_name = model["name"]
+                
+                # Check if model supports vision
+                if is_vision_model(url, model_name):
+                    vision_models.append(model_name)
+            
             return sorted(vision_models) if vision_models else []
         return []
     except:
