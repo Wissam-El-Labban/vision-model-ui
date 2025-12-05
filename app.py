@@ -62,6 +62,129 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🔧 Model Management")
     
+    # Model download section
+    with st.expander("📥 Download Vision Model"):
+        st.markdown("Enter a vision model name to download from Ollama library:")
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            model_to_download = st.text_input(
+                "Model name",
+                placeholder="e.g., llava:latest, qwen2.5-vl:7b",
+                key="download_model_input",
+                label_visibility="collapsed"
+            )
+        with col2:
+            download_btn = st.button("📥 Pull", key="download_model_btn", use_container_width=True)
+        
+        if download_btn and model_to_download:
+            try:
+                # Use streaming API to show progress
+                response = requests.post(
+                    f"{ollama_url}/api/pull",
+                    json={"name": model_to_download},
+                    stream=True,
+                    timeout=600
+                )
+                
+                if response.status_code == 200:
+                    import json
+                    
+                    status_placeholder = st.empty()
+                    progress_bar = st.progress(0)
+                    progress_text = st.empty()
+                    
+                    total_size = 0
+                    completed_size = 0
+                    
+                    for line in response.iter_lines():
+                        if line:
+                            data = json.loads(line)
+                            status = data.get('status', '')
+                            
+                            # Extract progress information
+                            if 'total' in data and 'completed' in data:
+                                total_size = data['total']
+                                completed_size = data['completed']
+                                
+                                if total_size > 0:
+                                    progress_percent = completed_size / total_size
+                                    progress_bar.progress(progress_percent)
+                                    
+                                    # Convert to human-readable sizes
+                                    completed_mb = completed_size / (1024 * 1024)
+                                    total_mb = total_size / (1024 * 1024)
+                                    progress_text.text(f"{completed_mb:.1f} MB / {total_mb:.1f} MB")
+                            
+                            # Show current status
+                            if status:
+                                status_placeholder.info(f"📦 {status}")
+                    
+                    progress_bar.progress(1.0)
+                    progress_text.text("Download complete!")
+                    st.success(f"✅ Successfully downloaded {model_to_download}")
+                    import time
+                    time.sleep(1.5)
+                    st.rerun()
+                else:
+                    st.error(f"❌ Failed to download model: {response.status_code}")
+            except requests.exceptions.Timeout:
+                st.error("❌ Download timed out. The model may be too large or connection is slow.")
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+        
+        st.markdown("**Popular vision models:**")
+        st.markdown("""
+        - `llava:latest` - General purpose
+        - `llava:13b` - Higher quality
+        - `qwen2.5-vl:7b` - Balanced performance
+        - `moondream:latest` - Lightweight
+        - `minicpm-v:latest` - Fast inference
+        """)
+    
+    # Model removal section
+    with st.expander("🗑️ Remove Vision Model"):
+        # Get all available models
+        try:
+            response = requests.get(f"{ollama_url}/api/tags", timeout=5)
+            if response.status_code == 200:
+                all_models = response.json().get('models', [])
+                model_names = [m['name'] for m in all_models]
+                
+                if model_names:
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        model_to_remove = st.selectbox(
+                            "Select model to remove",
+                            options=model_names,
+                            key="remove_model_select",
+                            label_visibility="collapsed"
+                        )
+                    with col2:
+                        remove_btn = st.button("🗑️ Remove", key="remove_model_btn", use_container_width=True)
+                    
+                    if remove_btn and model_to_remove:
+                        try:
+                            delete_response = requests.delete(
+                                f"{ollama_url}/api/delete",
+                                json={"name": model_to_remove},
+                                timeout=30
+                            )
+                            
+                            if delete_response.status_code == 200:
+                                st.success(f"✅ Successfully removed {model_to_remove}")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Failed to remove model: {delete_response.status_code}")
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
+                else:
+                    st.info("No models available to remove")
+            else:
+                st.error("❌ Failed to fetch models")
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+    
     # Unload all models button
     if st.button("🔄 Unload All Models", help="Free VRAM by unloading all loaded models"):
         try:
