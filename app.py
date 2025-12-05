@@ -123,6 +123,10 @@ with st.sidebar:
                     progress_bar.progress(1.0)
                     progress_text.text("Download complete!")
                     st.success(f"✅ Successfully downloaded {model_to_download}")
+                    
+                    # Clear cache to update model list immediately
+                    get_available_models.clear()
+                    
                     import time
                     time.sleep(1.5)
                     st.rerun()
@@ -173,6 +177,12 @@ with st.sidebar:
                             
                             if delete_response.status_code == 200:
                                 st.success(f"✅ Successfully removed {model_to_remove}")
+                                
+                                # Clear cache to update model list immediately
+                                get_available_models.clear()
+                                
+                                import time
+                                time.sleep(1)
                                 st.rerun()
                             else:
                                 st.error(f"❌ Failed to remove model: {delete_response.status_code}")
