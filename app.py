@@ -58,6 +58,21 @@ with st.sidebar:
         help="Higher values make output more random, lower values more focused"
     )
     
+    # System prompt setting
+    st.markdown("### 💬 Custom System Prompt")
+    system_prompt = st.text_area(
+        "System Prompt (optional)",
+        value="",
+        height=100,
+        placeholder="Enter a custom system prompt to guide the model's behavior...\n\nExample: You are a helpful assistant that provides detailed image analysis with technical accuracy.",
+        help="Set a custom system prompt to control how the model responds. Leave empty for default behavior."
+    )
+    
+    # Store in session state
+    if "system_prompt" not in st.session_state:
+        st.session_state.system_prompt = ""
+    st.session_state.system_prompt = system_prompt
+    
     # Model management section
     st.markdown("---")
     st.markdown("### 🔧 Model Management")
@@ -256,6 +271,7 @@ with st.sidebar:
     - Dual Image Compare: Upload two images side-by-side for comparison
     - Triple Image Compare: Upload three images for comprehensive analysis
     - Use temperature to control response randomness
+    - Set a custom system prompt to guide the model's behavior across all modes
     - Unload models when switching to free VRAM
     """)
 

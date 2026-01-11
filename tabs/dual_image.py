@@ -202,6 +202,13 @@ class DualImageTab:
         """Build messages array for API call"""
         messages = []
         
+        # Add system prompt if provided
+        if hasattr(st.session_state, 'system_prompt') and st.session_state.system_prompt.strip():
+            messages.append({
+                "role": "system",
+                "content": st.session_state.system_prompt.strip()
+            })
+        
         # Add conversation history
         for i, msg in enumerate(st.session_state.messages_dual):
             if msg["role"] == "user":
