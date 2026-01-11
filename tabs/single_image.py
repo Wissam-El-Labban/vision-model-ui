@@ -118,6 +118,19 @@ class SingleImageTab:
         """Render the chat interface"""
         st.header("Chat")
         
+        # System prompt setting
+        with st.expander("💬 Custom System Prompt (optional)", expanded=False):
+            system_prompt = st.text_area(
+                "System Prompt",
+                value=st.session_state.get("system_prompt_single", ""),
+                height=100,
+                key="system_prompt_input_single",
+                placeholder="Enter a custom system prompt to guide the model's behavior...\n\nExample: You are a helpful assistant that provides detailed image analysis with technical accuracy.",
+                help="Set a custom system prompt to control how the model responds.",
+                label_visibility="collapsed"
+            )
+            st.session_state.system_prompt_single = system_prompt
+        
         # Display chat history
         chat_container = st.container(height=600)
         with chat_container:
@@ -196,10 +209,10 @@ class SingleImageTab:
         messages = []
         
         # Add system prompt if provided
-        if hasattr(st.session_state, 'system_prompt') and st.session_state.system_prompt.strip():
+        if st.session_state.get('system_prompt_single', '').strip():
             messages.append({
                 "role": "system",
-                "content": st.session_state.system_prompt.strip()
+                "content": st.session_state.system_prompt_single.strip()
             })
         
         # Add conversation history
