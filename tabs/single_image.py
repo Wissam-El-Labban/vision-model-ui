@@ -8,7 +8,7 @@ from utils import encode_image_to_base64
 
 class SingleImageTab:
     def __init__(self, ollama_url, model_name, temperature, enable_thinking_api=False, show_thinking=True,
-                 enable_anti_repetition=False, context_limit=0, repeat_penalty=1.1, frequency_penalty=0.0, presence_penalty=0.0, top_p=0.9):
+                 enable_anti_repetition=False, context_limit=0, repeat_penalty=1.1, frequency_penalty=0.0, presence_penalty=0.0, top_p=0.9, num_ctx=32768):
         self.ollama_url = ollama_url
         self.model_name = model_name
         self.temperature = temperature
@@ -20,6 +20,7 @@ class SingleImageTab:
         self.frequency_penalty = frequency_penalty
         self.presence_penalty = presence_penalty
         self.top_p = top_p
+        self.num_ctx = num_ctx
         
         # Initialize session state
         if "messages" not in st.session_state:
@@ -286,7 +287,8 @@ class SingleImageTab:
             "messages": messages,
             "stream": True,
             "options": {
-                "temperature": self.temperature
+                "temperature": self.temperature,
+                "num_ctx": self.num_ctx
             },
             "think": self.enable_thinking_api
         }

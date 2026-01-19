@@ -58,6 +58,17 @@ with st.sidebar:
         help="Higher values make output more random, lower values more focused"
     )
     
+    # Context window size
+    st.markdown("### 📝 Context Window")
+    num_ctx = st.number_input(
+        "Context Window Size (tokens)",
+        min_value=512,
+        max_value=128000,
+        value=32768,
+        step=1024,
+        help="Token context window. Ollama default is 2048. Increase to 8k-40k to prevent looping. Higher values use more VRAM."
+    )
+    
     # Anti-repetition settings
     st.markdown("### 🔁 Anti-Repetition")
     enable_anti_repetition = st.checkbox(
@@ -347,20 +358,20 @@ tab1, tab2, tab3 = st.tabs([
 with tab1:
     single_image_tab = SingleImageTab(
         ollama_url, model_name, temperature, enable_thinking_api, show_thinking,
-        enable_anti_repetition, context_limit, repeat_penalty, frequency_penalty, presence_penalty, top_p
+        enable_anti_repetition, context_limit, repeat_penalty, frequency_penalty, presence_penalty, top_p, num_ctx
     )
     single_image_tab.render()
 
 with tab2:
     dual_image_tab = DualImageTab(
         ollama_url, model_name, temperature, enable_thinking_api, show_thinking,
-        enable_anti_repetition, context_limit, repeat_penalty, frequency_penalty, presence_penalty, top_p
+        enable_anti_repetition, context_limit, repeat_penalty, frequency_penalty, presence_penalty, top_p, num_ctx
     )
     dual_image_tab.render()
 
 with tab3:
     triple_image_tab = TripleImageTab(
         ollama_url, model_name, temperature, enable_thinking_api, show_thinking,
-        enable_anti_repetition, context_limit, repeat_penalty, frequency_penalty, presence_penalty, top_p
+        enable_anti_repetition, context_limit, repeat_penalty, frequency_penalty, presence_penalty, top_p, num_ctx
     )
     triple_image_tab.render()
