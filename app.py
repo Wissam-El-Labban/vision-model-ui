@@ -60,10 +60,16 @@ with st.sidebar:
     
     # Thinking/reasoning toggle
     st.markdown("### 🧠 Model Thinking")
-    enable_thinking = st.checkbox(
-        "Enable reasoning trace",
+    enable_thinking_api = st.checkbox(
+        "Enable model thinking",
+        value=False,
+        help="Send 'think' parameter to API. Models like Qwen3, DeepSeek-R1 will generate reasoning traces."
+    )
+    show_thinking = st.checkbox(
+        "Show thinking process",
         value=True,
-        help="Show the model's thinking process (supported by models like Qwen3, DeepSeek-R1, etc.)"
+        help="Display the model's thinking/reasoning output in the chat (only if model generates it)",
+        disabled=not enable_thinking_api
     )
     
     # Model management section
@@ -281,13 +287,13 @@ tab1, tab2, tab3 = st.tabs([
 
 # Render each tab
 with tab1:
-    single_image_tab = SingleImageTab(ollama_url, model_name, temperature, enable_thinking)
+    single_image_tab = SingleImageTab(ollama_url, model_name, temperature, enable_thinking_api, show_thinking)
     single_image_tab.render()
 
 with tab2:
-    dual_image_tab = DualImageTab(ollama_url, model_name, temperature, enable_thinking)
+    dual_image_tab = DualImageTab(ollama_url, model_name, temperature, enable_thinking_api, show_thinking)
     dual_image_tab.render()
 
 with tab3:
-    triple_image_tab = TripleImageTab(ollama_url, model_name, temperature, enable_thinking)
+    triple_image_tab = TripleImageTab(ollama_url, model_name, temperature, enable_thinking_api, show_thinking)
     triple_image_tab.render()

@@ -7,11 +7,12 @@ import io
 from utils import combine_three_images_side_by_side
 
 class TripleImageTab:
-    def __init__(self, ollama_url, model_name, temperature, enable_thinking=True):
+    def __init__(self, ollama_url, model_name, temperature, enable_thinking_api=False, show_thinking=True):
         self.ollama_url = ollama_url
         self.model_name = model_name
         self.temperature = temperature
-        self.enable_thinking = enable_thinking
+        self.enable_thinking_api = enable_thinking_api
+        self.show_thinking = show_thinking
         
         # Initialize session state
         if "messages_triple" not in st.session_state:
@@ -194,8 +195,8 @@ class TripleImageTab:
         with chat_container:
             for message in st.session_state.messages_triple:
                 with st.chat_message(message["role"]):
-                    # Show thinking if available
-                    if message["role"] == "assistant" and message.get("thinking"):
+                    # Show thinking if available and enabled
+                    if message["role"] == "assistant" and message.get("thinking") and self.show_thinking:
                         with st.expander("🧠 View Thinking Process", expanded=False):
                             st.markdown(message["thinking"])
                     st.markdown(message["content"])
@@ -290,12 +291,9 @@ class TripleImageTab:
             "stream": True,
             "options": {
                 "temperature": self.temperature
-            }
+            },
+            "think": self.enable_thinking_api
         }
-        
-        # Add think parameter if enabled
-        if self.enable_thinking:
-            payload["think"] = True
         
         with chat_container:
             with st.chat_message("assistant"):
@@ -318,22 +316,22 @@ class TripleImageTab:
                         chunk = json.loads(line)
                         
                         # Handle thinking/reasoning output
-                        if self.enable_thinking and "message" in chunk and "thinking" in chunk["message"]:
+                        if self.enable_thinking_api and "message" in chunk and "thinking" in chunk["message"]:
                             full_thinking += chunk["message"]["thinking"]
-                            if full_thinking:
+                            if full_thinking and self.show_thinking:
                                 thinking_placeholder.markdown(f"**🧠 Thinking:**\n\n{full_thinking}▌")
                         
                         # Handle regular content
                         if "message" in chunk and "content" in chunk["message"]:
                             full_response += chunk["message"]["content"]
-                            if full_thinking:
+                            if full_thinking and self.show_thinking:
                                 thinking_placeholder.markdown(f"**🧠 Thinking:**\n\n{full_thinking}")
                             message_placeholder.markdown(full_response + "▌")
                     except json.JSONDecodeError:
                         continue
             
             # Final display
-            if full_thinking:
+            if full_thinking and self.show_thinking:
                 with thinking_placeholder.expander("🧠 View Thinking Process", expanded=False):
                     st.markdown(full_thinking)
                 thinking_placeholder = st.empty()  # Clear the thinking placeholder
