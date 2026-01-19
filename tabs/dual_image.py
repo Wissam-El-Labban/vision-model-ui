@@ -8,12 +8,13 @@ from utils import combine_images_side_by_side
 
 class DualImageTab:
     def __init__(self, ollama_url, model_name, temperature, enable_thinking_api=False, show_thinking=True,
-                 context_limit=0, repeat_penalty=1.1, frequency_penalty=0.0, presence_penalty=0.0, top_p=0.9):
+                 enable_anti_repetition=False, context_limit=0, repeat_penalty=1.1, frequency_penalty=0.0, presence_penalty=0.0, top_p=0.9):
         self.ollama_url = ollama_url
         self.model_name = model_name
         self.temperature = temperature
         self.enable_thinking_api = enable_thinking_api
         self.show_thinking = show_thinking
+        self.enable_anti_repetition = enable_anti_repetition
         self.context_limit = context_limit
         self.repeat_penalty = repeat_penalty
         self.frequency_penalty = frequency_penalty
@@ -234,9 +235,9 @@ class DualImageTab:
                 "content": st.session_state.system_prompt_dual.strip()
             })
         
-        # Apply context limit to prevent repetition
+        # Apply context limit to prevent repetition (only if enabled)
         history = st.session_state.messages_dual
-        if self.context_limit > 0 and len(history) > self.context_limit:
+        if self.enable_anti_repetition and self.context_limit > 0 and len(history) > self.context_limit:
             history = history[-self.context_limit:]
         
         # Add conversation history
@@ -280,14 +281,17 @@ class DualImageTab:
             "messages": messages,
             "stream": True,
             "options": {
-                "temperature": self.temperature,
-                "repeat_penalty": self.repeat_penalty,
-                "frequency_penalty": self.frequency_penalty,
-                "presence_penalty": self.presence_penalty,
-                "top_p": self.top_p
+                "temperature": self.temperature
             },
             "think": self.enable_thinking_api
         }
+        
+        # Add anti-repetition parameters only if enabled
+        if self.enable_anti_repetition:
+            payload["options"]["repeat_penalty"] = self.repeat_penalty
+            payload["options"]["frequency_penalty"] = self.frequency_penalty
+            payload["options"]["presence_penalty"] = self.presence_penalty
+            payload["options"]["top_p"] = self.top_p
         
         with chat_container:
             with st.chat_message("assistant"):
