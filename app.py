@@ -58,6 +58,53 @@ with st.sidebar:
         help="Higher values make output more random, lower values more focused"
     )
     
+    # Anti-repetition settings
+    st.markdown("### 🔁 Anti-Repetition")
+    with st.expander("⚙️ Advanced Parameters", expanded=False):
+        context_limit = st.number_input(
+            "Context message limit",
+            min_value=0,
+            max_value=100,
+            value=0,
+            help="Limit conversation history sent to model (0 = unlimited). Lower values help break repetition patterns."
+        )
+        
+        repeat_penalty = st.slider(
+            "Repetition Penalty",
+            min_value=1.0,
+            max_value=2.0,
+            value=1.1,
+            step=0.05,
+            help="Penalizes repeated tokens. Higher values reduce repetition (1.0 = no penalty)"
+        )
+        
+        frequency_penalty = st.slider(
+            "Frequency Penalty",
+            min_value=0.0,
+            max_value=2.0,
+            value=0.0,
+            step=0.1,
+            help="Reduces likelihood of repeating tokens based on frequency (0.0 = no penalty)"
+        )
+        
+        presence_penalty = st.slider(
+            "Presence Penalty",
+            min_value=0.0,
+            max_value=2.0,
+            value=0.0,
+            step=0.1,
+            help="Reduces likelihood of repeating any token that appeared (0.0 = no penalty)"
+        )
+        
+        top_p = st.slider(
+            "Top P (Nucleus Sampling)",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.9,
+            step=0.05,
+            help="Controls diversity via nucleus sampling. Lower = more focused, higher = more diverse"
+        )
+    
     # Thinking/reasoning toggle
     st.markdown("### 🧠 Model Thinking")
     enable_thinking_api = st.checkbox(
@@ -287,13 +334,22 @@ tab1, tab2, tab3 = st.tabs([
 
 # Render each tab
 with tab1:
-    single_image_tab = SingleImageTab(ollama_url, model_name, temperature, enable_thinking_api, show_thinking)
+    single_image_tab = SingleImageTab(
+        ollama_url, model_name, temperature, enable_thinking_api, show_thinking,
+        context_limit, repeat_penalty, frequency_penalty, presence_penalty, top_p
+    )
     single_image_tab.render()
 
 with tab2:
-    dual_image_tab = DualImageTab(ollama_url, model_name, temperature, enable_thinking_api, show_thinking)
+    dual_image_tab = DualImageTab(
+        ollama_url, model_name, temperature, enable_thinking_api, show_thinking,
+        context_limit, repeat_penalty, frequency_penalty, presence_penalty, top_p
+    )
     dual_image_tab.render()
 
 with tab3:
-    triple_image_tab = TripleImageTab(ollama_url, model_name, temperature, enable_thinking_api, show_thinking)
+    triple_image_tab = TripleImageTab(
+        ollama_url, model_name, temperature, enable_thinking_api, show_thinking,
+        context_limit, repeat_penalty, frequency_penalty, presence_penalty, top_p
+    )
     triple_image_tab.render()

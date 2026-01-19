@@ -7,12 +7,18 @@ import io
 from utils import combine_three_images_side_by_side
 
 class TripleImageTab:
-    def __init__(self, ollama_url, model_name, temperature, enable_thinking_api=False, show_thinking=True):
+    def __init__(self, ollama_url, model_name, temperature, enable_thinking_api=False, show_thinking=True,
+                 context_limit=0, repeat_penalty=1.1, frequency_penalty=0.0, presence_penalty=0.0, top_p=0.9):
         self.ollama_url = ollama_url
         self.model_name = model_name
         self.temperature = temperature
         self.enable_thinking_api = enable_thinking_api
         self.show_thinking = show_thinking
+        self.context_limit = context_limit
+        self.repeat_penalty = repeat_penalty
+        self.frequency_penalty = frequency_penalty
+        self.presence_penalty = presence_penalty
+        self.top_p = top_p
         
         # Initialize session state
         if "messages_triple" not in st.session_state:
@@ -251,8 +257,15 @@ class TripleImageTab:
                 "content": st.session_state.system_prompt_triple.strip()
             })
         
+        # Apply context limit to prevent repetition
+        history = st.session_state.messages_triple
+        if self.context_limit > 0 and len(history) > self.context_limit:
+            history = history[-self.context_limit:]
+        
         # Add conversation history
-        for i, msg in enumerate(st.session_state.messages_triple):
+        for i, msg in enumerate(history):
+            # Get the original index for image attachment logic
+            original_i = st.session_state.messages_triple.index(msg)
             if msg["role"] == "user":
                 user_msg = {
                     "role": msg["role"],
@@ -260,7 +273,7 @@ class TripleImageTab:
                 }
                 
                 # Only include image on first message
-                if i == 0:
+                if original_i == 0:
                     user_msg["images"] = [st.session_state.combined_image_triple_b64]
                 
                 messages.append(user_msg)
@@ -290,7 +303,11 @@ class TripleImageTab:
             "messages": messages,
             "stream": True,
             "options": {
-                "temperature": self.temperature
+                "temperature": self.temperature,
+                "repeat_penalty": self.repeat_penalty,
+                "frequency_penalty": self.frequency_penalty,
+                "presence_penalty": self.presence_penalty,
+                "top_p": self.top_p
             },
             "think": self.enable_thinking_api
         }
