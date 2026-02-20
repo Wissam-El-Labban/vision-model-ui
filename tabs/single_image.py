@@ -33,6 +33,10 @@ class SingleImageTab:
             st.session_state.pending_attachment = None
         if "single_image_rotation" not in st.session_state:
             st.session_state.single_image_rotation = 0
+        if "system_image_single_b64" not in st.session_state:
+            st.session_state.system_image_single_b64 = None
+        if "system_image_single_name" not in st.session_state:
+            st.session_state.system_image_single_name = None
     
     def render(self):
         """Render the single image tab"""
@@ -140,6 +144,29 @@ class SingleImageTab:
                 label_visibility="collapsed"
             )
             st.session_state.system_prompt_single = system_prompt
+            
+            st.markdown("**📎 Attach Image to System Prompt (optional)**")
+            st.caption("This image will be sent with every message to provide persistent visual context.")
+            
+            system_image = st.file_uploader(
+                "System prompt image",
+                type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
+                key="system_image_single",
+                help="Upload an image to attach to the system prompt. It will be sent with every message.",
+                label_visibility="collapsed"
+            )
+            
+            if system_image:
+                st.session_state.system_image_single_b64 = encode_image_to_base64(system_image)
+                st.session_state.system_image_single_name = system_image.name
+                st.image(system_image, caption=f"System Image: {system_image.name}", width=200)
+            elif st.session_state.system_image_single_b64:
+                st.image(f"data:image/png;base64,{st.session_state.system_image_single_b64}", 
+                        caption=f"System Image: {st.session_state.system_image_single_name}", width=200)
+                if st.button("🗑️ Remove System Image", key="remove_system_image_single"):
+                    st.session_state.system_image_single_b64 = None
+                    st.session_state.system_image_single_name = None
+                    st.rerun()
         
         # Display chat history
         chat_container = st.container(height=600)
@@ -224,10 +251,14 @@ class SingleImageTab:
         
         # Add system prompt if provided
         if st.session_state.get('system_prompt_single', '').strip():
-            messages.append({
+            system_msg = {
                 "role": "system",
                 "content": st.session_state.system_prompt_single.strip()
-            })
+            }
+            # Add system image if attached
+            if st.session_state.system_image_single_b64:
+                system_msg["images"] = [st.session_state.system_image_single_b64]
+            messages.append(system_msg)
         
         # Apply context limit to prevent repetition (only if enabled)
         history = st.session_state.messages

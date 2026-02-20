@@ -4,7 +4,7 @@ import json
 import base64
 from PIL import Image
 import io
-from utils import combine_three_images_side_by_side
+from utils import combine_three_images_side_by_side, encode_image_to_base64
 
 class TripleImageTab:
     def __init__(self, ollama_url, model_name, temperature, enable_thinking_api=False, show_thinking=True,
@@ -35,6 +35,10 @@ class TripleImageTab:
             st.session_state.triple_image2_rotation = 0
         if "triple_image3_rotation" not in st.session_state:
             st.session_state.triple_image3_rotation = 0
+        if "system_image_triple_b64" not in st.session_state:
+            st.session_state.system_image_triple_b64 = None
+        if "system_image_triple_name" not in st.session_state:
+            st.session_state.system_image_triple_name = None
     
     def render(self):
         """Render the triple image tab"""
@@ -197,6 +201,29 @@ class TripleImageTab:
                 label_visibility="collapsed"
             )
             st.session_state.system_prompt_triple = system_prompt
+            
+            st.markdown("**📎 Attach Image to System Prompt (optional)**")
+            st.caption("This image will be sent with every message to provide persistent visual context.")
+            
+            system_image = st.file_uploader(
+                "System prompt image",
+                type=["jpg", "jpeg", "png", "bmp", "gif", "webp"],
+                key="system_image_triple",
+                help="Upload an image to attach to the system prompt. It will be sent with every message.",
+                label_visibility="collapsed"
+            )
+            
+            if system_image:
+                st.session_state.system_image_triple_b64 = encode_image_to_base64(system_image)
+                st.session_state.system_image_triple_name = system_image.name
+                st.image(system_image, caption=f"System Image: {system_image.name}", width=200)
+            elif st.session_state.system_image_triple_b64:
+                st.image(f"data:image/png;base64,{st.session_state.system_image_triple_b64}", 
+                        caption=f"System Image: {st.session_state.system_image_triple_name}", width=200)
+                if st.button("🗑️ Remove System Image", key="remove_system_image_triple"):
+                    st.session_state.system_image_triple_b64 = None
+                    st.session_state.system_image_triple_name = None
+                    st.rerun()
         
         # Display chat history
         chat_container = st.container(height=600)
@@ -254,10 +281,14 @@ class TripleImageTab:
         
         # Add system prompt if provided
         if st.session_state.get('system_prompt_triple', '').strip():
-            messages.append({
+            system_msg = {
                 "role": "system",
                 "content": st.session_state.system_prompt_triple.strip()
-            })
+            }
+            # Add system image if attached
+            if st.session_state.system_image_triple_b64:
+                system_msg["images"] = [st.session_state.system_image_triple_b64]
+            messages.append(system_msg)
         
         # Apply context limit to prevent repetition (only if enabled)
         history = st.session_state.messages_triple
