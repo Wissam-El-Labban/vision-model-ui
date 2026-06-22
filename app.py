@@ -47,100 +47,6 @@ with st.sidebar:
         if model_name:
             st.info(f"**Selected Model:** `{model_name}`")
     
-    # Temperature setting
-    st.markdown("### 🌡️ Temperature")
-    temperature = st.slider(
-        "Model Temperature",
-        min_value=0.0,
-        max_value=2.0,
-        value=0.7,
-        step=0.1,
-        help="Higher values make output more random, lower values more focused"
-    )
-    
-    # Context window size
-    st.markdown("### 📝 Context Window")
-    num_ctx = st.number_input(
-        "Context Window Size (tokens)",
-        min_value=512,
-        max_value=128000,
-        value=32768,
-        step=1024,
-        help="Token context window. Ollama default is 2048. Increase to 8k-40k to prevent looping. Higher values use more VRAM."
-    )
-    
-    # Anti-repetition settings
-    st.markdown("### 🔁 Anti-Repetition")
-    enable_anti_repetition = st.checkbox(
-        "Enable anti-repetition parameters",
-        value=False,
-        help="Send advanced parameters to control repetition. Disable if your model doesn't support these."
-    )
-    
-    with st.expander("⚙️ Advanced Parameters", expanded=False):
-        context_limit = st.number_input(
-            "Context message limit",
-            min_value=0,
-            max_value=100,
-            value=0,
-            help="Limit conversation history sent to model (0 = unlimited). Lower values help break repetition patterns.",
-            disabled=not enable_anti_repetition
-        )
-        
-        repeat_penalty = st.slider(
-            "Repetition Penalty",
-            min_value=1.0,
-            max_value=2.0,
-            value=1.1,
-            step=0.05,
-            help="Penalizes repeated tokens. Higher values reduce repetition (1.0 = no penalty)",
-            disabled=not enable_anti_repetition
-        )
-        
-        frequency_penalty = st.slider(
-            "Frequency Penalty",
-            min_value=0.0,
-            max_value=2.0,
-            value=0.0,
-            step=0.1,
-            help="Reduces likelihood of repeating tokens based on frequency (0.0 = no penalty)",
-            disabled=not enable_anti_repetition
-        )
-        
-        presence_penalty = st.slider(
-            "Presence Penalty",
-            min_value=0.0,
-            max_value=2.0,
-            value=0.0,
-            step=0.1,
-            help="Reduces likelihood of repeating any token that appeared (0.0 = no penalty)",
-            disabled=not enable_anti_repetition
-        )
-        
-        top_p = st.slider(
-            "Top P (Nucleus Sampling)",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.9,
-            step=0.05,
-            help="Controls diversity via nucleus sampling. Lower = more focused, higher = more diverse",
-            disabled=not enable_anti_repetition
-        )
-    
-    # Thinking/reasoning toggle
-    st.markdown("### 🧠 Model Thinking")
-    enable_thinking_api = st.checkbox(
-        "Enable model thinking",
-        value=False,
-        help="Send 'think' parameter to API. Models like Qwen3, DeepSeek-R1 will generate reasoning traces."
-    )
-    show_thinking = st.checkbox(
-        "Show thinking process",
-        value=True,
-        help="Display the model's thinking/reasoning output in the chat (only if model generates it)",
-        disabled=not enable_thinking_api
-    )
-    
     # Model management section
     st.markdown("---")
     st.markdown("### 🔧 Model Management")
@@ -338,7 +244,6 @@ with st.sidebar:
     - Single Image Chat: Upload one image and ask questions with optional additional context images
     - Dual Image Compare: Upload two images side-by-side for comparison
     - Triple Image Compare: Upload three images for comprehensive analysis
-    - Use temperature to control response randomness
     - Set a custom system prompt to guide the model's behavior across all modes
     - Unload models when switching to free VRAM
     """)
@@ -356,22 +261,13 @@ tab1, tab2, tab3 = st.tabs([
 
 # Render each tab
 with tab1:
-    single_image_tab = SingleImageTab(
-        ollama_url, model_name, temperature, enable_thinking_api, show_thinking,
-        enable_anti_repetition, context_limit, repeat_penalty, frequency_penalty, presence_penalty, top_p, num_ctx
-    )
+    single_image_tab = SingleImageTab(ollama_url, model_name)
     single_image_tab.render()
 
 with tab2:
-    dual_image_tab = DualImageTab(
-        ollama_url, model_name, temperature, enable_thinking_api, show_thinking,
-        enable_anti_repetition, context_limit, repeat_penalty, frequency_penalty, presence_penalty, top_p, num_ctx
-    )
+    dual_image_tab = DualImageTab(ollama_url, model_name)
     dual_image_tab.render()
 
 with tab3:
-    triple_image_tab = TripleImageTab(
-        ollama_url, model_name, temperature, enable_thinking_api, show_thinking,
-        enable_anti_repetition, context_limit, repeat_penalty, frequency_penalty, presence_penalty, top_p, num_ctx
-    )
+    triple_image_tab = TripleImageTab(ollama_url, model_name)
     triple_image_tab.render()

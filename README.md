@@ -21,7 +21,7 @@ A modular Streamlit web application for analyzing images using Ollama-powered vi
 
 ### ⚙️ Advanced Features
 - Multiple vision model support (Qwen 2.5-VL, Qwen 3-VL, LLaVA, DeepSeek, etc.)
-- Adjustable temperature control (0.0-2.0)
+- Custom system prompts (with optional persistent context image)
 - Model management (view running models, unload from VRAM)
 - Streaming responses for real-time feedback
 - Memory-optimized image handling (images sent only once per conversation)
@@ -105,7 +105,7 @@ If you prefer to set up the environment manually:
 1. **Configure settings** in the sidebar:
    - Set Ollama URL (default: `http://localhost:11434`)
    - Select a vision model from the dropdown
-   - Adjust temperature (0.0 = focused, 2.0 = creative)
+   - Optionally set a custom system prompt
 
 2. **Choose a tab**:
    - **Single Image Chat**: Upload one image and ask questions
@@ -146,7 +146,7 @@ If you prefer to set up the environment manually:
 You can adjust settings in the sidebar:
 - **Ollama API URL**: Default is `http://localhost:11434`
 - **Model Selection**: Automatically detects available vision models
-- **Temperature**: Controls response randomness (0.0 = deterministic, 2.0 = highly creative)
+- **System Prompt**: Optionally guide the model's behavior across all modes
 - **Model Management**: Unload models to free VRAM or view running models
 
 ## Architecture & Code Quality
@@ -193,7 +193,7 @@ Each tab is a **self-contained class** with identical structure:
 **Class Methods** (all tabs):
 ```python
 class SingleImageTab:
-    def __init__(self, ollama_url, model_name, temperature)
+    def __init__(self, ollama_url, model_name)
     def render(self)                      # Main rendering orchestrator
     def _render_upload_section(self)      # Image upload UI
     def _render_chat_section(self)        # Chat interface

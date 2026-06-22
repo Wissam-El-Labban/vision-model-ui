@@ -1,27 +1,15 @@
 import streamlit as st
 import requests
-import json
 import base64
 from PIL import Image
 import io
-from utils import combine_images_side_by_side, encode_image_to_base64
+from utils import combine_images_side_by_side, encode_image_to_base64, stream_ollama_chat
 
 class DualImageTab:
-    def __init__(self, ollama_url, model_name, temperature, enable_thinking_api=False, show_thinking=True,
-                 enable_anti_repetition=False, context_limit=0, repeat_penalty=1.1, frequency_penalty=0.0, presence_penalty=0.0, top_p=0.9, num_ctx=32768):
+    def __init__(self, ollama_url, model_name):
         self.ollama_url = ollama_url
         self.model_name = model_name
-        self.temperature = temperature
-        self.enable_thinking_api = enable_thinking_api
-        self.show_thinking = show_thinking
-        self.enable_anti_repetition = enable_anti_repetition
-        self.context_limit = context_limit
-        self.repeat_penalty = repeat_penalty
-        self.frequency_penalty = frequency_penalty
-        self.presence_penalty = presence_penalty
-        self.top_p = top_p
-        self.num_ctx = num_ctx
-        
+
         # Initialize session state
         if "messages_dual" not in st.session_state:
             st.session_state.messages_dual = []
@@ -207,10 +195,6 @@ class DualImageTab:
         with chat_container:
             for message in st.session_state.messages_dual:
                 with st.chat_message(message["role"]):
-                    # Show thinking if available and enabled
-                    if message["role"] == "assistant" and message.get("thinking") and self.show_thinking:
-                        with st.expander("🧠 View Thinking Process", expanded=False):
-                            st.markdown(message["thinking"])
                     st.markdown(message["content"])
         
         # Chat input
@@ -248,7 +232,7 @@ class DualImageTab:
         except requests.exceptions.ConnectionError:
             st.error(f"❌ Could not connect to Ollama. Make sure it's running on {self.ollama_url}")
         except requests.exceptions.Timeout:
-            st.error("⏱️ Request timed out.")
+            st.error("⏱️ Request timed out. The model may still be loading — try again in a moment.")
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
     
@@ -267,13 +251,9 @@ class DualImageTab:
                 system_msg["images"] = [st.session_state.system_image_dual_b64]
             messages.append(system_msg)
         
-        # Apply context limit to prevent repetition (only if enabled)
-        history = st.session_state.messages_dual
-        if self.enable_anti_repetition and self.context_limit > 0 and len(history) > self.context_limit:
-            history = history[-self.context_limit:]
-        
         # Add conversation history
-        for i, msg in enumerate(history):
+        history = st.session_state.messages_dual
+        for msg in history:
             # Get the original index for image attachment logic
             original_i = st.session_state.messages_dual.index(msg)
             if msg["role"] == "user":
@@ -307,74 +287,21 @@ class DualImageTab:
         return messages
     
     def _call_ollama_api(self, messages, chat_container):
-        """Call Ollama API and stream response"""
-        payload = {
-            "model": self.model_name,
-            "messages": messages,
-            "stream": True,
-            "options": {
-                "temperature": self.temperature,
-                "num_ctx": self.num_ctx
-            },
-            "think": self.enable_thinking_api
-        }
-        
-        # Add anti-repetition parameters only if enabled
-        if self.enable_anti_repetition:
-            payload["options"]["repeat_penalty"] = self.repeat_penalty
-            payload["options"]["frequency_penalty"] = self.frequency_penalty
-            payload["options"]["presence_penalty"] = self.presence_penalty
-            payload["options"]["top_p"] = self.top_p
-        
+        """Call Ollama API and stream the response into the chat."""
         with chat_container:
             with st.chat_message("assistant"):
-                thinking_placeholder = st.empty()
                 message_placeholder = st.empty()
-        
-        full_thinking = ""
+
         full_response = ""
-        response = requests.post(
-            f"{self.ollama_url}/api/chat",
-            json=payload,
-            stream=True,
-            timeout=120
-        )
-        
-        if response.status_code == 200:
-            for line in response.iter_lines():
-                if line:
-                    try:
-                        chunk = json.loads(line)
-                        
-                        # Handle thinking/reasoning output
-                        if self.enable_thinking_api and "message" in chunk and "thinking" in chunk["message"]:
-                            full_thinking += chunk["message"]["thinking"]
-                            if full_thinking and self.show_thinking:
-                                thinking_placeholder.markdown(f"**🧠 Thinking:**\n\n{full_thinking}▌")
-                        
-                        # Handle regular content
-                        if "message" in chunk and "content" in chunk["message"]:
-                            full_response += chunk["message"]["content"]
-                            if full_thinking and self.show_thinking:
-                                thinking_placeholder.markdown(f"**🧠 Thinking:**\n\n{full_thinking}")
-                            message_placeholder.markdown(full_response + "▌")
-                    except json.JSONDecodeError:
-                        continue
-            
-            # Final display
-            if full_thinking and self.show_thinking:
-                with thinking_placeholder.expander("🧠 View Thinking Process", expanded=False):
-                    st.markdown(full_thinking)
-                thinking_placeholder = st.empty()  # Clear the thinking placeholder
-            
-            message_placeholder.markdown(full_response)
-            
-            st.session_state.messages_dual.append({
-                "role": "assistant",
-                "content": full_response,
-                "thinking": full_thinking if full_thinking else None
-            })
-            
-            st.rerun()
-        else:
-            st.error(f"Error: {response.status_code} - {response.text}")
+        for content in stream_ollama_chat(self.ollama_url, self.model_name, messages):
+            full_response += content
+            message_placeholder.markdown(full_response + "▌")
+
+        message_placeholder.markdown(full_response)
+
+        st.session_state.messages_dual.append({
+            "role": "assistant",
+            "content": full_response
+        })
+
+        st.rerun()

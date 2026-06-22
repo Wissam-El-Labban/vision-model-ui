@@ -1,9 +1,45 @@
 import streamlit as st
 import requests
+import json
 import base64
 from PIL import Image
 import io
 import atexit
+
+# Connect quickly (fail fast if Ollama is down) but allow a generous read
+# timeout so a cold model load on the first request doesn't look like a hang.
+OLLAMA_TIMEOUT = (10, 300)
+
+def stream_ollama_chat(ollama_url, model_name, messages):
+    """POST to Ollama's /api/chat and yield streamed content strings.
+
+    Sends only model + messages so Ollama uses its own sensible defaults
+    (notably a small context window) rather than forcing a huge num_ctx.
+    """
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "stream": True,
+    }
+    response = requests.post(
+        f"{ollama_url}/api/chat",
+        json=payload,
+        stream=True,
+        timeout=OLLAMA_TIMEOUT,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"Ollama returned {response.status_code}: {response.text}")
+
+    for line in response.iter_lines():
+        if not line:
+            continue
+        try:
+            chunk = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        content = (chunk.get("message") or {}).get("content")
+        if content:
+            yield content
 
 def cleanup_ollama_models():
     """Unload all running Ollama models on exit"""
