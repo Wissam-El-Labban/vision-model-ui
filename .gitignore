@@ -10,8 +10,9 @@ env/
 ENV/
 .venv
 
-# Streamlit cache
-.streamlit/
+# Node / frontend build
+node_modules/
+frontend/dist/
 
 # IDE
 .vscode/

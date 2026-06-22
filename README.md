@@ -1,315 +1,90 @@
-# Vision Model Chat Interface
+# 👁️ Vision Model Chat
 
-A modular Streamlit web application for analyzing images using Ollama-powered vision models. Features single image chat, dual image comparison, and triple image comparison capabilities.
+A polished local web UI for chatting with **vision models via Ollama**. Drop in any number of
+images, ask questions, and stream the model's response — all from a single app.
+
+Built with a **React (Vite + TypeScript)** frontend and a **FastAPI** backend that proxies Ollama.
 
 ## Features
 
-### 📷 Single Image Chat
-- Upload one image and ask questions with optional additional context images
-- Attach supplementary images to provide more context in conversations
-- Persistent chat history with image references
+- **Unified multi-image chat** — attach as many images as you want to your first question *or any
+  follow-up*. Images are sent as separate images (not combined into one), so the model sees each one
+  distinctly. This replaces the old Single/Dual/Triple tabs.
+- **Streaming responses** — tokens appear live as the model generates them.
+- **System prompt** — optional custom system prompt, with an optional persistent context image sent
+  with every message.
+- **Model management** — list installed vision models, download new ones (with live progress),
+  remove, unload from VRAM, and view running models.
+- **In-app Ollama updates** — the UI tells you when a newer Ollama is available and lets you choose
+  to upgrade with one click (local installs only). Updates are **opt-in**, never forced.
+- **Per-image rotate** in the composer (client-side, via canvas).
 
-### 🖼️🖼️ Dual Image Compare
-- Upload two images side-by-side for comparison
-- Perfect for before/after analysis or comparing similar subjects
-- Automatic image alignment and scaling
-
-### 🖼️🖼️🖼️ Triple Image Compare
-- Upload three images for comprehensive analysis
-- Ideal for progression sequences or multi-angle comparisons
-- Side-by-side composite view
-
-### ⚙️ Advanced Features
-- Multiple vision model support (Qwen 2.5-VL, Qwen 3-VL, LLaVA, DeepSeek, etc.)
-- Custom system prompts (with optional persistent context image)
-- Model management (view running models, unload from VRAM)
-- Streaming responses for real-time feedback
-- Memory-optimized image handling (images sent only once per conversation)
-
-## Quick Start (Automated)
-
-The easiest way to run the application is using the provided shell script:
+## Quick Start
 
 ```bash
 ./run.sh
 ```
 
-This script will automatically:
-- Create a Python virtual environment if one doesn't exist
-- Install all required dependencies
-- Install Ollama (Linux only) if it's not already installed
-- **Check for Ollama updates** and install them if a new version is available
-- Start the Ollama service if it's not running
-- Launch the Streamlit application
+This creates the Python venv, installs backend deps, builds the frontend, ensures Ollama is installed
+and running, and serves everything at **http://127.0.0.1:8000**.
 
-**Smart Update Handling:**
-- Only checks for updates when internet is available
-- Compares current version with latest GitHub release
-- Only updates if a newer version is actually available
-- Gracefully handles offline scenarios and API failures
-- Automatic updates on Linux, manual notification on macOS
+> Requires Python 3.10+, Node.js 18+, and (on first run) internet access to install Ollama.
 
-The application will open at http://localhost:8501 in your browser.
+## Development
 
-## Manual Installation
+Run the backend and the Vite dev server separately for hot-reload:
 
-If you prefer to set up the environment manually:
+```bash
+# Terminal 1 — backend (auto-reload)
+./venv/bin/uvicorn backend.main:app --reload --port 8000
 
-### Prerequisites
+# Terminal 2 — frontend (proxies /api to :8000)
+cd frontend && npm install && npm run dev
+```
 
-1. **Install Ollama**
-   ```bash
-   # Visit https://ollama.ai to install Ollama for your system
-   ```
+Then open the Vite URL (http://localhost:5173).
 
-2. **Pull a vision model**
-   ```bash
-   # Recommended models:
-   ollama pull qwen2.5-vl:7b       # Balanced performance
-   ollama pull llava:latest        # General purpose
-   ollama pull qwen2-vl:72b        # Best quality (requires GPU)
-   ollama pull deepseek-vl:1.3b    # Lightweight, good for OCR
-   ```
+## Architecture
 
-3. **Make sure Ollama is running**
-   ```bash
-   ollama serve
-   ```
+```
+vision-model-ui/
+├── backend/
+│   ├── main.py            # FastAPI routes + serves built frontend
+│   ├── ollama_client.py   # all Ollama HTTP calls (chat, models, version, upgrade)
+│   └── requirements.txt
+├── frontend/
+│   └── src/
+│       ├── App.tsx            # state + chat orchestration
+│       ├── api.ts             # fetch + streaming client
+│       └── components/        # Sidebar, Chat, Composer, ModelManager, UpdateBanner
+└── run.sh                 # build + serve
+```
 
-### Installation Steps
+- The browser never talks to Ollama directly — every call goes through the FastAPI backend.
+- Chat, model-pull progress, and the Ollama upgrade all **stream** to the client.
+- Chat requests send only `model` + `messages` with `think: false`, and use a `(10s connect, 300s
+  read)` timeout (fast failure when Ollama is down, headroom for cold model loads).
 
-1. **Create a virtual environment** (recommended)
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate  # On Linux/macOS
-   # or
-   venv\Scripts\activate     # On Windows
-   ```
+## API endpoints
 
-2. **Install Python dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-### Running the Application
-
-1. **Run the Streamlit app**
-   ```bash
-   streamlit run app.py
-   ```
-
-2. **Open your browser** to the URL shown (usually http://localhost:8501)
-
-## Usage
-
-1. **Configure settings** in the sidebar:
-   - Set Ollama URL (default: `http://localhost:11434`)
-   - Select a vision model from the dropdown
-   - Optionally set a custom system prompt
-
-2. **Choose a tab**:
-   - **Single Image Chat**: Upload one image and ask questions
-   - **Dual Image Compare**: Upload two images for side-by-side analysis
-   - **Triple Image Compare**: Upload three images for comprehensive comparison
-
-3. **Upload image(s)** and start chatting!
-
-## Example Questions
-
-### Single Image Chat
-- "What's in this image?"
-- "Describe the scene in detail"
-- "What colors are dominant in this image?"
-- "Are there any people in this photo?"
-- "What text can you see in this image?"
-
-### Dual Image Compare
-- "What are the differences between these two images?"
-- "Which image has better lighting?"
-- "Compare the composition of both photos"
-- "Are these the same object from different angles?"
-
-### Triple Image Compare
-- "Show me the progression across these three images"
-- "Which of these three images is the best quality?"
-- "Describe the differences between all three photos"
-- "Are these images related or completely different?"
+| Method | Path                     | Purpose                              |
+| ------ | ------------------------ | ------------------------------------ |
+| GET    | `/api/models`            | List vision (and all) models         |
+| POST   | `/api/chat`              | Stream a chat response               |
+| POST   | `/api/models/pull`       | Download a model (streams progress)  |
+| DELETE | `/api/models/{name}`     | Remove a model                       |
+| POST   | `/api/models/unload`     | Unload all models from VRAM          |
+| GET    | `/api/ps`                | Running models                       |
+| GET    | `/api/ollama/version`    | Installed vs latest + update flag    |
+| POST   | `/api/ollama/upgrade`    | Run the Ollama installer (streams)   |
 
 ## Troubleshooting
 
-- **Connection Error**: Make sure Ollama is running (`ollama serve`)
-- **Model Not Found**: Pull the model first (`ollama pull qwen3-vl:4b`)
-- **Slow Response**: The 4B model is reasonably fast, but larger images may take longer to process
-
-## Configuration
-
-You can adjust settings in the sidebar:
-- **Ollama API URL**: Default is `http://localhost:11434`
-- **Model Selection**: Automatically detects available vision models
-- **System Prompt**: Optionally guide the model's behavior across all modes
-- **Model Management**: Unload models to free VRAM or view running models
-
-## Architecture & Code Quality
-
-### 📁 Project Structure
-
-```
-vision-model/
-├── app.py                    # Main application entry point (140 lines)
-├── utils.py                  # Shared utility functions (150 lines)
-├── requirements.txt          # Python dependencies
-├── README.md                 # Documentation
-└── tabs/                     # Modular tab implementations
-    ├── __init__.py          # Module exports
-    ├── single_image.py      # Single image chat functionality (250 lines)
-    ├── dual_image.py        # Dual image comparison (200 lines)
-    └── triple_image.py      # Triple image comparison (200 lines)
-```
-
-### 🏗️ Modular Design
-
-The application follows a **modular architecture** with clear separation of concerns:
-
-#### **app.py** - Application Orchestrator
-- **Responsibility**: Main entry point, configuration, and tab coordination
-- **Coupling**: Moderate (imports tab classes, passes configuration)
-- **Cohesion**: High (all code relates to app initialization)
-- **Lines**: ~140 (focused and minimal)
-
-#### **utils.py** - Shared Utilities
-- **Responsibility**: Image processing, encoding, model fetching, cleanup
-- **Coupling**: Low (no dependencies on other modules)
-- **Cohesion**: Very High (pure utility functions)
-- **Functions**:
-  - `encode_image_to_base64()` - Convert images to base64
-  - `combine_images_side_by_side()` - Merge 2 images horizontally
-  - `combine_three_images_side_by_side()` - Merge 3 images horizontally
-  - `get_available_models()` - Fetch vision models from Ollama
-  - `cleanup_ollama_models()` - Free VRAM on exit
-
-#### **tabs/** - Feature Modules
-Each tab is a **self-contained class** with identical structure:
-
-**Class Methods** (all tabs):
-```python
-class SingleImageTab:
-    def __init__(self, ollama_url, model_name)
-    def render(self)                      # Main rendering orchestrator
-    def _render_upload_section(self)      # Image upload UI
-    def _render_chat_section(self)        # Chat interface
-    def _handle_chat_input(self)          # Process user messages
-    def _build_messages(self)             # Construct API payload
-    def _call_ollama_api(self)            # Stream responses
-```
-
-**Benefits**:
-- ✅ **Single Responsibility**: Each tab handles ONE feature
-- ✅ **Encapsulation**: Private methods (prefix `_`) hide implementation
-- ✅ **Reusability**: Shared patterns across tabs
-- ✅ **Testability**: Easy to unit test individual components
-
-### 🔗 Coupling Analysis
-
-**External Coupling** (dependencies):
-- `streamlit` - UI framework
-- `requests` - HTTP API calls
-- `PIL` - Image processing
-- `base64` - Image encoding
-
-**Internal Coupling**:
-
-| From → To | Type | Level | Assessment |
-|-----------|------|-------|------------|
-| app.py → tabs/* | Control Coupling | Moderate | ✅ Good (dependency injection) |
-| tabs/* → utils.py | Data Coupling | Low | ✅ Excellent (pure functions) |
-| tabs/* → Session State | Common Coupling | High | ⚠️ Acceptable (Streamlit pattern) |
-
-**Coupling Strengths**:
-- No circular dependencies
-- Tab modules are independent (no cross-imports)
-- Utils has zero internal dependencies
-- Changes to one tab don't affect others
-
-**Coupling Diagram**:
-
-```
-┌─────────────┐
-│  app_new.py │  ◄──── Entry point
-└──────┬──────┘
-       │ Creates instances (Control Coupling)
-       ├────────────────┬────────────────┬────────────────┐
-       ▼                ▼                ▼                ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────┐
-│single_image  │  │ dual_image   │  │triple_image  │  │ utils.py │
-│     .py      │  │     .py      │  │     .py      │  │          │
-└──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └─────▲────┘
-       │                  │                  │                 │
-       └──────────────────┴──────────────────┴─────────────────┘
-                    Data Coupling (imports functions)
-
-       ┌──────────────────────────────────────────────────┐
-       │         st.session_state (Shared State)          │
-       │   Common Coupling (all tabs read/write)          │
-       └──────────────────────────────────────────────────┘
-                          ▲
-                          │ All tabs depend on this
-       ┌──────────────────┼──────────────────┬────────────┐
-       │                  │                  │            │
-  single_image       dual_image        triple_image   app_new
-```
-
-### Cohesion Analysis
-
-**Cohesion Strengths**:
-- Each module has a clear, focused purpose
-- Methods within classes are tightly related
-- No mixed responsibilities or "god objects"
-- Easy to understand what each file does
-
-### SOLID Principles
-
-#### **Single Responsibility Principle** 
-Each module has ONE reason to change:
-- `app.py` changes if app structure changes
-- `utils.py` changes if utilities need updates
-- `single_image.py` changes if single image features change
-- Tab classes never interfere with each other
-
-#### **Open/Closed Principle** ⚠️ Partially
-- Open for extension: Easy to add new tabs
-- Requires modifying `app.py` to add tabs (acceptable trade-off)
-
-#### **Dependency Inversion** 
-- High-level modules (app.py) don't depend on low-level details
-- Tabs receive dependencies via constructor injection
-- No tight coupling to implementation details
-
-#### **Don't Repeat Yourself (DRY)** 
-- Shared utilities extracted to `utils.py`
-- Common patterns abstracted into base methods
-- Acceptable duplication where needed (2 vs 3 image uploaders)
-
-### 🧠 Memory Management
-
-**Efficient Image Handling**:
-```python
-# Images sent only ONCE per conversation
-if i == 0:  # First message
-    user_msg["images"] = [image_b64]
-else:       # Subsequent messages
-    user_msg = {"content": text}  # No images, uses context
-```
-
-**Benefits**:
-- **5-10x faster** than sending images every message
-- **Reduces token usage** and API costs
-- **Lower memory footprint**
-- All data in RAM (nothing saved to disk)
-- Session-only persistence (privacy-focused)
-
-**Session State Isolation**:
-- Single tab: `messages`, `current_image_b64`
-- Dual tab: `messages_dual`, `combined_image_b64`
-- Triple tab: `messages_triple`, `combined_image_triple_b64`
-- No cross-tab interference
-
+- **Can't reach Ollama** — make sure it's running (`ollama serve`). The chat fails fast (~10s) with a
+  clear message if it's down.
+- **No vision models listed** — pull one (e.g. `qwen2.5-vl:7b`, `llava:latest`) via the sidebar or
+  `ollama pull`.
+- **Upgrade button missing** — it only appears when Ollama is local and a newer version exists. For a
+  remote Ollama, upgrade it on its host.
+- **Upgrade fails** — the installer may need `sudo`; the streamed log shows the error and the manual
+  command (`curl -fsSL https://ollama.com/install.sh | sh`).
