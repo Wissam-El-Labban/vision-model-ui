@@ -20,6 +20,10 @@ def stream_ollama_chat(ollama_url, model_name, messages):
         "model": model_name,
         "messages": messages,
         "stream": True,
+        # Disable "thinking" so reasoning-capable models answer directly.
+        # Otherwise they stream a long thinking phase (which we don't display),
+        # leaving the chat blank for many seconds as if it had given up.
+        "think": False,
     }
     response = requests.post(
         f"{ollama_url}/api/chat",
