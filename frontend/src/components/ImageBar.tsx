@@ -81,7 +81,7 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
     <div className="image-bar" ref={rootRef}>
       <div
         className={`image-box ${dragOver ? "drag" : ""}`}
-        style={{ width: w, height: h }}
+        style={images.length ? { width: w, height: h } : undefined}
         onDragOver={(e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -117,14 +117,16 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
           <div className="bar-strip">
             {images.map((src, i) => (
               <div className="bar-img" key={i}>
-                <img src={src} alt={`image ${i + 1}`} onClick={() => setZoom(src)} />
-                <div className="bar-img-actions">
-                  <button title="Rotate" onClick={() => onRotate(i)}>
-                    ↻
-                  </button>
-                  <button title="Remove" onClick={() => onRemove(i)}>
-                    ✕
-                  </button>
+                <div className="bar-img-inner">
+                  <img src={src} alt={`image ${i + 1}`} onClick={() => setZoom(src)} />
+                  <div className="bar-img-actions">
+                    <button title="Rotate" onClick={() => onRotate(i)}>
+                      ↻
+                    </button>
+                    <button title="Remove" onClick={() => onRemove(i)}>
+                      ✕
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}
