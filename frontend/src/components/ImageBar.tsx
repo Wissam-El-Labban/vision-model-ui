@@ -7,32 +7,33 @@ interface Props {
   onRotate: (i: number) => void;
 }
 
-const MIN_H = 120;
+const MIN_SIZE = 100;
+const MAX_SIZE = 600;
+const DEFAULT_SIZE = 200;
 
-/** Horizontal image bar across the top of the chat. Images fill the bar's
- *  height; drag the bottom edge up/down to resize, and the images scale with
- *  it. Click any image to view it full size. */
+/** A single filled box (card, no borders) anchored top-left. It grows to fit
+ *  the images added; drag the bottom-right corner grip to resize it and the
+ *  images scale with it. Double-click the grip to reset, click an image to
+ *  view full size. */
 export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
   const [dragOver, setDragOver] = useState(false);
   const [zoom, setZoom] = useState<string | null>(null);
-  const [height, setHeight] = useState(
-    () => Number(localStorage.getItem("imgBarHeight")) || 200
+  const [size, setSize] = useState(
+    () => Number(localStorage.getItem("imgSize")) || DEFAULT_SIZE
   );
   const fileRef = useRef<HTMLInputElement>(null);
-  const barRef = useRef<HTMLDivElement>(null);
-  const resizing = useRef(false);
+  const drag = useRef<{ y: number; start: number } | null>(null);
 
-  useEffect(() => localStorage.setItem("imgBarHeight", String(height)), [height]);
+  useEffect(() => localStorage.setItem("imgSize", String(size)), [size]);
 
   useEffect(() => {
     function move(e: MouseEvent) {
-      if (!resizing.current || !barRef.current) return;
-      const top = barRef.current.getBoundingClientRect().top;
-      const max = window.innerHeight * 0.7;
-      setHeight(Math.min(max, Math.max(MIN_H, e.clientY - top)));
+      if (!drag.current) return;
+      const next = drag.current.start + (e.clientY - drag.current.y);
+      setSize(Math.min(MAX_SIZE, Math.max(MIN_SIZE, next)));
     }
     function up() {
-      resizing.current = false;
+      drag.current = null;
       document.body.style.cursor = "";
     }
     window.addEventListener("mousemove", move);
@@ -44,57 +45,71 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
   }, []);
 
   const browse = () => fileRef.current?.click();
-  const dropProps = {
-    onDragOver: (e: React.DragEvent) => {
-      e.preventDefault();
-      setDragOver(true);
-    },
-    onDragLeave: () => setDragOver(false),
-    onDrop: (e: React.DragEvent) => {
-      e.preventDefault();
-      setDragOver(false);
-      onAdd(e.dataTransfer.files);
-    },
-  };
 
   return (
-    <div className="image-bar" ref={barRef} style={{ height }}>
-      <div className="image-bar-head">
-        <span>🖼️ Images</span>
-        {images.length > 0 && (
-          <button className="btn ghost small" onClick={browse}>
-            + Add
-          </button>
-        )}
-      </div>
+    <div className="image-bar">
+      <div
+        className={`image-box ${dragOver ? "drag" : ""}`}
+        style={{ ["--img-h" as string]: `${size}px` } as React.CSSProperties}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          onAdd(e.dataTransfer.files);
+        }}
+      >
+        <div className="image-box-head">
+          <span>🖼️ Images</span>
+          {images.length > 0 && (
+            <button className="btn ghost small" onClick={browse}>
+              + Add
+            </button>
+          )}
+        </div>
 
-      <div className="image-bar-body" {...dropProps}>
         {images.length === 0 ? (
-          <div
-            className={`bar-dropzone ${dragOver ? "drag" : ""}`}
-            onClick={browse}
-          >
+          <div className="box-empty" onClick={browse}>
             <span className="dz-emoji">🖼️⬇️</span>
             <span>
               Drag &amp; drop image(s) here <span className="muted">or click</span>
             </span>
           </div>
         ) : (
-          <div className={`bar-strip ${dragOver ? "drag" : ""}`}>
-            {images.map((src, i) => (
-              <div className="bar-img" key={i}>
-                <img src={src} alt={`image ${i + 1}`} onClick={() => setZoom(src)} />
-                <div className="bar-img-actions">
-                  <button title="Rotate" onClick={() => onRotate(i)}>
-                    ↻
-                  </button>
-                  <button title="Remove" onClick={() => onRemove(i)}>
-                    ✕
-                  </button>
+          <>
+            <div className="bar-strip">
+              {images.map((src, i) => (
+                <div className="bar-img" key={i}>
+                  <img
+                    src={src}
+                    alt={`image ${i + 1}`}
+                    onClick={() => setZoom(src)}
+                  />
+                  <div className="bar-img-actions">
+                    <button title="Rotate" onClick={() => onRotate(i)}>
+                      ↻
+                    </button>
+                    <button title="Remove" onClick={() => onRemove(i)}>
+                      ✕
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+            <div
+              className="corner-grip"
+              title="Drag to resize · double-click to reset"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                drag.current = { y: e.clientY, start: size };
+                document.body.style.cursor = "nwse-resize";
+              }}
+              onDoubleClick={() => setSize(DEFAULT_SIZE)}
+            />
+          </>
         )}
       </div>
 
@@ -107,16 +122,6 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
         onChange={(e) => {
           if (e.target.files) onAdd(e.target.files);
           e.target.value = "";
-        }}
-      />
-
-      <div
-        className="bar-resize-handle"
-        title="Drag to resize"
-        onMouseDown={(e) => {
-          e.preventDefault();
-          resizing.current = true;
-          document.body.style.cursor = "row-resize";
         }}
       />
 

@@ -8,16 +8,17 @@ export function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
-/** Downscale a data-URL image so its longest side is <= maxDim (keeps aspect).
- *  Vision models tokenize by resolution, so this keeps the context affordable
- *  and inference fast. Images already within bounds are returned unchanged. */
+/** Normalize a data-URL image to a standard JPEG, downscaling so its longest
+ *  side is <= maxDim. Always re-encodes via canvas (even when already small) so
+ *  any browser-displayable source becomes a clean JPEG Ollama can decode — this
+ *  avoids "Failed to load image" errors from unusual source encodings. Vision
+ *  models also tokenize by resolution, so the downscale keeps context cheap. */
 export function resizeDataUrl(dataUrl: string, maxDim = 1280): Promise<string> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
       const longest = Math.max(img.width, img.height);
-      if (longest <= maxDim) return resolve(dataUrl);
-      const scale = maxDim / longest;
+      const scale = longest > maxDim ? maxDim / longest : 1;
       const canvas = document.createElement("canvas");
       canvas.width = Math.round(img.width * scale);
       canvas.height = Math.round(img.height * scale);
