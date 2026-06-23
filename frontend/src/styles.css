@@ -305,33 +305,53 @@ textarea {
   border-bottom: 1px solid rgba(248, 81, 73, 0.3);
 }
 
-/* ---------- Workspace (chat fills it; image card floats top-left) --------- */
+/* ---------- Workspace: panel + chat in a row, full-width composer below ---- */
 .workspace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Panel (left, pinned) + chat (right, scrolls); sits above the composer so the
+ *  input bar spans the full width, unobstructed by the panel. */
+.work-row {
   flex: 1;
   display: flex;
   min-height: 0;
   min-width: 0;
 }
 
-/* The card floats flush in the top-left of the scroll area (negative margins
- *  cancel the messages padding) so it's attached to the sides, while the chat
- *  wraps to its right and flows full-width beneath it. */
+/* The image panel is pinned to the left and does not scroll. Empty: a small
+ *  card at the top. Filled: a full-height panel (resizable width) with the
+ *  chat scrolling to its right and never covered. */
 .image-bar {
-  float: left;
-  margin: -18px 18px 16px -18px;
+  position: relative;
+  flex-shrink: 0;
+  align-self: flex-start;
+  display: flex;
 }
 
-/* A separate card with an explicit (resizable) width/height. The card stays in
- *  flow so the chat below always resizes to fit and is never covered. */
+.image-bar.filled {
+  align-self: stretch;
+  border-right: 1px solid var(--border);
+}
+
 .image-box {
-  position: relative;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--panel);
-  border-radius: 0 0 14px 0;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
   padding: 12px;
   overflow: hidden;
+}
+
+/* Card look only in the empty (compact) state. */
+.image-bar:not(.filled) .image-box {
+  border-radius: 0 0 14px 0;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
 }
 
 .image-box.drag {
@@ -373,10 +393,10 @@ textarea {
 .bar-strip {
   flex: 1;
   display: flex;
+  flex-direction: column;
   gap: 8px;
   min-height: 0;
   min-width: 0;
-  align-items: stretch;
   overflow: hidden;
 }
 
@@ -437,55 +457,22 @@ textarea {
   background: rgba(0, 0, 0, 0.9);
 }
 
-/* Resize handles: right edge (width), bottom edge (height), corner (both). */
-.rh {
+/* Width-resize handle on the panel's right edge (between panel and chat). */
+.dock-resize {
   position: absolute;
   z-index: 6;
 }
 
-.rh-right {
+.dock-resize:hover {
+  background: rgba(47, 129, 247, 0.3);
+}
+
+.rz-right {
   top: 0;
   right: 0;
-  width: 9px;
+  width: 8px;
   height: 100%;
-  cursor: ew-resize;
-}
-
-.rh-bottom {
-  left: 0;
-  bottom: 0;
-  width: 100%;
-  height: 9px;
-  cursor: ns-resize;
-}
-
-.rh-right:hover,
-.rh-bottom:hover {
-  background: rgba(47, 129, 247, 0.25);
-}
-
-.rh-corner {
-  right: 0;
-  bottom: 0;
-  width: 18px;
-  height: 18px;
-  cursor: nwse-resize;
-  z-index: 7;
-}
-
-.rh-corner::after {
-  content: "";
-  position: absolute;
-  right: 3px;
-  bottom: 3px;
-  width: 11px;
-  height: 11px;
-  border-right: 2px solid var(--muted);
-  border-bottom: 2px solid var(--muted);
-}
-
-.rh-corner:hover::after {
-  border-color: var(--accent);
+  cursor: col-resize;
 }
 
 /* Click-to-zoom overlay. */
@@ -521,7 +508,9 @@ textarea {
   flex: 1;
   overflow-y: auto;
   padding: 18px;
-  display: block;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
 }
 
 .messages.drag {
@@ -553,23 +542,55 @@ textarea {
   margin: 0 0 8px;
 }
 
-/* Messages are block-level flex boxes, so they wrap around the floated card
- *  (sit to its right, then flow full-width below it). */
 .msg {
   display: flex;
   gap: 12px;
-  max-width: 760px;
-  width: fit-content;
-  margin: 0 0 18px;
-}
-
-.msg.assistant {
-  margin-right: auto;
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
 }
 
 .msg.user {
   flex-direction: row-reverse;
-  margin-left: auto;
+}
+
+/* Per-chunk model indicator: a chip when the model changes + a colored accent
+ *  on each bubble so you can see which model produced which part of the chat. */
+.model-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 14px;
+}
+
+/* Light dotted lines on either side of the chip mark the model boundary. */
+.model-divider::before,
+.model-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px dotted var(--border);
+}
+
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+
+.model-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.bubble {
+  border-left: 3px solid var(--mc, var(--border));
 }
 
 .avatar {

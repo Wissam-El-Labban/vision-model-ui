@@ -5,6 +5,8 @@ export interface ChatMessage {
   content: string;
   /** Data-URL strings (data:image/...;base64,...) for display + sending. */
   images?: string[];
+  /** Which model this turn was sent to (for the per-chunk model indicator). */
+  model?: string;
 }
 
 export interface VersionInfo {

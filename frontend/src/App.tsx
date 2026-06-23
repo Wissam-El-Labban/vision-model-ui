@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Sidebar from "./components/Sidebar";
 import Chat from "./components/Chat";
+import Composer from "./components/Composer";
 import ImageBar from "./components/ImageBar";
 import ContextMeter from "./components/ContextMeter";
 import { getModels, streamChat, type Usage } from "./api";
@@ -78,9 +79,9 @@ export default function App() {
       }
       setError(null);
 
-      const userMsg: ChatMessage = { role: "user", content: text, images };
+      const userMsg: ChatMessage = { role: "user", content: text, images, model };
       const history = [...messages, userMsg];
-      setMessages([...history, { role: "assistant", content: "" }]);
+      setMessages([...history, { role: "assistant", content: "", model }]);
       setStreaming(true);
 
       // Auto-trim oldest turns from what we SEND (the UI keeps the full history)
@@ -158,6 +159,31 @@ export default function App() {
     setUsage(null);
   }, []);
 
+  // Composer (full-width, bottom) state lives here so the input bar spans the
+  // whole width — unobstructed by the left image panel.
+  const [composerText, setComposerText] = useState("");
+  const [composerImages, setComposerImages] = useState<string[]>([]);
+  async function addComposerFiles(files: FileList | File[]) {
+    const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    if (list.length === 0) return;
+    const urls = await Promise.all(list.map((f) => fileToResizedDataUrl(f)));
+    setComposerImages((prev) => [...prev, ...urls]);
+  }
+  function removeComposerImage(i: number) {
+    setComposerImages((prev) => prev.filter((_, idx) => idx !== i));
+  }
+  async function rotateComposerImage(i: number) {
+    const rotated = await rotateDataUrl(composerImages[i], 90);
+    setComposerImages((prev) => prev.map((img, idx) => (idx === i ? rotated : img)));
+  }
+  function submitComposer() {
+    const trimmed = composerText.trim();
+    if (!trimmed && composerImages.length === 0) return;
+    send(trimmed, composerImages);
+    setComposerText("");
+    setComposerImages([]);
+  }
+
   return (
     <div className="app">
       <Sidebar
@@ -187,19 +213,30 @@ export default function App() {
         </header>
         {error && <div className="banner error">{error}</div>}
         <div className="workspace">
-          <Chat
-            imagePanel={
-              <ImageBar
-                images={pinnedImages}
-                onAdd={addPinned}
-                onRemove={removePinned}
-                onRotate={rotatePinned}
-              />
-            }
-            messages={messages}
-            streaming={streaming}
-            onSend={send}
+          <div className="work-row">
+            <ImageBar
+              images={pinnedImages}
+              onAdd={addPinned}
+              onRemove={removePinned}
+              onRotate={rotatePinned}
+            />
+            <Chat
+              messages={messages}
+              streaming={streaming}
+              disabled={!model}
+              onDropFiles={addComposerFiles}
+            />
+          </div>
+          <Composer
+            text={composerText}
+            setText={setComposerText}
+            images={composerImages}
+            onAddFiles={addComposerFiles}
+            onRemoveImage={removeComposerImage}
+            onRotateImage={rotateComposerImage}
+            onSubmit={submitComposer}
             onStop={stop}
+            streaming={streaming}
             disabled={!model}
           />
         </div>

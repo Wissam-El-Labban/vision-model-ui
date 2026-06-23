@@ -101,18 +101,19 @@ def is_vision_model(url, model_name):
             return False
         info = response.json()
 
-        # Newer Ollama exposes capabilities directly.
-        capabilities = info.get("capabilities") or []
-        if "vision" in capabilities:
-            return True
+        # Capabilities are authoritative on modern Ollama — trust them. (The old
+        # keyword heuristic gave false positives, e.g. qwen2.5 whose modelfile
+        # text merely mentions "vision" but has no vision capability.)
+        capabilities = info.get("capabilities")
+        if capabilities is not None:
+            return "vision" in capabilities
 
+        # Fallback only for older Ollama that doesn't report capabilities.
         modelfile = (info.get("modelfile") or "").lower()
         template = (info.get("template") or "").lower()
         indicators = [
-            "image" in modelfile,
             "vision" in modelfile,
             "visual" in modelfile,
-            "image" in template,
             "[img" in template,
             "clip" in modelfile,
             "mm_projector" in modelfile,

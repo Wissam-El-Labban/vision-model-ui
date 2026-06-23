@@ -7,43 +7,28 @@ interface Props {
   onRotate: (i: number) => void;
 }
 
-const MIN_W = 160;
-const MIN_H = 130;
+const MIN_W = 200;
 const DEF_W = 420;
-const DEF_H = 300;
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-/** A separate card stuck to the top-left corner. Resize it horizontally (right
- *  edge), vertically (bottom edge), or both (corner) — the images always scale
- *  to fit inside, so they're never clipped no matter how small you make it.
- *  Double-click a handle to reset; click an image to view full size. */
+/** Pinned image panel down the left side. It stays put while the chat scrolls
+ *  on the right, never covering it. Drag the right edge to resize its width; the
+ *  images always scale to fit inside (never clipped). Click an image to zoom. */
 export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
   const [dragOver, setDragOver] = useState(false);
   const [zoom, setZoom] = useState<string | null>(null);
   const [w, setW] = useState(() => Number(localStorage.getItem("imgW")) || DEF_W);
-  const [h, setH] = useState(() => Number(localStorage.getItem("imgH")) || DEF_H);
   const fileRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
-  const drag = useRef<{
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-    dx: boolean;
-    dy: boolean;
-    maxW: number;
-    maxH: number;
-  } | null>(null);
+  const drag = useRef<{ x: number; w: number; maxW: number } | null>(null);
 
   useEffect(() => localStorage.setItem("imgW", String(w)), [w]);
-  useEffect(() => localStorage.setItem("imgH", String(h)), [h]);
 
   useEffect(() => {
     function move(e: MouseEvent) {
       const d = drag.current;
       if (!d) return;
-      if (d.dx) setW(clamp(d.w + (e.clientX - d.x), MIN_W, d.maxW));
-      if (d.dy) setH(clamp(d.h + (e.clientY - d.y), MIN_H, d.maxH));
+      setW(clamp(d.w + (e.clientX - d.x), MIN_W, d.maxW));
     }
     function up() {
       drag.current = null;
@@ -57,31 +42,25 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
     };
   }, []);
 
-  function startResize(e: React.MouseEvent, dx: boolean, dy: boolean) {
+  function startResize(e: React.MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    // Limit relative to the chat area: leave room so the chat never gets squeezed
-    // into a sliver, and the card can't take more than ~55% of the width.
-    const p = rootRef.current?.parentElement;
-    const pw = p?.clientWidth ?? window.innerWidth;
-    const ph = p?.clientHeight ?? window.innerHeight;
-    const maxW = Math.max(MIN_W, Math.min(pw * 0.55, pw - 340));
-    const maxH = Math.max(MIN_H, ph * 0.8);
-    drag.current = { x: e.clientX, y: e.clientY, w, h, dx, dy, maxW, maxH };
-    document.body.style.cursor = dx && dy ? "nwse-resize" : dx ? "ew-resize" : "ns-resize";
-  }
-  function reset() {
-    setW(DEF_W);
-    setH(DEF_H);
+    const pw = rootRef.current?.parentElement?.clientWidth ?? window.innerWidth;
+    drag.current = { x: e.clientX, w, maxW: Math.max(MIN_W, Math.min(pw * 0.55, pw - 360)) };
+    document.body.style.cursor = "col-resize";
   }
 
   const browse = () => fileRef.current?.click();
+  const has = images.length > 0;
 
   return (
-    <div className="image-bar" ref={rootRef}>
+    <div
+      className={`image-bar ${has ? "filled" : ""}`}
+      ref={rootRef}
+      style={has ? { width: w } : undefined}
+    >
       <div
         className={`image-box ${dragOver ? "drag" : ""}`}
-        style={images.length ? { width: w, height: h } : undefined}
         onDragOver={(e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -97,14 +76,14 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
       >
         <div className="image-box-head">
           <span>🖼️ Images</span>
-          {images.length > 0 && (
+          {has && (
             <button className="btn ghost small" onClick={browse}>
               + Add
             </button>
           )}
         </div>
 
-        {images.length === 0 ? (
+        {!has ? (
           <div className="box-empty" onClick={browse}>
             <span className="dz-emoji">🖼️⬇️</span>
             <span>
@@ -132,30 +111,11 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
             ))}
           </div>
         )}
-
-        {images.length > 0 && (
-          <>
-            <div
-              className="rh rh-right"
-              title="Drag to resize width"
-              onMouseDown={(e) => startResize(e, true, false)}
-              onDoubleClick={reset}
-            />
-            <div
-              className="rh rh-bottom"
-              title="Drag to resize height"
-              onMouseDown={(e) => startResize(e, false, true)}
-              onDoubleClick={reset}
-            />
-            <div
-              className="rh rh-corner"
-              title="Drag to resize · double-click to reset"
-              onMouseDown={(e) => startResize(e, true, true)}
-              onDoubleClick={reset}
-            />
-          </>
-        )}
       </div>
+
+      {has && (
+        <div className="dock-resize rz-right" title="Drag to resize" onMouseDown={startResize} />
+      )}
 
       <input
         ref={fileRef}
