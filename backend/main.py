@@ -3,6 +3,7 @@
 Serves the built React frontend and proxies all Ollama interaction so the
 browser never talks to Ollama directly.
 """
+import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -61,11 +62,12 @@ def chat(req: ChatRequest):
 
     def gen():
         try:
-            yield from oc.stream_chat(req.ollama_url, req.model, messages)
+            for event in oc.stream_chat(req.ollama_url, req.model, messages):
+                yield json.dumps(event) + "\n"
         except Exception as exc:  # surfaced inline so the client can show it
-            yield f"\n\n⚠️ {exc}"
+            yield json.dumps({"type": "error", "message": str(exc)}) + "\n"
 
-    return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 @app.post("/api/models/pull")

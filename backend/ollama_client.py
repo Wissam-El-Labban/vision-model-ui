@@ -37,18 +37,23 @@ def context_size_for(messages):
 
 
 def stream_chat(url, model, messages):
-    """POST to Ollama's /api/chat and yield streamed content strings.
+    """POST to Ollama's /api/chat and yield streaming events.
 
-    Sends `think: False` so reasoning-capable models answer directly instead of
-    streaming a long, invisible thinking phase, and a `num_ctx` sized to fit the
-    request's images (see context_size_for).
+    Yields dicts: {"type": "token", "text": ...} for content, and a final
+    {"type": "usage", ...} carrying the exact token counts Ollama reports
+    (prompt_eval_count + eval_count) plus the num_ctx we used — the ground
+    truth for the context-usage meter.
+
+    Sends `think: False` so reasoning-capable models answer directly, and a
+    `num_ctx` sized to fit the request's images (see context_size_for).
     """
+    num_ctx = context_size_for(messages)
     payload = {
         "model": model,
         "messages": messages,
         "stream": True,
         "think": False,
-        "options": {"num_ctx": context_size_for(messages)},
+        "options": {"num_ctx": num_ctx},
     }
     response = requests.post(
         f"{url}/api/chat",
@@ -68,7 +73,17 @@ def stream_chat(url, model, messages):
             continue
         content = (chunk.get("message") or {}).get("content")
         if content:
-            yield content
+            yield {"type": "token", "text": content}
+        if chunk.get("done"):
+            prompt_tokens = chunk.get("prompt_eval_count") or 0
+            eval_tokens = chunk.get("eval_count") or 0
+            yield {
+                "type": "usage",
+                "used": prompt_tokens + eval_tokens,
+                "prompt_tokens": prompt_tokens,
+                "eval_tokens": eval_tokens,
+                "num_ctx": num_ctx,
+            }
 
 
 # --------------------------------------------------------------------------- #

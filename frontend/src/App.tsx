@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Sidebar from "./components/Sidebar";
 import Chat from "./components/Chat";
 import ImageBar from "./components/ImageBar";
-import { getModels, streamChat } from "./api";
+import ContextMeter from "./components/ContextMeter";
+import { getModels, streamChat, type Usage } from "./api";
 import { fileToResizedDataUrl, rotateDataUrl } from "./fileUtils";
+import { trimHistory } from "./context";
 import type { ChatMessage } from "./types";
 
 const DEFAULT_URL = "http://localhost:11434";
@@ -26,6 +28,7 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [usage, setUsage] = useState<Usage | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   async function addPinned(files: FileList | File[]) {
@@ -80,16 +83,20 @@ export default function App() {
       setMessages([...history, { role: "assistant", content: "" }]);
       setStreaming(true);
 
-      // Pinned images live in the always-visible panel (not inline). They travel
+      // Auto-trim oldest turns from what we SEND (the UI keeps the full history)
+      // when the last measured usage shows we're near the window limit.
+      const { sent } = trimHistory(history, pinnedImages.length, usage);
+
+      // Pinned images live in the always-visible bar (not inline). They travel
       // with the conversation by riding on the first user message of the payload.
-      const firstUserIdx = history.findIndex((m) => m.role === "user");
+      const firstUserIdx = sent.findIndex((m) => m.role === "user");
       const merged = pinnedImages.length
-        ? history.map((m, i) =>
+        ? sent.map((m, i) =>
             i === firstUserIdx
               ? { ...m, images: [...pinnedImages, ...(m.images ?? [])] }
               : m
           )
-        : history;
+        : sent;
 
       // Build the request: optional system message (with persistent image) + history.
       const payload: ChatMessage[] = [];
@@ -109,15 +116,28 @@ export default function App() {
           ollamaUrl,
           model,
           payload,
-          (token) =>
-            setMessages((prev) => {
-              const next = [...prev];
-              next[next.length - 1] = {
-                ...next[next.length - 1],
-                content: next[next.length - 1].content + token,
-              };
-              return next;
-            }),
+          {
+            onToken: (token) =>
+              setMessages((prev) => {
+                const next = [...prev];
+                next[next.length - 1] = {
+                  ...next[next.length - 1],
+                  content: next[next.length - 1].content + token,
+                };
+                return next;
+              }),
+            onUsage: (u) => setUsage(u),
+            onError: (msg) =>
+              setMessages((prev) => {
+                const next = [...prev];
+                next[next.length - 1] = {
+                  ...next[next.length - 1],
+                  content:
+                    (next[next.length - 1].content || "") + `\n\n⚠️ ${msg}`,
+                };
+                return next;
+              }),
+          },
           controller.signal
         );
       } catch (e) {
@@ -129,11 +149,14 @@ export default function App() {
         abortRef.current = null;
       }
     },
-    [messages, model, ollamaUrl, systemPrompt, systemImage, pinnedImages]
+    [messages, model, ollamaUrl, systemPrompt, systemImage, pinnedImages, usage]
   );
 
   const stop = useCallback(() => abortRef.current?.abort(), []);
-  const clearChat = useCallback(() => setMessages([]), []);
+  const clearChat = useCallback(() => {
+    setMessages([]);
+    setUsage(null);
+  }, []);
 
   return (
     <div className="app">
@@ -153,6 +176,7 @@ export default function App() {
         <header className="topbar">
           <h1>👁️ Vision Model Chat</h1>
           <div className="topbar-actions">
+            {usage && <ContextMeter used={usage.used} numCtx={usage.num_ctx} />}
             {model && <span className="model-pill">{model}</span>}
             {messages.length > 0 && (
               <button className="btn ghost" onClick={clearChat}>

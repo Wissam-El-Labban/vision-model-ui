@@ -75,12 +75,25 @@ async function readLines(
   if (buffer.trim()) onLine(buffer);
 }
 
-/** Stream chat tokens. Calls onToken for each chunk of assistant text. */
+export interface Usage {
+  used: number;
+  prompt_tokens: number;
+  eval_tokens: number;
+  num_ctx: number;
+}
+
+interface ChatHandlers {
+  onToken: (token: string) => void;
+  onUsage?: (usage: Usage) => void;
+  onError?: (message: string) => void;
+}
+
+/** Stream a chat response (NDJSON events: token / usage / error). */
 export async function streamChat(
   ollamaUrl: string,
   model: string,
   messages: ChatMessage[],
-  onToken: (token: string) => void,
+  handlers: ChatHandlers,
   signal?: AbortSignal
 ): Promise<void> {
   const res = await fetch("/api/chat", {
@@ -93,14 +106,18 @@ export async function streamChat(
     }),
     signal,
   });
-  if (!res.ok || !res.body) throw new Error(`chat: ${res.status}`);
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    onToken(decoder.decode(value, { stream: true }));
-  }
+  if (!res.ok) throw new Error(`chat: ${res.status}`);
+  await readLines(res, (line) => {
+    let ev: { type: string; [k: string]: unknown };
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (ev.type === "token") handlers.onToken(ev.text as string);
+    else if (ev.type === "usage") handlers.onUsage?.(ev as unknown as Usage);
+    else if (ev.type === "error") handlers.onError?.(ev.message as string);
+  });
 }
 
 export async function pullModel(

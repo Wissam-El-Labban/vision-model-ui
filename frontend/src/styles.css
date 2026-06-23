@@ -269,6 +269,31 @@ textarea {
   color: var(--muted);
 }
 
+.ctx-meter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: default;
+}
+
+.ctx-track {
+  fill: none;
+  stroke: var(--panel-2);
+  stroke-width: 3;
+}
+
+.ctx-fill {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.3s, stroke 0.3s;
+}
+
+.ctx-pct {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .banner {
   padding: 10px 22px;
   font-size: 13px;
