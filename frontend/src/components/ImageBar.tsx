@@ -23,9 +23,17 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
   const [w, setW] = useState(() => Number(localStorage.getItem("imgW")) || DEF_W);
   const [h, setH] = useState(() => Number(localStorage.getItem("imgH")) || DEF_H);
   const fileRef = useRef<HTMLInputElement>(null);
-  const drag = useRef<{ x: number; y: number; w: number; h: number; dx: boolean; dy: boolean } | null>(
-    null
-  );
+  const rootRef = useRef<HTMLDivElement>(null);
+  const drag = useRef<{
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    dx: boolean;
+    dy: boolean;
+    maxW: number;
+    maxH: number;
+  } | null>(null);
 
   useEffect(() => localStorage.setItem("imgW", String(w)), [w]);
   useEffect(() => localStorage.setItem("imgH", String(h)), [h]);
@@ -34,8 +42,8 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
     function move(e: MouseEvent) {
       const d = drag.current;
       if (!d) return;
-      if (d.dx) setW(clamp(d.w + (e.clientX - d.x), MIN_W, window.innerWidth * 0.6));
-      if (d.dy) setH(clamp(d.h + (e.clientY - d.y), MIN_H, window.innerHeight * 0.6));
+      if (d.dx) setW(clamp(d.w + (e.clientX - d.x), MIN_W, d.maxW));
+      if (d.dy) setH(clamp(d.h + (e.clientY - d.y), MIN_H, d.maxH));
     }
     function up() {
       drag.current = null;
@@ -52,7 +60,14 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
   function startResize(e: React.MouseEvent, dx: boolean, dy: boolean) {
     e.preventDefault();
     e.stopPropagation();
-    drag.current = { x: e.clientX, y: e.clientY, w, h, dx, dy };
+    // Limit relative to the chat area: leave room so the chat never gets squeezed
+    // into a sliver, and the card can't take more than ~55% of the width.
+    const p = rootRef.current?.parentElement;
+    const pw = p?.clientWidth ?? window.innerWidth;
+    const ph = p?.clientHeight ?? window.innerHeight;
+    const maxW = Math.max(MIN_W, Math.min(pw * 0.55, pw - 340));
+    const maxH = Math.max(MIN_H, ph * 0.8);
+    drag.current = { x: e.clientX, y: e.clientY, w, h, dx, dy, maxW, maxH };
     document.body.style.cursor = dx && dy ? "nwse-resize" : dx ? "ew-resize" : "ns-resize";
   }
   function reset() {
@@ -63,17 +78,19 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
   const browse = () => fileRef.current?.click();
 
   return (
-    <div className="image-bar">
+    <div className="image-bar" ref={rootRef}>
       <div
         className={`image-box ${dragOver ? "drag" : ""}`}
         style={{ width: w, height: h }}
         onDragOver={(e) => {
           e.preventDefault();
+          e.stopPropagation();
           setDragOver(true);
         }}
         onDragLeave={() => setDragOver(false)}
         onDrop={(e) => {
           e.preventDefault();
+          e.stopPropagation();
           setDragOver(false);
           onAdd(e.dataTransfer.files);
         }}

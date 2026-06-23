@@ -187,13 +187,15 @@ export default function App() {
         </header>
         {error && <div className="banner error">{error}</div>}
         <div className="workspace">
-          <ImageBar
-            images={pinnedImages}
-            onAdd={addPinned}
-            onRemove={removePinned}
-            onRotate={rotatePinned}
-          />
           <Chat
+            imagePanel={
+              <ImageBar
+                images={pinnedImages}
+                onAdd={addPinned}
+                onRemove={removePinned}
+                onRotate={rotatePinned}
+              />
+            }
             messages={messages}
             streaming={streaming}
             onSend={send}

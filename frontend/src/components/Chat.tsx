@@ -11,9 +11,17 @@ interface Props {
   onSend: (text: string, images: string[]) => void;
   onStop: () => void;
   disabled: boolean;
+  imagePanel?: React.ReactNode;
 }
 
-export default function Chat({ messages, streaming, onSend, onStop, disabled }: Props) {
+export default function Chat({
+  messages,
+  streaming,
+  onSend,
+  onStop,
+  disabled,
+  imagePanel,
+}: Props) {
   const endRef = useRef<HTMLDivElement>(null);
   const [text, setText] = useState("");
   const [attach, setAttach] = useState<string[]>([]);
@@ -60,6 +68,7 @@ export default function Chat({ messages, streaming, onSend, onStop, disabled }: 
           if (!disabled) addFiles(e.dataTransfer.files);
         }}
       >
+        {imagePanel}
         {dragOver && (
           <div className="drop-overlay">📎 Drop to attach to your next message</div>
         )}
@@ -101,7 +110,7 @@ export default function Chat({ messages, streaming, onSend, onStop, disabled }: 
             </div>
           </div>
         ))}
-        <div ref={endRef} />
+        <div ref={endRef} style={{ clear: "both" }} />
       </div>
       <Composer
         text={text}
