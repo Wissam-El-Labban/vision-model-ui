@@ -1,74 +1,51 @@
-import { useRef, useState } from "react";
-import { fileToResizedDataUrl, rotateDataUrl } from "../fileUtils";
+import { useRef } from "react";
 
 interface Props {
-  onSend: (text: string, images: string[]) => void;
+  text: string;
+  setText: (v: string) => void;
+  images: string[];
+  onAddFiles: (files: FileList | File[]) => void;
+  onRemoveImage: (i: number) => void;
+  onRotateImage: (i: number) => void;
+  onSubmit: () => void;
   onStop: () => void;
   streaming: boolean;
   disabled: boolean;
 }
 
-export default function Composer({ onSend, onStop, streaming, disabled }: Props) {
-  const [text, setText] = useState("");
-  const [images, setImages] = useState<string[]>([]);
-  const [dragOver, setDragOver] = useState(false);
+export default function Composer({
+  text,
+  setText,
+  images,
+  onAddFiles,
+  onRemoveImage,
+  onRotateImage,
+  onSubmit,
+  onStop,
+  streaming,
+  disabled,
+}: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
-
-  async function addFiles(files: FileList | File[]) {
-    const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
-    const urls = await Promise.all(list.map((f) => fileToResizedDataUrl(f)));
-    setImages((prev) => [...prev, ...urls]);
-  }
-
-  function removeImage(i: number) {
-    setImages((prev) => prev.filter((_, idx) => idx !== i));
-  }
-
-  async function rotateImage(i: number) {
-    setImages((prev) => prev.slice());
-    const rotated = await rotateDataUrl(images[i], 90);
-    setImages((prev) => prev.map((img, idx) => (idx === i ? rotated : img)));
-  }
-
-  function submit() {
-    const trimmed = text.trim();
-    if (!trimmed && images.length === 0) return;
-    onSend(trimmed, images);
-    setText("");
-    setImages([]);
-  }
 
   function onKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (!streaming) submit();
+      if (!streaming) onSubmit();
     }
   }
 
   return (
-    <div
-      className={`composer ${dragOver ? "drag" : ""}`}
-      onDragOver={(e) => {
-        e.preventDefault();
-        setDragOver(true);
-      }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setDragOver(false);
-        addFiles(e.dataTransfer.files);
-      }}
-    >
+    <div className="composer">
       {images.length > 0 && (
         <div className="thumbs">
           {images.map((src, i) => (
             <div className="thumb" key={i}>
               <img src={src} alt={`attachment ${i + 1}`} />
               <div className="thumb-actions">
-                <button title="Rotate" onClick={() => rotateImage(i)}>
+                <button title="Rotate" onClick={() => onRotateImage(i)}>
                   ↻
                 </button>
-                <button title="Remove" onClick={() => removeImage(i)}>
+                <button title="Remove" onClick={() => onRemoveImage(i)}>
                   ✕
                 </button>
               </div>
@@ -92,7 +69,7 @@ export default function Composer({ onSend, onStop, streaming, disabled }: Props)
           multiple
           hidden
           onChange={(e) => {
-            if (e.target.files) addFiles(e.target.files);
+            if (e.target.files) onAddFiles(e.target.files);
             e.target.value = "";
           }}
         />
@@ -103,7 +80,7 @@ export default function Composer({ onSend, onStop, streaming, disabled }: Props)
           placeholder={
             disabled
               ? "Select a vision model to start…"
-              : "Ask about your image(s)… (drop or 📎 to attach, Enter to send)"
+              : "Ask about your image(s)… (drop images anywhere in the chat, Enter to send)"
           }
           rows={1}
           disabled={disabled}
@@ -115,7 +92,7 @@ export default function Composer({ onSend, onStop, streaming, disabled }: Props)
         ) : (
           <button
             className="btn send"
-            onClick={submit}
+            onClick={onSubmit}
             disabled={disabled || (!text.trim() && images.length === 0)}
           >
             ➤

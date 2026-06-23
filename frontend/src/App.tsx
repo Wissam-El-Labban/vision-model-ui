@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Sidebar from "./components/Sidebar";
 import Chat from "./components/Chat";
+import ImageBar from "./components/ImageBar";
 import { getModels, streamChat } from "./api";
+import { fileToResizedDataUrl, rotateDataUrl } from "./fileUtils";
 import type { ChatMessage } from "./types";
 
 const DEFAULT_URL = "http://localhost:11434";
@@ -20,10 +22,24 @@ export default function App() {
   );
   const [systemImage, setSystemImage] = useState<string | null>(null);
 
+  const [pinnedImages, setPinnedImages] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  async function addPinned(files: FileList | File[]) {
+    const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    const urls = await Promise.all(list.map((f) => fileToResizedDataUrl(f)));
+    setPinnedImages((prev) => [...prev, ...urls]);
+  }
+  function removePinned(i: number) {
+    setPinnedImages((prev) => prev.filter((_, idx) => idx !== i));
+  }
+  async function rotatePinned(i: number) {
+    const rotated = await rotateDataUrl(pinnedImages[i], 90);
+    setPinnedImages((prev) => prev.map((img, idx) => (idx === i ? rotated : img)));
+  }
 
   // Persist settings.
   useEffect(() => localStorage.setItem("ollamaUrl", ollamaUrl), [ollamaUrl]);
@@ -64,6 +80,17 @@ export default function App() {
       setMessages([...history, { role: "assistant", content: "" }]);
       setStreaming(true);
 
+      // Pinned images live in the always-visible panel (not inline). They travel
+      // with the conversation by riding on the first user message of the payload.
+      const firstUserIdx = history.findIndex((m) => m.role === "user");
+      const merged = pinnedImages.length
+        ? history.map((m, i) =>
+            i === firstUserIdx
+              ? { ...m, images: [...pinnedImages, ...(m.images ?? [])] }
+              : m
+          )
+        : history;
+
       // Build the request: optional system message (with persistent image) + history.
       const payload: ChatMessage[] = [];
       if (systemPrompt.trim()) {
@@ -73,7 +100,7 @@ export default function App() {
           images: systemImage ? [systemImage] : undefined,
         });
       }
-      payload.push(...history);
+      payload.push(...merged);
 
       const controller = new AbortController();
       abortRef.current = controller;
@@ -102,7 +129,7 @@ export default function App() {
         abortRef.current = null;
       }
     },
-    [messages, model, ollamaUrl, systemPrompt, systemImage]
+    [messages, model, ollamaUrl, systemPrompt, systemImage, pinnedImages]
   );
 
   const stop = useCallback(() => abortRef.current?.abort(), []);
@@ -135,13 +162,21 @@ export default function App() {
           </div>
         </header>
         {error && <div className="banner error">{error}</div>}
-        <Chat
-          messages={messages}
-          streaming={streaming}
-          onSend={send}
-          onStop={stop}
-          disabled={!model}
-        />
+        <div className="workspace">
+          <ImageBar
+            images={pinnedImages}
+            onAdd={addPinned}
+            onRemove={removePinned}
+            onRotate={rotatePinned}
+          />
+          <Chat
+            messages={messages}
+            streaming={streaming}
+            onSend={send}
+            onStop={stop}
+            disabled={!model}
+          />
+        </div>
       </main>
     </div>
   );

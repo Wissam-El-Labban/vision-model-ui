@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import Composer from "./Composer";
+import { fileToResizedDataUrl, rotateDataUrl } from "../fileUtils";
 import type { ChatMessage } from "../types";
 
 interface Props {
@@ -12,21 +13,61 @@ interface Props {
 
 export default function Chat({ messages, streaming, onSend, onStop, disabled }: Props) {
   const endRef = useRef<HTMLDivElement>(null);
+  const [text, setText] = useState("");
+  const [attach, setAttach] = useState<string[]>([]);
+  const [dragOver, setDragOver] = useState(false);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  async function addFiles(files: FileList | File[]) {
+    const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    if (list.length === 0) return;
+    const urls = await Promise.all(list.map((f) => fileToResizedDataUrl(f)));
+    setAttach((prev) => [...prev, ...urls]);
+  }
+  function removeImage(i: number) {
+    setAttach((prev) => prev.filter((_, idx) => idx !== i));
+  }
+  async function rotateImage(i: number) {
+    const rotated = await rotateDataUrl(attach[i], 90);
+    setAttach((prev) => prev.map((img, idx) => (idx === i ? rotated : img)));
+  }
+  function submit() {
+    const trimmed = text.trim();
+    if (!trimmed && attach.length === 0) return;
+    onSend(trimmed, attach);
+    setText("");
+    setAttach([]);
+  }
+
   return (
     <div className="chat">
-      <div className="messages">
+      <div
+        className={`messages ${dragOver ? "drag" : ""}`}
+        onDragOver={(e) => {
+          if (disabled) return;
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          if (!disabled) addFiles(e.dataTransfer.files);
+        }}
+      >
+        {dragOver && (
+          <div className="drop-overlay">📎 Drop to attach to your next message</div>
+        )}
         {messages.length === 0 && (
           <div className="empty">
-            <p className="empty-emoji">🖼️</p>
-            <p>Drop one or more images and ask a question.</p>
+            <p className="empty-emoji">💬</p>
+            <p>Add your image(s) to the bar above, then ask away.</p>
             <p className="muted">
-              Attach as many images as you like — in your first question or any
-              follow-up.
+              Need to add more context mid-chat? Drop images right here (or use
+              📎) — they'll appear inline below.
             </p>
           </div>
         )}
@@ -53,7 +94,13 @@ export default function Chat({ messages, streaming, onSend, onStop, disabled }: 
         <div ref={endRef} />
       </div>
       <Composer
-        onSend={onSend}
+        text={text}
+        setText={setText}
+        images={attach}
+        onAddFiles={addFiles}
+        onRemoveImage={removeImage}
+        onRotateImage={rotateImage}
+        onSubmit={submit}
         onStop={onStop}
         streaming={streaming}
         disabled={disabled}
