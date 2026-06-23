@@ -8,13 +8,14 @@ interface Props {
 }
 
 const MIN_SIZE = 100;
-const MAX_SIZE = 600;
 const DEFAULT_SIZE = 200;
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
 /** A single filled box (card, no borders) anchored top-left. It grows to fit
- *  the images added; drag the bottom-right corner grip to resize it and the
- *  images scale with it. Double-click the grip to reset, click an image to
- *  view full size. */
+ *  the images added; resize it from the right edge (horizontal), bottom edge
+ *  (vertical), or the corner (both). Images scale with it. Double-click a handle
+ *  to reset, click an image to view full size. The card stays in flow so the
+ *  chat below always resizes to fit and is never covered. */
 export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
   const [dragOver, setDragOver] = useState(false);
   const [zoom, setZoom] = useState<string | null>(null);
@@ -22,15 +23,23 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
     () => Number(localStorage.getItem("imgSize")) || DEFAULT_SIZE
   );
   const fileRef = useRef<HTMLInputElement>(null);
-  const drag = useRef<{ y: number; start: number } | null>(null);
+  const drag = useRef<{ x: number; y: number; start: number; dx: boolean; dy: boolean } | null>(
+    null
+  );
 
   useEffect(() => localStorage.setItem("imgSize", String(size)), [size]);
 
   useEffect(() => {
     function move(e: MouseEvent) {
-      if (!drag.current) return;
-      const next = drag.current.start + (e.clientY - drag.current.y);
-      setSize(Math.min(MAX_SIZE, Math.max(MIN_SIZE, next)));
+      const d = drag.current;
+      if (!d) return;
+      let delta = 0;
+      if (d.dx && d.dy) delta = Math.max(e.clientX - d.x, e.clientY - d.y);
+      else if (d.dx) delta = e.clientX - d.x;
+      else delta = e.clientY - d.y;
+      // Cap so the card can't grow large enough to crowd out the chat.
+      const max = Math.max(MIN_SIZE, window.innerHeight * 0.6);
+      setSize(clamp(d.start + delta, MIN_SIZE, max));
     }
     function up() {
       drag.current = null;
@@ -43,6 +52,13 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
       window.removeEventListener("mouseup", up);
     };
   }, []);
+
+  function startResize(e: React.MouseEvent, dx: boolean, dy: boolean) {
+    e.preventDefault();
+    e.stopPropagation();
+    drag.current = { x: e.clientX, y: e.clientY, start: size, dx, dy };
+    document.body.style.cursor = dx && dy ? "nwse-resize" : dx ? "ew-resize" : "ns-resize";
+  }
 
   const browse = () => fileRef.current?.click();
 
@@ -100,13 +116,21 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
               ))}
             </div>
             <div
-              className="corner-grip"
+              className="rh rh-right"
+              title="Drag to resize width"
+              onMouseDown={(e) => startResize(e, true, false)}
+              onDoubleClick={() => setSize(DEFAULT_SIZE)}
+            />
+            <div
+              className="rh rh-bottom"
+              title="Drag to resize height"
+              onMouseDown={(e) => startResize(e, false, true)}
+              onDoubleClick={() => setSize(DEFAULT_SIZE)}
+            />
+            <div
+              className="rh rh-corner"
               title="Drag to resize · double-click to reset"
-              onMouseDown={(e) => {
-                e.preventDefault();
-                drag.current = { y: e.clientY, start: size };
-                document.body.style.cursor = "nwse-resize";
-              }}
+              onMouseDown={(e) => startResize(e, true, true)}
               onDoubleClick={() => setSize(DEFAULT_SIZE)}
             />
           </>

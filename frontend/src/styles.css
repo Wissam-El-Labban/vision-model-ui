@@ -415,23 +415,54 @@ textarea {
   background: rgba(0, 0, 0, 0.9);
 }
 
-/* Bottom-right corner grip to resize the box (scales the images). */
-.corner-grip {
+/* Resize handles: right edge (width), bottom edge (height), corner (both). */
+.rh {
   position: absolute;
-  right: 2px;
-  bottom: 2px;
-  width: 16px;
-  height: 16px;
-  cursor: nwse-resize;
-  border-right: 2px solid var(--muted);
-  border-bottom: 2px solid var(--muted);
-  border-bottom-right-radius: 5px;
-  opacity: 0.55;
-  z-index: 5;
+  z-index: 6;
 }
 
-.corner-grip:hover {
-  opacity: 1;
+.rh-right {
+  top: 0;
+  right: 0;
+  width: 9px;
+  height: 100%;
+  cursor: ew-resize;
+}
+
+.rh-bottom {
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 9px;
+  cursor: ns-resize;
+}
+
+.rh-right:hover,
+.rh-bottom:hover {
+  background: rgba(47, 129, 247, 0.25);
+}
+
+.rh-corner {
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  z-index: 7;
+}
+
+.rh-corner::after {
+  content: "";
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 11px;
+  height: 11px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+}
+
+.rh-corner:hover::after {
   border-color: var(--accent);
 }
 
