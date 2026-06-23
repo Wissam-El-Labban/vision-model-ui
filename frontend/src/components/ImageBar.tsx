@@ -7,39 +7,35 @@ interface Props {
   onRotate: (i: number) => void;
 }
 
-const MIN_SIZE = 100;
-const DEFAULT_SIZE = 200;
+const MIN_W = 160;
+const MIN_H = 130;
+const DEF_W = 420;
+const DEF_H = 300;
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-/** A single filled box (card, no borders) anchored top-left. It grows to fit
- *  the images added; resize it from the right edge (horizontal), bottom edge
- *  (vertical), or the corner (both). Images scale with it. Double-click a handle
- *  to reset, click an image to view full size. The card stays in flow so the
- *  chat below always resizes to fit and is never covered. */
+/** A separate card stuck to the top-left corner. Resize it horizontally (right
+ *  edge), vertically (bottom edge), or both (corner) — the images always scale
+ *  to fit inside, so they're never clipped no matter how small you make it.
+ *  Double-click a handle to reset; click an image to view full size. */
 export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
   const [dragOver, setDragOver] = useState(false);
   const [zoom, setZoom] = useState<string | null>(null);
-  const [size, setSize] = useState(
-    () => Number(localStorage.getItem("imgSize")) || DEFAULT_SIZE
-  );
+  const [w, setW] = useState(() => Number(localStorage.getItem("imgW")) || DEF_W);
+  const [h, setH] = useState(() => Number(localStorage.getItem("imgH")) || DEF_H);
   const fileRef = useRef<HTMLInputElement>(null);
-  const drag = useRef<{ x: number; y: number; start: number; dx: boolean; dy: boolean } | null>(
+  const drag = useRef<{ x: number; y: number; w: number; h: number; dx: boolean; dy: boolean } | null>(
     null
   );
 
-  useEffect(() => localStorage.setItem("imgSize", String(size)), [size]);
+  useEffect(() => localStorage.setItem("imgW", String(w)), [w]);
+  useEffect(() => localStorage.setItem("imgH", String(h)), [h]);
 
   useEffect(() => {
     function move(e: MouseEvent) {
       const d = drag.current;
       if (!d) return;
-      let delta = 0;
-      if (d.dx && d.dy) delta = Math.max(e.clientX - d.x, e.clientY - d.y);
-      else if (d.dx) delta = e.clientX - d.x;
-      else delta = e.clientY - d.y;
-      // Cap so the card can't grow large enough to crowd out the chat.
-      const max = Math.max(MIN_SIZE, window.innerHeight * 0.6);
-      setSize(clamp(d.start + delta, MIN_SIZE, max));
+      if (d.dx) setW(clamp(d.w + (e.clientX - d.x), MIN_W, window.innerWidth * 0.6));
+      if (d.dy) setH(clamp(d.h + (e.clientY - d.y), MIN_H, window.innerHeight * 0.6));
     }
     function up() {
       drag.current = null;
@@ -56,8 +52,12 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
   function startResize(e: React.MouseEvent, dx: boolean, dy: boolean) {
     e.preventDefault();
     e.stopPropagation();
-    drag.current = { x: e.clientX, y: e.clientY, start: size, dx, dy };
+    drag.current = { x: e.clientX, y: e.clientY, w, h, dx, dy };
     document.body.style.cursor = dx && dy ? "nwse-resize" : dx ? "ew-resize" : "ns-resize";
+  }
+  function reset() {
+    setW(DEF_W);
+    setH(DEF_H);
   }
 
   const browse = () => fileRef.current?.click();
@@ -66,7 +66,7 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
     <div className="image-bar">
       <div
         className={`image-box ${dragOver ? "drag" : ""}`}
-        style={{ ["--img-h" as string]: `${size}px` } as React.CSSProperties}
+        style={{ width: w, height: h }}
         onDragOver={(e) => {
           e.preventDefault();
           setDragOver(true);
@@ -91,47 +91,48 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
           <div className="box-empty" onClick={browse}>
             <span className="dz-emoji">🖼️⬇️</span>
             <span>
-              Drag &amp; drop image(s) here <span className="muted">or click</span>
+              Drag &amp; drop image(s) here
+              <br />
+              <span className="muted">or click to browse</span>
             </span>
           </div>
         ) : (
-          <>
-            <div className="bar-strip">
-              {images.map((src, i) => (
-                <div className="bar-img" key={i}>
-                  <img
-                    src={src}
-                    alt={`image ${i + 1}`}
-                    onClick={() => setZoom(src)}
-                  />
-                  <div className="bar-img-actions">
-                    <button title="Rotate" onClick={() => onRotate(i)}>
-                      ↻
-                    </button>
-                    <button title="Remove" onClick={() => onRemove(i)}>
-                      ✕
-                    </button>
-                  </div>
+          <div className="bar-strip">
+            {images.map((src, i) => (
+              <div className="bar-img" key={i}>
+                <img src={src} alt={`image ${i + 1}`} onClick={() => setZoom(src)} />
+                <div className="bar-img-actions">
+                  <button title="Rotate" onClick={() => onRotate(i)}>
+                    ↻
+                  </button>
+                  <button title="Remove" onClick={() => onRemove(i)}>
+                    ✕
+                  </button>
                 </div>
-              ))}
-            </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {images.length > 0 && (
+          <>
             <div
               className="rh rh-right"
               title="Drag to resize width"
               onMouseDown={(e) => startResize(e, true, false)}
-              onDoubleClick={() => setSize(DEFAULT_SIZE)}
+              onDoubleClick={reset}
             />
             <div
               className="rh rh-bottom"
               title="Drag to resize height"
               onMouseDown={(e) => startResize(e, false, true)}
-              onDoubleClick={() => setSize(DEFAULT_SIZE)}
+              onDoubleClick={reset}
             />
             <div
               className="rh rh-corner"
               title="Drag to resize · double-click to reset"
               onMouseDown={(e) => startResize(e, true, true)}
-              onDoubleClick={() => setSize(DEFAULT_SIZE)}
+              onDoubleClick={reset}
             />
           </>
         )}
