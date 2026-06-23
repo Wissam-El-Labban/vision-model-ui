@@ -88,16 +88,17 @@ export default function App() {
       // when the last measured usage shows we're near the window limit.
       const { sent } = trimHistory(history, pinnedImages.length, usage);
 
-      // Pinned images live in the always-visible bar (not inline). They travel
-      // with the conversation by riding on the first user message of the payload.
-      const firstUserIdx = sent.findIndex((m) => m.role === "user");
-      const merged = pinnedImages.length
-        ? sent.map((m, i) =>
-            i === firstUserIdx
-              ? { ...m, images: [...pinnedImages, ...(m.images ?? [])] }
-              : m
-          )
-        : sent;
+      // Image-sending policy (Ollama /api/chat is stateless — the model only sees
+      // images present in the current request):
+      //  - Pinned/primary images ride on the CURRENT message every request, so
+      //    they're always in context.
+      //  - Optional per-message attachments stay on their original message and are
+      //    resent in history, so the model can still reference earlier photos.
+      const lastIdx = sent.length - 1;
+      const merged = sent.map((m, i) => {
+        const imgs = i === lastIdx ? [...pinnedImages, ...(m.images ?? [])] : m.images ?? [];
+        return imgs.length ? { ...m, images: imgs } : { role: m.role, content: m.content };
+      });
 
       // Build the request: optional system message (with persistent image) + history.
       const payload: ChatMessage[] = [];
