@@ -1,0 +1,872 @@
+:root {
+  --bg: #0e1117;
+  --panel: #161b22;
+  --panel-2: #1c2230;
+  --border: #2a313c;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #2f81f7;
+  --accent-2: #1f6feb;
+  --green: #3fb950;
+  --red: #f85149;
+  --radius: 10px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Inter", system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  font-size: 14px;
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ---------- Sidebar ---------- */
+.sidebar {
+  width: 320px;
+  flex-shrink: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  padding: 18px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.brand {
+  margin: 0 0 16px;
+  font-size: 18px;
+}
+
+.lbl {
+  display: block;
+  margin: 14px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+input,
+select,
+textarea {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 9px 10px;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent);
+}
+
+textarea {
+  resize: vertical;
+}
+
+.block {
+  width: 100%;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.row > input,
+.row > select {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------- Buttons ---------- */
+.btn {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 9px 12px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn.primary {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  color: #fff;
+}
+
+.btn.primary:hover {
+  background: var(--accent);
+}
+
+.btn.danger:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.btn.ghost {
+  background: transparent;
+}
+
+.btn.block {
+  width: 100%;
+  justify-content: center;
+}
+
+.btn.icon {
+  padding: 9px 11px;
+}
+
+/* ---------- Sections (collapsible) ---------- */
+.section {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.section-head {
+  width: 100%;
+  text-align: left;
+  background: var(--panel-2);
+  border: none;
+  color: var(--text);
+  padding: 11px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  justify-content: space-between;
+}
+
+.section-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chev {
+  color: var(--muted);
+}
+
+/* ---------- Update card ---------- */
+.update-card {
+  background: linear-gradient(135deg, #132a47, #102035);
+  border: 1px solid var(--accent-2);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin-bottom: 8px;
+}
+
+.update-head {
+  font-weight: 600;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.update-versions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.ver {
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ver.new {
+  color: var(--green);
+}
+
+.upgrade-log {
+  background: #0a0d12;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 11px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  margin: 8px 0 0;
+}
+
+/* ---------- Main / topbar ---------- */
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.topbar h1 {
+  font-size: 17px;
+  margin: 0;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.model-pill {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ctx-meter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: default;
+}
+
+.ctx-track {
+  fill: none;
+  stroke: var(--panel-2);
+  stroke-width: 3;
+}
+
+.ctx-fill {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.3s, stroke 0.3s;
+}
+
+.ctx-pct {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.banner {
+  padding: 10px 22px;
+  font-size: 13px;
+}
+
+.banner.error {
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--red);
+  border-bottom: 1px solid rgba(248, 81, 73, 0.3);
+}
+
+/* ---------- Workspace: panel + chat in a row, full-width composer below ---- */
+.workspace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Panel (left, pinned) + chat (right, scrolls); sits above the composer so the
+ *  input bar spans the full width, unobstructed by the panel. */
+.work-row {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* The image panel is pinned to the left and does not scroll. Empty: a small
+ *  card at the top. Filled: a full-height panel (resizable width) with the
+ *  chat scrolling to its right and never covered. */
+.image-bar {
+  position: relative;
+  flex-shrink: 0;
+  align-self: flex-start;
+  display: flex;
+}
+
+.image-bar.filled {
+  align-self: stretch;
+  border-right: 1px solid var(--border);
+}
+
+.image-box {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  padding: 12px;
+  overflow: hidden;
+}
+
+/* Card look only in the empty (compact) state. */
+.image-bar:not(.filled) .image-box {
+  border-radius: 0 0 14px 0;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+
+.image-box.drag {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.image-box-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+
+/* Empty state — compact, content-sized (doesn't hog space), no dashed border. */
+.box-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 34px 56px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  text-align: center;
+}
+
+.dz-emoji {
+  font-size: 34px;
+}
+
+/* Images always scale to fit inside the card — never clipped, never scrolled.
+ *  Each image gets an equal cell; the inner wrapper hugs the rendered image so
+ *  the action buttons sit on the image (not the cell). */
+.bar-strip {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.bar-img {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bar-img-inner {
+  position: relative;
+  display: flex;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.bar-img-inner img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 8px;
+  cursor: zoom-in;
+  display: block;
+}
+
+.bar-img-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.bar-img:hover .bar-img-actions {
+  opacity: 1;
+}
+
+.bar-img-actions button {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.bar-img-actions button:hover {
+  background: rgba(0, 0, 0, 0.9);
+}
+
+/* Width-resize handle on the panel's right edge (between panel and chat). */
+.dock-resize {
+  position: absolute;
+  z-index: 6;
+}
+
+.dock-resize:hover {
+  background: rgba(47, 129, 247, 0.3);
+}
+
+.rz-right {
+  top: 0;
+  right: 0;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+}
+
+/* Click-to-zoom overlay. */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: grid;
+  place-items: center;
+  z-index: 100;
+  cursor: zoom-out;
+  padding: 32px;
+}
+
+.lightbox img {
+  max-width: 95vw;
+  max-height: 95vh;
+  border-radius: 10px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+}
+
+/* ---------- Chat ---------- */
+.chat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.messages {
+  position: relative;
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.messages.drag {
+  outline: 2px dashed var(--accent);
+  outline-offset: -10px;
+}
+
+.drop-overlay {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: rgba(47, 129, 247, 0.15);
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  padding: 10px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.empty {
+  margin: auto;
+  text-align: center;
+  color: var(--muted);
+}
+
+.empty-emoji {
+  font-size: 48px;
+  margin: 0 0 8px;
+}
+
+.msg {
+  display: flex;
+  gap: 12px;
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.msg.user {
+  flex-direction: row-reverse;
+}
+
+/* Per-chunk model indicator: a chip when the model changes + a colored accent
+ *  on each bubble so you can see which model produced which part of the chat. */
+.model-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 14px;
+}
+
+/* Light dotted lines on either side of the chip mark the model boundary. */
+.model-divider::before,
+.model-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px dotted var(--border);
+}
+
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+
+.model-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.bubble {
+  border-left: 3px solid var(--mc, var(--border));
+}
+
+.avatar {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  display: grid;
+  place-items: center;
+  font-size: 17px;
+}
+
+.bubble {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 14px;
+  max-width: 78%;
+}
+
+.msg.user .bubble {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  color: #fff;
+}
+
+.content {
+  white-space: pre-wrap;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+/* Markdown-rendered assistant content. */
+.content.markdown {
+  white-space: normal;
+}
+
+.markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown p {
+  margin: 0 0 10px;
+}
+
+.markdown ul,
+.markdown ol {
+  margin: 0 0 10px;
+  padding-left: 22px;
+}
+
+.markdown li {
+  margin: 3px 0;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 14px 0 8px;
+  line-height: 1.3;
+}
+
+.markdown h1 {
+  font-size: 1.4em;
+}
+.markdown h2 {
+  font-size: 1.25em;
+}
+.markdown h3 {
+  font-size: 1.1em;
+}
+
+.markdown code {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 5px;
+  font-size: 0.9em;
+  font-family: "SF Mono", "Fira Code", Consolas, monospace;
+}
+
+.markdown pre {
+  background: #0a0d12;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+  margin: 0 0 10px;
+}
+
+.markdown pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.markdown a {
+  color: var(--accent);
+}
+
+.markdown blockquote {
+  margin: 0 0 10px;
+  padding-left: 12px;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+.markdown table {
+  border-collapse: collapse;
+  margin: 0 0 10px;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+}
+
+.markdown hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.msg-images img {
+  max-width: 180px;
+  max-height: 180px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.cursor {
+  animation: blink 1s steps(2) infinite;
+  color: var(--muted);
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ---------- Composer ---------- */
+.composer {
+  border-top: 1px solid var(--border);
+  padding: 14px 22px;
+  background: var(--panel);
+}
+
+.composer.drag {
+  outline: 2px dashed var(--accent);
+  outline-offset: -8px;
+}
+
+.composer-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  max-width: 860px;
+  margin: 0 auto;
+}
+
+.composer-row textarea {
+  flex: 1;
+  max-height: 160px;
+  min-height: 42px;
+  line-height: 1.4;
+}
+
+.btn.send {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  color: #fff;
+  font-size: 16px;
+}
+
+.btn.stop {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 860px;
+  margin: 0 auto 10px;
+}
+
+.thumb {
+  position: relative;
+  width: 72px;
+  height: 72px;
+}
+
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.thumb-actions {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: flex;
+  gap: 2px;
+}
+
+.thumb-actions button {
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* ---------- Misc ---------- */
+.progress {
+  height: 6px;
+  background: var(--panel-2);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--green);
+  transition: width 0.2s;
+}
+
+.sys-image img {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  margin-bottom: 6px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 12px;
+}
+
+.note {
+  margin-top: 4px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.footer-note {
+  margin: 16px 0 0;
+  text-align: center;
+}
