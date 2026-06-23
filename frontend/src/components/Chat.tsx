@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import Composer from "./Composer";
 import { fileToResizedDataUrl, rotateDataUrl } from "../fileUtils";
 import type { ChatMessage } from "../types";
@@ -83,7 +85,15 @@ export default function Chat({ messages, streaming, onSend, onStop, disabled }: 
                 </div>
               )}
               {m.content ? (
-                <div className="content">{m.content}</div>
+                m.role === "assistant" ? (
+                  <div className="content markdown">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {m.content}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  <div className="content">{m.content}</div>
+                )
               ) : (
                 streaming &&
                 i === messages.length - 1 && <span className="cursor">▋</span>
