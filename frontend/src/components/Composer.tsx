@@ -162,6 +162,20 @@ export default function Composer({
           disabled={disabled}
         />
 
+        {streaming ? (
+          <button className="btn stop" onClick={onStop}>
+            ■ Stop
+          </button>
+        ) : (
+          <button
+            className="btn send"
+            onClick={onSubmit}
+            disabled={disabled || (!text.trim() && images.length === 0)}
+          >
+            ➤
+          </button>
+        )}
+
         <div className="model-control" title="Vision model">
           <span aria-hidden>🤖</span>
           {models.vision.length > 0 ? (
@@ -180,20 +194,6 @@ export default function Composer({
             />
           )}
         </div>
-
-        {streaming ? (
-          <button className="btn stop" onClick={onStop}>
-            ■ Stop
-          </button>
-        ) : (
-          <button
-            className="btn send"
-            onClick={onSubmit}
-            disabled={disabled || (!text.trim() && images.length === 0)}
-          >
-            ➤
-          </button>
-        )}
       </div>
     </div>
   );
