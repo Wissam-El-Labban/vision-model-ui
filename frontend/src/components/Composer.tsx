@@ -72,15 +72,14 @@ export default function Composer({
         </div>
       )}
 
-      <div className="composer-controls">
+      <div className="composer-row">
         <div className="sys-control">
           <button
-            className={`btn ghost small ${hasSystem ? "has-dot" : ""}`}
+            className={`btn ghost icon ${hasSystem ? "has-dot" : ""}`}
             onClick={() => setSysOpen((v) => !v)}
             title="System prompt"
           >
-            💬 System {hasSystem && <span className="dot" />}
-            <span className="chev">{sysOpen ? "▾" : "▸"}</span>
+            💬{hasSystem && <span className="dot" />}
           </button>
           {sysOpen && (
             <div className="system-popover">
@@ -116,27 +115,6 @@ export default function Composer({
           )}
         </div>
 
-        <div className="model-control">
-          <span className="lbl inline">🤖 Model</span>
-          {models.vision.length > 0 ? (
-            <select value={model} onChange={(e) => setModel(e.target.value)}>
-              {models.vision.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <input
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder="No vision models — type one"
-            />
-          )}
-        </div>
-      </div>
-
-      <div className="composer-row">
         <button
           className="btn icon"
           title="Attach images"
@@ -163,11 +141,31 @@ export default function Composer({
           placeholder={
             disabled
               ? "Select a vision model to start…"
-              : "Ask about your image(s)… (drop images anywhere in the chat, Enter to send)"
+              : "Ask about your image(s)… (drop or paste images anywhere, Enter to send)"
           }
           rows={1}
           disabled={disabled}
         />
+
+        <div className="model-control" title="Vision model">
+          <span aria-hidden>🤖</span>
+          {models.vision.length > 0 ? (
+            <select value={model} onChange={(e) => setModel(e.target.value)}>
+              {models.vision.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder="No vision models — type one"
+            />
+          )}
+        </div>
+
         {streaming ? (
           <button className="btn stop" onClick={onStop}>
             ■ Stop

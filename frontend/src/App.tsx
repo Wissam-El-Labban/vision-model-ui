@@ -371,6 +371,23 @@ export default function App() {
   function removeComposerImage(i: number) {
     setComposerImages((prev) => prev.filter((_, idx) => idx !== i));
   }
+
+  // Paste images (Ctrl+V) anywhere → attach to the current message, same as
+  // dropping onto the chat. Text paste into inputs is left untouched.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const files = Array.from(e.clipboardData?.items ?? [])
+        .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
+        .map((it) => it.getAsFile())
+        .filter((f): f is File => !!f);
+      if (files.length) {
+        e.preventDefault();
+        addComposerFiles(files);
+      }
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, []);
   async function rotateComposerImage(i: number) {
     const rotated = await rotateDataUrl(composerImages[i], 90);
     setComposerImages((prev) => prev.map((img, idx) => (idx === i ? rotated : img)));

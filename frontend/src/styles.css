@@ -763,7 +763,7 @@ textarea {
   display: flex;
   gap: 8px;
   align-items: flex-end;
-  max-width: 860px;
+  max-width: 1000px;
   margin: 0 auto;
 }
 
@@ -790,7 +790,7 @@ textarea {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  max-width: 860px;
+  max-width: 1000px;
   margin: 0 auto 10px;
 }
 
@@ -973,27 +973,24 @@ textarea {
   background: rgba(248, 81, 73, 0.12);
 }
 
-/* ---------- Composer controls (system prompt left, model right) ---------- */
-.composer-controls {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
-  max-width: 860px;
-  margin: 0 auto 8px;
-}
-
+/* ---------- Inline composer controls (system prompt + model on the row) --- */
 .sys-control {
   position: relative;
+  flex-shrink: 0;
 }
 
 .btn.has-dot .dot {
-  display: inline-block;
+  position: absolute;
+  top: 3px;
+  right: 3px;
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--green);
-  margin: 0 2px;
+}
+
+.btn.has-dot {
+  position: relative;
 }
 
 .system-popover {
@@ -1013,15 +1010,11 @@ textarea {
 .model-control {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
 .model-control select,
 .model-control input {
-  max-width: 220px;
-}
-
-.lbl.inline {
-  margin: 0;
-  white-space: nowrap;
+  max-width: 150px;
 }
