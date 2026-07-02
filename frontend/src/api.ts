@@ -1,4 +1,10 @@
-import type { ChatMessage, RunningModel, VersionInfo } from "./types";
+import type {
+  ChatDetail,
+  ChatMessage,
+  ChatSummary,
+  RunningModel,
+  VersionInfo,
+} from "./types";
 
 /** Strip the `data:image/...;base64,` prefix Ollama doesn't want. */
 function toRawBase64(dataUrl: string): string {
@@ -143,6 +149,101 @@ export async function pullModel(
     } catch {
       /* ignore non-json keepalives */
     }
+  });
+}
+
+// --------------------------------------------------------------------------- #
+// Chat history persistence
+// --------------------------------------------------------------------------- #
+export async function listChats(): Promise<ChatSummary[]> {
+  const res = await fetch("/api/chats");
+  if (!res.ok) throw new Error(`chats: ${res.status}`);
+  return (await res.json()).chats ?? [];
+}
+
+export async function getChat(id: string): Promise<ChatDetail> {
+  const res = await fetch(`/api/chats/${id}`);
+  if (!res.ok) throw new Error(`chat: ${res.status}`);
+  return res.json();
+}
+
+export async function putChat(
+  id: string,
+  body: {
+    model: string | null;
+    system_prompt: string;
+    pinned_hashes: string[];
+    system_image_hash: string | null;
+  }
+): Promise<void> {
+  const res = await fetch(`/api/chats/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`putChat: ${res.status}`);
+}
+
+export async function appendMessage(
+  id: string,
+  body: {
+    role: string;
+    content: string;
+    model: string | null;
+    image_hashes: string[];
+  }
+): Promise<void> {
+  const res = await fetch(`/api/chats/${id}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`appendMessage: ${res.status}`);
+}
+
+/** Upload images (full + thumbnail data-URLs). Returns their content hashes. */
+export async function uploadImages(
+  items: { full: string; thumb: string | null }[]
+): Promise<string[]> {
+  if (items.length === 0) return [];
+  const res = await fetch("/api/images", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
+  if (!res.ok) throw new Error(`uploadImages: ${res.status}`);
+  return (await res.json()).hashes ?? [];
+}
+
+export async function generateTitle(
+  id: string,
+  model: string,
+  ollamaUrl: string
+): Promise<string> {
+  const res = await fetch(`/api/chats/${id}/title`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model, ollama_url: ollamaUrl }),
+  });
+  if (!res.ok) throw new Error(`title: ${res.status}`);
+  return (await res.json()).title ?? "";
+}
+
+export async function deleteChat(id: string): Promise<void> {
+  const res = await fetch(`/api/chats/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`deleteChat: ${res.status}`);
+}
+
+/** Fetch a stored image URL and convert it to a data-URL for in-memory use,
+ *  so the existing send/display code (which expects data-URLs) is unchanged. */
+export async function urlToDataUrl(url: string): Promise<string> {
+  const res = await fetch(url);
+  const blob = await res.blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
   });
 }
 

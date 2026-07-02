@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import db
 from . import ollama_client as oc
 
 app = FastAPI(title="Vision Model Chat")
@@ -23,6 +24,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve persisted image bytes / thumbnails as static files. Registered before
+# the catch-all frontend mount so `/api/*` always wins.
+app.mount("/api/images", StaticFiles(directory=str(db.IMAGES_DIR)), name="images")
+app.mount("/api/thumbs", StaticFiles(directory=str(db.THUMBS_DIR)), name="thumbs")
 
 
 # --------------------------------------------------------------------------- #
@@ -42,6 +48,34 @@ class ChatRequest(BaseModel):
 
 class PullRequest(BaseModel):
     name: str
+    ollama_url: str = oc.DEFAULT_URL
+
+
+class ImageItem(BaseModel):
+    full: str
+    thumb: str | None = None
+
+
+class ImagesRequest(BaseModel):
+    items: list[ImageItem]
+
+
+class ChatUpsert(BaseModel):
+    model: str | None = None
+    system_prompt: str = ""
+    pinned_hashes: list[str] = []
+    system_image_hash: str | None = None
+
+
+class MessageAppend(BaseModel):
+    role: str
+    content: str = ""
+    model: str | None = None
+    image_hashes: list[str] = []
+
+
+class TitleRequest(BaseModel):
+    model: str
     ollama_url: str = oc.DEFAULT_URL
 
 
@@ -118,6 +152,66 @@ def ollama_upgrade(ollama_url: str = oc.DEFAULT_URL):
             detail="Upgrade is only available for a local Ollama. Upgrade on the host instead.",
         )
     return StreamingResponse(oc.upgrade(), media_type="text/plain; charset=utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# Chat history persistence
+# --------------------------------------------------------------------------- #
+@app.post("/api/images")
+def upload_images(req: ImagesRequest):
+    """Store images (full + optional thumbnail), deduped. Returns their hashes."""
+    return {"hashes": [db.save_image(it.full, it.thumb) for it in req.items]}
+
+
+@app.get("/api/chats")
+def get_chats():
+    return {"chats": db.list_chats()}
+
+
+@app.get("/api/chats/{chat_id}")
+def get_chat(chat_id: str):
+    chat = db.get_chat(chat_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return chat
+
+
+@app.put("/api/chats/{chat_id}")
+def put_chat(chat_id: str, req: ChatUpsert):
+    db.upsert_chat(
+        chat_id,
+        req.model,
+        req.system_prompt,
+        req.pinned_hashes,
+        req.system_image_hash,
+    )
+    return {"ok": True}
+
+
+@app.post("/api/chats/{chat_id}/messages")
+def add_message(chat_id: str, req: MessageAppend):
+    msg_id = db.append_message(
+        chat_id, req.role, req.content, req.model, req.image_hashes
+    )
+    return {"id": msg_id}
+
+
+@app.post("/api/chats/{chat_id}/title")
+def make_title(chat_id: str, req: TitleRequest):
+    exchange = db.get_first_exchange(chat_id)
+    if not exchange:
+        raise HTTPException(status_code=404, detail="Chat has no messages")
+    first_user, first_assistant = exchange
+    title = oc.generate_title(req.ollama_url, req.model, first_user, first_assistant)
+    if title:
+        db.set_title(chat_id, title)
+    return {"title": title}
+
+
+@app.delete("/api/chats/{chat_id}")
+def remove_chat(chat_id: str):
+    db.delete_chat(chat_id)
+    return {"ok": True}
 
 
 @app.on_event("shutdown")

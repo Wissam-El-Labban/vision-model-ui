@@ -1,19 +1,19 @@
 import { useState } from "react";
 import ModelManager from "./ModelManager";
 import UpdateBanner from "./UpdateBanner";
-import { fileToResizedDataUrl } from "../fileUtils";
+import ChatList from "./ChatList";
+import type { ChatSummary } from "../types";
 
 interface Props {
   ollamaUrl: string;
   setOllamaUrl: (v: string) => void;
   models: { vision: string[]; all: string[] };
-  model: string;
-  setModel: (v: string) => void;
-  systemPrompt: string;
-  setSystemPrompt: (v: string) => void;
-  systemImage: string | null;
-  setSystemImage: (v: string | null) => void;
   refreshModels: () => void;
+  chats: ChatSummary[];
+  currentChatId: string;
+  onNewChat: () => void;
+  onOpenChat: (id: string) => void;
+  onDeleteChat: (id: string) => void;
 }
 
 export default function Sidebar(props: Props) {
@@ -21,16 +21,14 @@ export default function Sidebar(props: Props) {
     ollamaUrl,
     setOllamaUrl,
     models,
-    model,
-    setModel,
-    systemPrompt,
-    setSystemPrompt,
-    systemImage,
-    setSystemImage,
     refreshModels,
+    chats,
+    currentChatId,
+    onNewChat,
+    onOpenChat,
+    onDeleteChat,
   } = props;
   const [urlDraft, setUrlDraft] = useState(ollamaUrl);
-  const [sysOpen, setSysOpen] = useState(false);
 
   return (
     <aside className="sidebar">
@@ -51,65 +49,13 @@ export default function Sidebar(props: Props) {
         </button>
       </div>
 
-      <label className="lbl">🤖 Vision model</label>
-      {models.vision.length > 0 ? (
-        <select
-          className="block"
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-        >
-          {models.vision.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
-      ) : (
-        <input
-          className="block"
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          placeholder="No vision models found — type one"
-        />
-      )}
-
-      <div className="section">
-        <button className="section-head" onClick={() => setSysOpen(!sysOpen)}>
-          💬 System Prompt <span className="chev">{sysOpen ? "▾" : "▸"}</span>
-        </button>
-        {sysOpen && (
-          <div className="section-body">
-            <textarea
-              className="block"
-              rows={4}
-              value={systemPrompt}
-              onChange={(e) => setSystemPrompt(e.target.value)}
-              placeholder="Guide the model's behavior across the chat…"
-            />
-            <label className="lbl">📎 Persistent context image (optional)</label>
-            {systemImage ? (
-              <div className="sys-image">
-                <img src={systemImage} alt="system" />
-                <button
-                  className="btn danger block"
-                  onClick={() => setSystemImage(null)}
-                >
-                  Remove image
-                </button>
-              </div>
-            ) : (
-              <input
-                type="file"
-                accept="image/*"
-                onChange={async (e) => {
-                  const f = e.target.files?.[0];
-                  if (f) setSystemImage(await fileToResizedDataUrl(f));
-                }}
-              />
-            )}
-          </div>
-        )}
-      </div>
+      <ChatList
+        chats={chats}
+        currentChatId={currentChatId}
+        onNewChat={onNewChat}
+        onOpenChat={onOpenChat}
+        onDeleteChat={onDeleteChat}
+      />
 
       <ModelManager
         ollamaUrl={ollamaUrl}

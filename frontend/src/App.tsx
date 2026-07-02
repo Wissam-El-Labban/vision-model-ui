@@ -4,12 +4,29 @@ import Chat from "./components/Chat";
 import Composer from "./components/Composer";
 import ImageBar from "./components/ImageBar";
 import ContextMeter from "./components/ContextMeter";
-import { getModels, streamChat, type Usage } from "./api";
-import { fileToResizedDataUrl, rotateDataUrl } from "./fileUtils";
+import {
+  appendMessage,
+  deleteChat,
+  generateTitle,
+  getChat,
+  getModels,
+  listChats,
+  putChat,
+  streamChat,
+  uploadImages,
+  urlToDataUrl,
+  type Usage,
+} from "./api";
+import { fileToResizedDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
 import { trimHistory } from "./context";
-import type { ChatMessage } from "./types";
+import type { ChatMessage, ChatSummary } from "./types";
 
 const DEFAULT_URL = "http://localhost:11434";
+
+/** Extract the sha256 hash from an image/thumb URL like /api/images/<hash>.jpg */
+function hashFromUrl(url: string): string {
+  return (url.split("/").pop() || "").replace(/\.jpg$/, "");
+}
 
 export default function App() {
   const [ollamaUrl, setOllamaUrl] = useState(
@@ -20,9 +37,7 @@ export default function App() {
     all: [],
   });
   const [model, setModel] = useState(() => localStorage.getItem("model") || "");
-  const [systemPrompt, setSystemPrompt] = useState(
-    () => localStorage.getItem("systemPrompt") || ""
-  );
+  const [systemPrompt, setSystemPrompt] = useState("");
   const [systemImage, setSystemImage] = useState<string | null>(null);
 
   const [pinnedImages, setPinnedImages] = useState<string[]>([]);
@@ -31,6 +46,39 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [usage, setUsage] = useState<Usage | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Persistence: one "current chat" whose id is minted up front; the DB row is
+  // created lazily on the first send. `chatExists` gates metadata sync so we
+  // never create empty, message-less chats.
+  const [chats, setChats] = useState<ChatSummary[]>([]);
+  const [currentChatId, setCurrentChatId] = useState<string>(() =>
+    crypto.randomUUID()
+  );
+  const [chatExists, setChatExists] = useState(false);
+  // data-URL -> content hash, so re-sent pinned images aren't re-uploaded.
+  const hashCache = useRef<Map<string, string>>(new Map());
+
+  /** Upload any not-yet-stored images and return their hashes (order-preserved). */
+  const ensureHashes = useCallback(async (urls: string[]): Promise<string[]> => {
+    return Promise.all(
+      urls.map(async (url) => {
+        const cached = hashCache.current.get(url);
+        if (cached) return cached;
+        const thumb = await resizeDataUrl(url, 64);
+        const [hash] = await uploadImages([{ full: url, thumb }]);
+        hashCache.current.set(url, hash);
+        return hash;
+      })
+    );
+  }, []);
+
+  const refreshChats = useCallback(async () => {
+    try {
+      setChats(await listChats());
+    } catch {
+      /* leave the list as-is if the fetch fails */
+    }
+  }, []);
 
   async function addPinned(files: FileList | File[]) {
     const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
@@ -48,10 +96,6 @@ export default function App() {
   // Persist settings.
   useEffect(() => localStorage.setItem("ollamaUrl", ollamaUrl), [ollamaUrl]);
   useEffect(() => localStorage.setItem("model", model), [model]);
-  useEffect(
-    () => localStorage.setItem("systemPrompt", systemPrompt),
-    [systemPrompt]
-  );
 
   const refreshModels = useCallback(async () => {
     try {
@@ -71,6 +115,111 @@ export default function App() {
     refreshModels();
   }, [refreshModels]);
 
+  useEffect(() => {
+    refreshChats();
+  }, [refreshChats]);
+
+  // Keep an existing chat's metadata (model / system prompt / pinned + system
+  // image) in sync as the user edits it, debounced. Skipped until the chat row
+  // exists (created on first send) so we don't spawn empty chats.
+  useEffect(() => {
+    if (!chatExists) return;
+    const t = setTimeout(async () => {
+      try {
+        const pinned_hashes = await ensureHashes(pinnedImages);
+        const system_image_hash = systemImage
+          ? (await ensureHashes([systemImage]))[0]
+          : null;
+        await putChat(currentChatId, {
+          model,
+          system_prompt: systemPrompt,
+          pinned_hashes,
+          system_image_hash,
+        });
+      } catch {
+        /* non-fatal */
+      }
+    }, 500);
+    return () => clearTimeout(t);
+  }, [
+    chatExists,
+    currentChatId,
+    model,
+    systemPrompt,
+    pinnedImages,
+    systemImage,
+    ensureHashes,
+  ]);
+
+  const newChat = useCallback(() => {
+    abortRef.current?.abort();
+    setCurrentChatId(crypto.randomUUID());
+    setChatExists(false);
+    setMessages([]);
+    setPinnedImages([]);
+    setSystemPrompt("");
+    setSystemImage(null);
+    setUsage(null);
+    setError(null);
+    setComposerText("");
+    setComposerImages([]);
+  }, []);
+
+  const openChat = useCallback(async (id: string) => {
+    try {
+      abortRef.current?.abort();
+      const d = await getChat(id);
+
+      // Load images back into memory as data-URLs and pre-seed the hash cache
+      // so they aren't re-uploaded on the next send.
+      const loadImg = async (url: string) => {
+        const data = await urlToDataUrl(url);
+        hashCache.current.set(data, hashFromUrl(url));
+        return data;
+      };
+
+      const pinned = await Promise.all(d.pinned.map(loadImg));
+      const sysImg = d.system_image ? await loadImg(d.system_image) : null;
+      const msgs: ChatMessage[] = await Promise.all(
+        d.messages.map(async (m) => ({
+          role: m.role,
+          content: m.content,
+          model: m.model ?? undefined,
+          images: m.images.length
+            ? await Promise.all(m.images.map(loadImg))
+            : undefined,
+        }))
+      );
+
+      setCurrentChatId(d.id);
+      setChatExists(true);
+      setPinnedImages(pinned);
+      setSystemImage(sysImg);
+      setSystemPrompt(d.system_prompt || "");
+      if (d.model) setModel(d.model);
+      setMessages(msgs);
+      setUsage(null);
+      setError(null);
+      setComposerText("");
+      setComposerImages([]);
+    } catch {
+      setError("Could not open that chat.");
+    }
+  }, []);
+
+  const removeChat = useCallback(
+    async (id: string) => {
+      try {
+        await deleteChat(id);
+      } catch {
+        /* ignore */
+      }
+      if (id === currentChatId) newChat();
+      refreshChats();
+    },
+    [currentChatId, newChat, refreshChats]
+  );
+
   const send = useCallback(
     async (text: string, images: string[]) => {
       if (!model) {
@@ -78,6 +227,9 @@ export default function App() {
         return;
       }
       setError(null);
+
+      const chatId = currentChatId;
+      const isFirstExchange = messages.length === 0;
 
       const userMsg: ChatMessage = { role: "user", content: text, images, model };
       const history = [...messages, userMsg];
@@ -111,6 +263,7 @@ export default function App() {
       }
       payload.push(...merged);
 
+      let assistantText = "";
       const controller = new AbortController();
       abortRef.current = controller;
       try {
@@ -119,7 +272,8 @@ export default function App() {
           model,
           payload,
           {
-            onToken: (token) =>
+            onToken: (token) => {
+              assistantText += token;
               setMessages((prev) => {
                 const next = [...prev];
                 next[next.length - 1] = {
@@ -127,7 +281,8 @@ export default function App() {
                   content: next[next.length - 1].content + token,
                 };
                 return next;
-              }),
+              });
+            },
             onUsage: (u) => setUsage(u),
             onError: (msg) =>
               setMessages((prev) => {
@@ -149,16 +304,59 @@ export default function App() {
       } finally {
         setStreaming(false);
         abortRef.current = null;
+
+        // Persist this turn (best-effort; a failure here must not break the UI).
+        try {
+          const pinned_hashes = await ensureHashes(pinnedImages);
+          const system_image_hash = systemImage
+            ? (await ensureHashes([systemImage]))[0]
+            : null;
+          await putChat(chatId, {
+            model,
+            system_prompt: systemPrompt,
+            pinned_hashes,
+            system_image_hash,
+          });
+          setChatExists(true);
+
+          const userHashes = await ensureHashes(images);
+          await appendMessage(chatId, {
+            role: "user",
+            content: text,
+            model,
+            image_hashes: userHashes,
+          });
+          await appendMessage(chatId, {
+            role: "assistant",
+            content: assistantText,
+            model,
+            image_hashes: [],
+          });
+
+          if (isFirstExchange) {
+            await generateTitle(chatId, model, ollamaUrl).catch(() => "");
+          }
+          await refreshChats();
+        } catch (err) {
+          console.error("persist failed", err);
+        }
       }
     },
-    [messages, model, ollamaUrl, systemPrompt, systemImage, pinnedImages, usage]
+    [
+      messages,
+      model,
+      ollamaUrl,
+      systemPrompt,
+      systemImage,
+      pinnedImages,
+      usage,
+      currentChatId,
+      ensureHashes,
+      refreshChats,
+    ]
   );
 
   const stop = useCallback(() => abortRef.current?.abort(), []);
-  const clearChat = useCallback(() => {
-    setMessages([]);
-    setUsage(null);
-  }, []);
 
   // Composer (full-width, bottom) state lives here so the input bar spans the
   // whole width — unobstructed by the left image panel.
@@ -191,13 +389,12 @@ export default function App() {
         ollamaUrl={ollamaUrl}
         setOllamaUrl={setOllamaUrl}
         models={models}
-        model={model}
-        setModel={setModel}
-        systemPrompt={systemPrompt}
-        setSystemPrompt={setSystemPrompt}
-        systemImage={systemImage}
-        setSystemImage={setSystemImage}
         refreshModels={refreshModels}
+        chats={chats}
+        currentChatId={currentChatId}
+        onNewChat={newChat}
+        onOpenChat={openChat}
+        onDeleteChat={removeChat}
       />
       <main className="main">
         <header className="topbar">
@@ -206,8 +403,8 @@ export default function App() {
             {usage && <ContextMeter used={usage.used} numCtx={usage.num_ctx} />}
             {model && <span className="model-pill">{model}</span>}
             {messages.length > 0 && (
-              <button className="btn ghost" onClick={clearChat}>
-                🗑️ Clear
+              <button className="btn ghost" onClick={newChat}>
+                ＋ New
               </button>
             )}
           </div>
@@ -239,6 +436,13 @@ export default function App() {
             onStop={stop}
             streaming={streaming}
             disabled={!model}
+            models={models}
+            model={model}
+            setModel={setModel}
+            systemPrompt={systemPrompt}
+            setSystemPrompt={setSystemPrompt}
+            systemImage={systemImage}
+            setSystemImage={setSystemImage}
           />
         </div>
       </main>

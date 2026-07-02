@@ -86,6 +86,44 @@ def stream_chat(url, model, messages):
             }
 
 
+def generate_title(url, model, first_user, first_assistant):
+    """Ask the model for a short conversation title from the first exchange.
+
+    Text-only (no images) so the vision context doesn't have to reload just to
+    name a chat. Returns a cleaned 3-6 word title, capped in length. Reuses the
+    same `think: False` behavior as chat and fails soft (returns "" on error).
+    """
+    system = (
+        "You write short conversation titles. Reply with ONLY a 3 to 6 word "
+        "title. No quotes, no trailing punctuation, no preamble."
+    )
+    user = f"User asked: {first_user}\n\nAssistant replied: {first_assistant[:500]}"
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "stream": False,
+        "think": False,
+        "options": {"num_ctx": 4096},
+    }
+    try:
+        response = requests.post(
+            f"{url}/api/chat", json=payload, timeout=CHAT_TIMEOUT
+        )
+        if response.status_code != 200:
+            return ""
+        text = (response.json().get("message") or {}).get("content", "")
+    except (requests.RequestException, ValueError):
+        return ""
+
+    # Clean: first line, strip surrounding quotes/whitespace, cap length.
+    title = text.strip().splitlines()[0].strip() if text.strip() else ""
+    title = title.strip('"').strip("'").rstrip(".").strip()
+    return title[:50]
+
+
 # --------------------------------------------------------------------------- #
 # Models
 # --------------------------------------------------------------------------- #

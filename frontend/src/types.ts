@@ -20,3 +20,31 @@ export interface RunningModel {
   name: string;
   size: number;
 }
+
+/** One row in the sidebar chat list. `icons` are thumbnail URLs. */
+export interface ChatSummary {
+  id: string;
+  title: string | null;
+  model: string;
+  updated_at: number;
+  icons: string[];
+}
+
+/** A message as returned by GET /api/chats/{id} (images are URLs, not data). */
+export interface StoredMessage {
+  role: Role;
+  content: string;
+  model: string | null;
+  images: string[];
+}
+
+/** Full chat detail from GET /api/chats/{id}. */
+export interface ChatDetail {
+  id: string;
+  title: string | null;
+  model: string | null;
+  system_prompt: string;
+  system_image: string | null;
+  pinned: string[];
+  messages: StoredMessage[];
+}

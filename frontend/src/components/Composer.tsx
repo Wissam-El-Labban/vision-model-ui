@@ -1,4 +1,5 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
+import { fileToResizedDataUrl } from "../fileUtils";
 
 interface Props {
   text: string;
@@ -11,6 +12,14 @@ interface Props {
   onStop: () => void;
   streaming: boolean;
   disabled: boolean;
+  // Moved here from the sidebar: system prompt (left) + model selector (right).
+  models: { vision: string[]; all: string[] };
+  model: string;
+  setModel: (v: string) => void;
+  systemPrompt: string;
+  setSystemPrompt: (v: string) => void;
+  systemImage: string | null;
+  setSystemImage: (v: string | null) => void;
 }
 
 export default function Composer({
@@ -24,8 +33,17 @@ export default function Composer({
   onStop,
   streaming,
   disabled,
+  models,
+  model,
+  setModel,
+  systemPrompt,
+  setSystemPrompt,
+  systemImage,
+  setSystemImage,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
+  const [sysOpen, setSysOpen] = useState(false);
+  const hasSystem = systemPrompt.trim().length > 0 || !!systemImage;
 
   function onKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -53,6 +71,71 @@ export default function Composer({
           ))}
         </div>
       )}
+
+      <div className="composer-controls">
+        <div className="sys-control">
+          <button
+            className={`btn ghost small ${hasSystem ? "has-dot" : ""}`}
+            onClick={() => setSysOpen((v) => !v)}
+            title="System prompt"
+          >
+            💬 System {hasSystem && <span className="dot" />}
+            <span className="chev">{sysOpen ? "▾" : "▸"}</span>
+          </button>
+          {sysOpen && (
+            <div className="system-popover">
+              <textarea
+                className="block"
+                rows={4}
+                value={systemPrompt}
+                onChange={(e) => setSystemPrompt(e.target.value)}
+                placeholder="Guide the model's behavior across the chat…"
+              />
+              <label className="lbl">📎 Persistent context image (optional)</label>
+              {systemImage ? (
+                <div className="sys-image">
+                  <img src={systemImage} alt="system" />
+                  <button
+                    className="btn danger block"
+                    onClick={() => setSystemImage(null)}
+                  >
+                    Remove image
+                  </button>
+                </div>
+              ) : (
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0];
+                    if (f) setSystemImage(await fileToResizedDataUrl(f));
+                  }}
+                />
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="model-control">
+          <span className="lbl inline">🤖 Model</span>
+          {models.vision.length > 0 ? (
+            <select value={model} onChange={(e) => setModel(e.target.value)}>
+              {models.vision.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder="No vision models — type one"
+            />
+          )}
+        </div>
+      </div>
+
       <div className="composer-row">
         <button
           className="btn icon"
