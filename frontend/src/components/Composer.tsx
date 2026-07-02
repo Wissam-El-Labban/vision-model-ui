@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fileToResizedDataUrl } from "../fileUtils";
 
 interface Props {
@@ -42,8 +42,22 @@ export default function Composer({
   setSystemImage,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
+  const sysRef = useRef<HTMLDivElement>(null);
   const [sysOpen, setSysOpen] = useState(false);
   const hasSystem = systemPrompt.trim().length > 0 || !!systemImage;
+
+  // Close the system-prompt popover on any click outside it (parity with the
+  // native model <select>, which closes itself).
+  useEffect(() => {
+    if (!sysOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (sysRef.current && !sysRef.current.contains(e.target as Node)) {
+        setSysOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [sysOpen]);
 
   function onKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -73,7 +87,7 @@ export default function Composer({
       )}
 
       <div className="composer-row">
-        <div className="sys-control">
+        <div className="sys-control" ref={sysRef}>
           <button
             className={`btn ghost icon ${hasSystem ? "has-dot" : ""}`}
             onClick={() => setSysOpen((v) => !v)}
@@ -83,6 +97,7 @@ export default function Composer({
           </button>
           {sysOpen && (
             <div className="system-popover">
+              <div className="popover-title">💬 System prompt</div>
               <textarea
                 className="block"
                 rows={4}

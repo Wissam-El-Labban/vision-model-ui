@@ -57,6 +57,12 @@ export default function App() {
   const [chatExists, setChatExists] = useState(false);
   // data-URL -> content hash, so re-sent pinned images aren't re-uploaded.
   const hashCache = useRef<Map<string, string>>(new Map());
+  // True while the pinned Images panel is "focused" (clicked). Pasted images are
+  // routed there instead of to the message composer while it's armed.
+  const pasteToPinnedRef = useRef(false);
+  const handleLockChange = useCallback((v: boolean) => {
+    pasteToPinnedRef.current = v;
+  }, []);
 
   /** Upload any not-yet-stored images and return their hashes (order-preserved). */
   const ensureHashes = useCallback(async (urls: string[]): Promise<string[]> => {
@@ -372,8 +378,8 @@ export default function App() {
     setComposerImages((prev) => prev.filter((_, idx) => idx !== i));
   }
 
-  // Paste images (Ctrl+V) anywhere → attach to the current message, same as
-  // dropping onto the chat. Text paste into inputs is left untouched.
+  // Paste images (Ctrl+V) anywhere → attach to the current message, or to the
+  // pinned panel when the cursor is over it. Text paste into inputs is untouched.
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       const files = Array.from(e.clipboardData?.items ?? [])
@@ -382,7 +388,8 @@ export default function App() {
         .filter((f): f is File => !!f);
       if (files.length) {
         e.preventDefault();
-        addComposerFiles(files);
+        if (pasteToPinnedRef.current) addPinned(files);
+        else addComposerFiles(files);
       }
     };
     window.addEventListener("paste", onPaste);
@@ -434,6 +441,7 @@ export default function App() {
               onAdd={addPinned}
               onRemove={removePinned}
               onRotate={rotatePinned}
+              onLockChange={handleLockChange}
             />
             <Chat
               messages={messages}

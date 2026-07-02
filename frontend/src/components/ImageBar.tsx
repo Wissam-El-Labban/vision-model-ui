@@ -5,6 +5,9 @@ interface Props {
   onAdd: (files: FileList | File[]) => void;
   onRemove: (i: number) => void;
   onRotate: (i: number) => void;
+  /** Notifies the parent when the panel is "focused" (clicked). While focused, a
+   *  Ctrl+V paste routes to the pinned images instead of the message composer. */
+  onLockChange: (locked: boolean) => void;
 }
 
 const MIN_W = 200;
@@ -14,15 +17,31 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 /** Pinned image panel down the left side. It stays put while the chat scrolls
  *  on the right, never covering it. Drag the right edge to resize its width; the
  *  images always scale to fit inside (never clipped). Click an image to zoom. */
-export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
+export default function ImageBar({ images, onAdd, onRemove, onRotate, onLockChange }: Props) {
   const [dragOver, setDragOver] = useState(false);
   const [zoom, setZoom] = useState<string | null>(null);
+  const [locked, setLocked] = useState(false);
   const [w, setW] = useState(() => Number(localStorage.getItem("imgW")) || DEF_W);
   const fileRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; w: number; maxW: number } | null>(null);
 
   useEffect(() => localStorage.setItem("imgW", String(w)), [w]);
+
+  // Report the focus/lock state up so App can route pastes to pinned.
+  useEffect(() => onLockChange(locked), [locked, onLockChange]);
+
+  // Clicking anywhere outside the panel unfocuses it (removes the glow).
+  useEffect(() => {
+    if (!locked) return;
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setLocked(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [locked]);
 
   useEffect(() => {
     function move(e: MouseEvent) {
@@ -55,9 +74,11 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
 
   return (
     <div
-      className={`image-bar ${has ? "filled" : ""}`}
+      className={`image-bar ${has ? "filled" : ""} ${locked ? "locked" : ""}`}
       ref={rootRef}
       style={has ? { width: w } : undefined}
+      onMouseDown={() => setLocked(true)}
+      title={locked ? "Focused — pasted images will pin here" : undefined}
     >
       <div
         className={`image-box ${dragOver ? "drag" : ""}`}
@@ -89,7 +110,7 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate }: Props) {
             <span>
               Drag &amp; drop image(s) here
               <br />
-              <span className="muted">or click to browse</span>
+              <span className="muted">or click to browse · click here then paste to pin</span>
             </span>
           </div>
         ) : (

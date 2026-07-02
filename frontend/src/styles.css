@@ -358,6 +358,11 @@ textarea {
   box-shadow: inset 0 0 0 2px var(--accent);
 }
 
+/* Focused/armed for paste: subtle glow so it's clear a Ctrl+V will pin here. */
+.image-bar.locked .image-box {
+  box-shadow: inset 0 0 0 2px var(--accent), 0 0 14px rgba(47, 129, 247, 0.35);
+}
+
 .image-box-head {
   display: flex;
   justify-content: space-between;
@@ -973,6 +978,14 @@ textarea {
   background: rgba(248, 81, 73, 0.12);
 }
 
+.chat-del.confirming {
+  opacity: 1;
+  color: var(--red);
+  background: rgba(248, 81, 73, 0.15);
+  font-size: 11px;
+  padding: 2px 6px;
+}
+
 /* ---------- Inline composer controls (system prompt + model on the row) --- */
 .sys-control {
   position: relative;
@@ -1005,6 +1018,13 @@ textarea {
   border-radius: var(--radius);
   padding: 12px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.popover-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 8px;
 }
 
 .model-control {

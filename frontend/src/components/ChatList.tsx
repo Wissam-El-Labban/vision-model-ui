@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { ChatSummary } from "../types";
 
 interface Props {
@@ -18,6 +19,15 @@ export default function ChatList({
   onOpenChat,
   onDeleteChat,
 }: Props) {
+  // Two-step delete guardrail: first click on ✕ arms "Delete?"; a second click
+  // deletes. Auto-reverts after a few seconds (and on leaving the row).
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!confirmId) return;
+    const t = setTimeout(() => setConfirmId(null), 5000);
+    return () => clearTimeout(t);
+  }, [confirmId]);
+
   return (
     <div className="chat-list">
       <div className="chat-list-head">
@@ -51,14 +61,19 @@ export default function ChatList({
                 {c.title ?? <span className="muted">Untitled…</span>}
               </span>
               <button
-                className="chat-del"
-                title="Delete chat"
+                className={`chat-del ${confirmId === c.id ? "confirming" : ""}`}
+                title={confirmId === c.id ? "Click again to delete" : "Delete chat"}
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (confirm("Delete this chat?")) onDeleteChat(c.id);
+                  if (confirmId === c.id) {
+                    onDeleteChat(c.id);
+                    setConfirmId(null);
+                  } else {
+                    setConfirmId(c.id);
+                  }
                 }}
               >
-                ✕
+                {confirmId === c.id ? "Delete?" : "✕"}
               </button>
             </li>
           ))}
