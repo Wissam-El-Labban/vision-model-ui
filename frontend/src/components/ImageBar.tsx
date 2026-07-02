@@ -97,20 +97,18 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate, onLockChan
       >
         <div className="image-box-head">
           <span>🖼️ Images</span>
-          {has && (
-            <button className="btn ghost small" onClick={browse}>
-              + Add
-            </button>
-          )}
+          <button className="btn ghost small" onClick={browse}>
+            + Add
+          </button>
         </div>
 
         {!has ? (
-          <div className="box-empty" onClick={browse}>
+          <div className="box-empty">
             <span className="dz-emoji">🖼️⬇️</span>
             <span>
               Drag &amp; drop image(s) here
               <br />
-              <span className="muted">or click to browse · click here then paste to pin</span>
+              <span className="muted">or “+ Add” to browse · click here, then paste to pin</span>
             </span>
           </div>
         ) : (

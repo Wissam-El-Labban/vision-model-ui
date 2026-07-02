@@ -383,7 +383,7 @@ textarea {
   gap: 8px;
   padding: 34px 56px;
   color: var(--muted);
-  cursor: pointer;
+  cursor: default;
   font-size: 14px;
   text-align: center;
 }
