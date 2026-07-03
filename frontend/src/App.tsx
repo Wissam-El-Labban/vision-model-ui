@@ -278,24 +278,34 @@ export default function App() {
       // them ("this image" vs "the initial one"). We therefore also build a short
       // text manifest, in the same order as the images array, so the model can
       // tell the pinned reference(s) apart from images shared earlier vs. now.
+      // Images keep a single global numbering (Image 1..N, in array order) —
+      // that's how models actually refer to them and how the UI resolves each
+      // "Image N" back to its thumbnail. But we group them under clear section
+      // headers so the model doesn't skim past which ones are the persistent
+      // pinned references vs. what was actually sent in the chat (even capable
+      // models mislabel a pinned image as "shared" when it's just one line in a
+      // flat list). Pinned images always come first, so contextImages =
+      // [pinned..., chat...].
       const lastIdx = sent.length - 1;
       const seen = new Set<string>(); // dedupe pinned + repeats across history
       const outImages: string[] = [];
-      const manifest: string[] = [];
-      const addImage = (img: string, label: string) => {
-        if (seen.has(img)) return;
+      const pinnedLines: string[] = [];
+      const chatLines: string[] = [];
+      for (const img of pinnedImages) {
+        if (seen.has(img)) continue;
         seen.add(img);
         outImages.push(img);
-        manifest.push(`${outImages.length}. ${label}`);
-      };
-      pinnedImages.forEach((img) => addImage(img, "Pinned reference image"));
+        pinnedLines.push(`  Image ${outImages.length}`);
+      }
       sent.forEach((m, i) => {
-        (m.images ?? []).forEach((img) =>
-          addImage(
-            img,
-            i === lastIdx ? "Image shared in this message" : "Image shared earlier in this chat"
-          )
-        );
+        for (const img of m.images ?? []) {
+          if (seen.has(img)) continue;
+          seen.add(img);
+          outImages.push(img);
+          chatLines.push(
+            `  Image ${outImages.length}${i === lastIdx ? " (sent just now)" : " (sent earlier)"}`
+          );
+        }
       });
       // Record the manifest's ordered image list on the assistant turn so the UI
       // can resolve the model's "image N" references back to a thumbnail.
@@ -313,12 +323,23 @@ export default function App() {
         }
         if (!outImages.length) return { role: m.role, content: m.content };
         // Only annotate when there's more than one image (nothing to disambiguate otherwise).
-        const note =
-          outImages.length > 1
-            ? `[You are shown ${outImages.length} images, in this order:\n${manifest.join(
-                "\n"
-              )}]\n\n`
-            : "";
+        let note = "";
+        if (outImages.length > 1) {
+          const sections: string[] = [];
+          if (pinnedLines.length) {
+            sections.push(
+              "PINNED REFERENCE IMAGES (kept in view for the whole conversation for " +
+                "analysis; NOT part of any single message):\n" +
+                pinnedLines.join("\n")
+            );
+          }
+          if (chatLines.length) {
+            sections.push("IMAGES SENT IN THE CHAT:\n" + chatLines.join("\n"));
+          }
+          note =
+            `[The ${outImages.length} images below are numbered 1-${outImages.length} in the ` +
+            `order shown; refer to each by its number.\n\n${sections.join("\n\n")}]\n\n`;
+        }
         return { role: m.role, content: note + m.content, images: outImages };
       });
 
