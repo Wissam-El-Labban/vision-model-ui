@@ -246,16 +246,53 @@ export default function App() {
       // when the last measured usage shows we're near the window limit.
       const { sent } = trimHistory(history, pinnedImages.length, usage);
 
-      // Image-sending policy (Ollama /api/chat is stateless — the model only sees
-      // images present in the current request):
-      //  - Pinned/primary images ride on the CURRENT message every request, so
-      //    they're always in context.
-      //  - Optional per-message attachments stay on their original message and are
-      //    resent in history, so the model can still reference earlier photos.
+      // Image-sending policy (Ollama /api/chat is stateless AND only attends to
+      // images on the CURRENT/last message — images on earlier history messages
+      // are ignored by vision models). So we consolidate every image the
+      // (trimmed) conversation has seen onto the last message: pinned/primary
+      // first, then each in-chat attachment in order. Earlier messages go
+      // text-only. This keeps the model aware of every photo across follow-ups,
+      // not just the one from the latest turn. trimHistory (above) already sheds
+      // the oldest turns/images under context pressure, so this stays within the
+      // window budget (total image count is unchanged, just relocated + deduped).
+      //
+      // The chat API hands the model N *unlabeled* images with no anchor for
+      // which is which, so it conflates distinct photos when asked to compare
+      // them ("this image" vs "the initial one"). We therefore also build a short
+      // text manifest, in the same order as the images array, so the model can
+      // tell the pinned reference(s) apart from images shared earlier vs. now.
       const lastIdx = sent.length - 1;
+      const seen = new Set<string>(); // dedupe pinned + repeats across history
+      const outImages: string[] = [];
+      const manifest: string[] = [];
+      const addImage = (img: string, label: string) => {
+        if (seen.has(img)) return;
+        seen.add(img);
+        outImages.push(img);
+        manifest.push(`${outImages.length}. ${label}`);
+      };
+      pinnedImages.forEach((img) => addImage(img, "Pinned reference image"));
+      sent.forEach((m, i) => {
+        (m.images ?? []).forEach((img) =>
+          addImage(
+            img,
+            i === lastIdx ? "Image shared in this message" : "Image shared earlier in this chat"
+          )
+        );
+      });
       const merged = sent.map((m, i) => {
-        const imgs = i === lastIdx ? [...pinnedImages, ...(m.images ?? [])] : m.images ?? [];
-        return imgs.length ? { ...m, images: imgs } : { role: m.role, content: m.content };
+        if (i !== lastIdx) {
+          return { role: m.role, content: m.content }; // strip history images (Ollama ignores them)
+        }
+        if (!outImages.length) return { role: m.role, content: m.content };
+        // Only annotate when there's more than one image (nothing to disambiguate otherwise).
+        const note =
+          outImages.length > 1
+            ? `[You are shown ${outImages.length} images, in this order:\n${manifest.join(
+                "\n"
+              )}]\n\n`
+            : "";
+        return { role: m.role, content: note + m.content, images: outImages };
       });
 
       // Build the request: optional system message (with persistent image) + history.
