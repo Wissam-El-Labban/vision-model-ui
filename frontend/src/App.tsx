@@ -177,27 +177,41 @@ export default function App() {
       const d = await getChat(id);
 
       // Load images back into memory as data-URLs and pre-seed the hash cache
-      // so they aren't re-uploaded on the next send.
-      const loadImg = async (url: string) => {
-        const data = await urlToDataUrl(url);
-        hashCache.current.set(data, hashFromUrl(url));
-        return data;
+      // so they aren't re-uploaded on the next send. A missing file (e.g. one a
+      // past GC removed) resolves to null so we can drop it instead of showing a
+      // broken image or re-persisting a dead reference.
+      const loadImg = async (url: string): Promise<string | null> => {
+        try {
+          const data = await urlToDataUrl(url);
+          hashCache.current.set(data, hashFromUrl(url));
+          return data;
+        } catch {
+          return null;
+        }
       };
+      const present = (arr: (string | null)[]) =>
+        arr.filter((x): x is string => x !== null);
 
-      const pinned = await Promise.all(d.pinned.map(loadImg));
+      // Dropping missing pinned images here also self-heals the DB: the next
+      // send re-persists the pinned set without them.
+      const pinned = present(await Promise.all(d.pinned.map(loadImg)));
       const sysImg = d.system_image ? await loadImg(d.system_image) : null;
       const msgs: ChatMessage[] = await Promise.all(
-        d.messages.map(async (m) => ({
-          role: m.role,
-          content: m.content,
-          model: m.model ?? undefined,
-          images: m.images.length
-            ? await Promise.all(m.images.map(loadImg))
-            : undefined,
-          contextImages: m.context_images.length
-            ? await Promise.all(m.context_images.map(loadImg))
-            : undefined,
-        }))
+        d.messages.map(async (m) => {
+          const images = present(await Promise.all(m.images.map(loadImg)));
+          // Keep context-image positions stable (missing -> "") so the model's
+          // "image N" references still line up; "" simply renders no thumbnail.
+          const contextImages = (
+            await Promise.all(m.context_images.map(loadImg))
+          ).map((x) => x ?? "");
+          return {
+            role: m.role,
+            content: m.content,
+            model: m.model ?? undefined,
+            images: images.length ? images : undefined,
+            contextImages: contextImages.length ? contextImages : undefined,
+          };
+        })
       );
 
       setCurrentChatId(d.id);

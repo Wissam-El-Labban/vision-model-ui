@@ -344,4 +344,19 @@ def get_first_exchange(chat_id: str) -> tuple[str, str] | None:
 def delete_chat(chat_id: str) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+        # NOTE: we intentionally do NOT garbage-collect image files here. Content-
+        # addressed bytes can still be live in an open browser session (e.g. a
+        # pinned image not yet committed to another chat), and deleting them out
+        # from under the frontend's hash cache produced dangling references /
+        # broken images. Orphaned image files are cheap on a local disk; reclaim
+        # them explicitly via gc_orphan_images() if it ever matters.
+
+
+def gc_orphan_images() -> None:
+    """Explicitly reclaim image files/rows not referenced by any chat or message.
+
+    Deliberately NOT run automatically (see delete_chat) — only safe to call when
+    no browser session might still hold an uncommitted image's bytes.
+    """
+    with _connect() as conn:
         _gc_orphan_images(conn)

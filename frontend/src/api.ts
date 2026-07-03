@@ -239,6 +239,9 @@ export async function deleteChat(id: string): Promise<void> {
  *  so the existing send/display code (which expects data-URLs) is unchanged. */
 export async function urlToDataUrl(url: string): Promise<string> {
   const res = await fetch(url);
+  // Fail loudly on a missing file (e.g. a GC'd image) instead of encoding the
+  // 404 body into a bogus data-URL that renders as a broken image.
+  if (!res.ok) throw new Error(`image ${res.status}: ${url}`);
   const blob = await res.blob();
   return new Promise((resolve, reject) => {
     const reader = new FileReader();

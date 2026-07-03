@@ -18,17 +18,13 @@ const ORDINALS: Record<string, number> = {
 
 /** Inject a placeholder thumbnail (`![](ctx://idx)`) after the model's manifest
  *  references — "image N", "the Nth image", "pinned reference image" — so the
- *  <img> renderer below can turn each into a clickable thumbnail. Only the first
- *  mention of a given image gets a thumbnail (avoids repeating it), and only
- *  indices that actually exist in this turn's context list are annotated. */
+ *  <img> renderer below can turn each into a clickable thumbnail. Every mention
+ *  gets its own thumbnail; only indices that actually exist in this turn's
+ *  context list are annotated. */
 function annotateImageRefs(content: string, count: number): string {
   if (count <= 0) return content;
-  const injected = new Set<number>();
-  const inject = (whole: string, n: number): string => {
-    if (n < 1 || n > count || injected.has(n)) return whole;
-    injected.add(n);
-    return `${whole} ![](ctx://${n - 1})`;
-  };
+  const inject = (whole: string, n: number): string =>
+    n < 1 || n > count ? whole : `${whole} ![](ctx://${n - 1})`;
   return content
     .replace(/\bimages?\s*#?\s*(\d{1,2})\b/gi, (m, n) => inject(m, parseInt(n, 10)))
     .replace(
