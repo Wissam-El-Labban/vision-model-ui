@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fileToResizedDataUrl } from "../fileUtils";
 import type { GenSettings } from "../types";
-import type { SdModel } from "../api";
+import { pullSdModel, type SdModel } from "../api";
 
 interface Props {
   text: string;
@@ -29,6 +29,11 @@ interface Props {
   sdModels: SdModel[];
   gen: GenSettings;
   setGen: (v: GenSettings) => void;
+  /** First pinned-panel image, used as the img2img source when nothing is
+   *  attached to the message. `null` when the panel is empty. */
+  pinnedInit: string | null;
+  /** Refresh SD model info after a model is downloaded. */
+  onModelPulled: () => void;
 }
 
 export default function Composer({
@@ -55,12 +60,28 @@ export default function Composer({
   sdModels,
   gen,
   setGen,
+  pinnedInit,
+  onModelPulled,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const sysRef = useRef<HTMLDivElement>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
   const [sysOpen, setSysOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [dlStatus, setDlStatus] = useState<string | null>(null);
+  const selectedModel = sdModels.find((m) => m.id === gen.model);
+
+  async function downloadModel() {
+    if (!selectedModel) return;
+    setDlStatus("Starting…");
+    try {
+      await pullSdModel(selectedModel.id, setDlStatus);
+      onModelPulled();
+      setDlStatus(null);
+    } catch (e) {
+      setDlStatus(`⚠️ ${(e as Error).message}`);
+    }
+  }
   const hasSystem = systemPrompt.trim().length > 0 || !!systemImage;
   const patchGen = (p: Partial<typeof gen>) => setGen({ ...gen, ...p });
   // Switching model applies its preset: Turbo is a few-step, no-guidance model;
@@ -74,9 +95,11 @@ export default function Composer({
       guidance: turbo ? 0 : 7.5,
     });
   };
-  // In generate mode, an attached image becomes the img2img init → the sub-mode
-  // is inferred from whether one is present.
-  const genSubmode = genMode && images.length > 0 ? "img2img" : "txt2img";
+  // In generate mode the img2img init is the attached image, else the first
+  // pinned-panel image. The sub-mode is inferred from whether any is present.
+  const initSource = images.length > 0 ? "attached" : pinnedInit ? "pinned" : null;
+  const genSubmode = genMode && initSource ? "img2img" : "txt2img";
+  const initPreview = images.length > 0 ? images[0] : pinnedInit;
 
   // Close the system-prompt popover on any click outside it (parity with the
   // native model <select>, which closes itself).
@@ -132,15 +155,20 @@ export default function Composer({
         </div>
       )}
 
+      {genMode && genSubmode === "img2img" && (
+        <div className="init-hint">
+          {initPreview && (
+            <img className="init-thumb" src={initPreview} alt="img2img source" />
+          )}
+          <span>
+            Starting image ({initSource === "attached" ? "attached" : "from panel"}) — img2img
+            transforms this <em>one</em> image. It can't merge multiple images into a scene.
+          </span>
+        </div>
+      )}
+
       {images.length > 0 && (
         <>
-          {genMode && (
-            <div className="init-hint">
-              {genSubmode === "img2img"
-                ? "🖼️ Attached image is the img2img starting point"
-                : ""}
-            </div>
-          )}
           <div className="thumbs">
             {images.map((src, i) => (
               <div className="thumb" key={i}>
@@ -215,6 +243,27 @@ export default function Composer({
             {settingsOpen && (
               <div className="system-popover gen-popover">
                 <div className="popover-title">🎨 Generation settings</div>
+                {selectedModel && !selectedModel.downloaded && (
+                  <div className="dl-box">
+                    <div className="dl-row">
+                      <span>
+                        <strong>{selectedModel.label}</strong> isn't downloaded
+                        {" "}(~{selectedModel.size_gb} GB, one-time).
+                      </span>
+                    </div>
+                    {dlStatus ? (
+                      <div className="dl-status">{dlStatus}</div>
+                    ) : (
+                      <button className="btn block" onClick={downloadModel}>
+                        ⬇ Download {selectedModel.label}
+                      </button>
+                    )}
+                    <p className="hint muted">
+                      The only network call this app makes. After download,
+                      generation is fully offline.
+                    </p>
+                  </div>
+                )}
                 <label className="lbl">Negative prompt</label>
                 <textarea
                   className="block"
@@ -321,8 +370,7 @@ export default function Composer({
             <select value={gen.model} onChange={(e) => onModelChange(e.target.value)}>
               {sdModels.map((m) => (
                 <option key={m.id} value={m.id}>
-                  {m.id.split("/").pop()}
-                  {m.turbo ? " (fast)" : ""}
+                  {m.label}
                   {m.downloaded ? "" : " ⬇"}
                 </option>
               ))}

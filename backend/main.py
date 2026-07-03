@@ -169,6 +169,38 @@ def generate_unload():
     return {"ok": True}
 
 
+class SdPullRequest(BaseModel):
+    model: str
+
+
+@app.post("/api/generate/pull")
+def generate_pull(req: SdPullRequest):
+    """Explicitly download an image model's weights (opt-in, streams status)."""
+    if not sd.available():
+        raise HTTPException(status_code=503, detail="Image generation deps not installed.")
+
+    def gen():
+        events: queue.Queue = queue.Queue()
+
+        def worker():
+            try:
+                sd.pull(req.model, on_status=lambda m: events.put({"type": "status", "message": m}))
+                events.put({"type": "done"})
+            except Exception as exc:
+                events.put({"type": "error", "message": str(exc)})
+            finally:
+                events.put(None)
+
+        threading.Thread(target=worker, daemon=True).start()
+        while True:
+            item = events.get()
+            if item is None:
+                break
+            yield json.dumps(item) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
 @app.post("/api/generate")
 def generate(req: GenerateRequest):
     """Run a local diffusion generation, streaming progress then the final image.

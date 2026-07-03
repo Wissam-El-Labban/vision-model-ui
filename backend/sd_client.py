@@ -13,18 +13,40 @@ from __future__ import annotations
 
 import gc
 import io
+import os
 import random
 import threading
 from pathlib import Path
 
+# Privacy: the serving process is forced FULLY OFFLINE for HuggingFace. These are
+# set before diffusers/transformers/huggingface_hub are ever imported (all heavy
+# imports in this module are lazy), so the offline flags take effect. Result: no
+# staleness checks, no telemetry, no outbound calls of any kind from generation.
+#
+# The ONE exception is a deliberate model download, which runs in a separate
+# subprocess (see `pull`) whose environment has these flags removed — so network
+# access is confined to the moment the user explicitly clicks "Download", and the
+# long-lived serving process itself never has network-enabled HF access.
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
 # --------------------------------------------------------------------------- #
-# Known models (Phase 1). SD 1.5 covers text2img + img2img from one download;
-# SD-Turbo is the fast few-step option. Inpaint / upscale models come in later
-# phases.
+# Known models. SD 1.5 covers text2img + img2img from one download; SD-Turbo is
+# the fast few-step option; Realistic Vision is an opt-in photoreal checkpoint
+# (never auto-downloaded — the user pulls it explicitly). Inpaint / upscale
+# models come in later phases.
 # --------------------------------------------------------------------------- #
 BASE_MODEL = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 TURBO_MODEL = "stabilityai/sd-turbo"
-KNOWN_MODELS = [BASE_MODEL, TURBO_MODEL]
+PHOTOREAL_MODEL = "SG161222/Realistic_Vision_V5.1_noVAE"
+
+# id -> display metadata for the UI.
+MODELS = [
+    {"id": TURBO_MODEL, "label": "SD-Turbo (fast)", "turbo": True, "photoreal": False, "size_gb": 2.5},
+    {"id": BASE_MODEL, "label": "Stable Diffusion 1.5", "turbo": False, "photoreal": False, "size_gb": 4.0},
+    {"id": PHOTOREAL_MODEL, "label": "Realistic Vision 5.1 (photoreal)", "turbo": False, "photoreal": True, "size_gb": 4.0},
+]
 
 # Generation is serialized: there's no VRAM to run two at once, and swapping the
 # resident pipeline mid-run would corrupt both.
@@ -79,10 +101,72 @@ def is_downloaded(model_id: str) -> bool:
 
 
 def list_models() -> list[dict]:
-    return [
-        {"id": m, "downloaded": is_downloaded(m), "turbo": m == TURBO_MODEL}
-        for m in KNOWN_MODELS
-    ]
+    return [{**m, "downloaded": is_downloaded(m["id"])} for m in MODELS]
+
+
+# The download runs in a child process so the network access is fully isolated
+# from the always-offline serving process. Only the files actually needed are
+# fetched (safetensors preferred), keeping the on-disk footprint minimal.
+_DOWNLOAD_SCRIPT = """
+import sys
+from diffusers import DiffusionPipeline
+m = sys.argv[1]
+try:
+    DiffusionPipeline.download(m, use_safetensors=True)
+except Exception:
+    DiffusionPipeline.download(m)  # some checkpoints ship only .bin weights
+"""
+
+
+def pull(model_id: str, on_status=None):
+    """Download a model's weights to the local cache (deliberate, opt-in).
+
+    Runs in a subprocess whose environment has the offline flags removed, so this
+    is the ONLY moment the app touches the network — and the long-lived serving
+    process never has network-enabled HuggingFace access. Streams coarse progress
+    from the child's output.
+    """
+    import subprocess  # PLC0415
+    import sys  # PLC0415
+    import time  # PLC0415
+
+    if on_status:
+        on_status(f"Downloading {model_id}… (one-time, may take several minutes)")
+
+    # Child env: allow network (drop the offline flags) but keep telemetry off.
+    env = {**os.environ}
+    env.pop("HF_HUB_OFFLINE", None)
+    env.pop("TRANSFORMERS_OFFLINE", None)
+    env["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _DOWNLOAD_SCRIPT, model_id],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+    )
+    # Read byte-wise and split on \r or \n so tqdm's carriage-return progress
+    # lines surface; forward the most recent progress-ish line, throttled.
+    buf = b""
+    last = 0.0
+    while True:
+        ch = proc.stdout.read(1)
+        if not ch:
+            break
+        if ch in (b"\r", b"\n"):
+            line = buf.decode("utf-8", "replace").strip()
+            buf = b""
+            if line and on_status and (time.time() - last) > 0.5:
+                if "%" in line or "Fetching" in line or "Downloading" in line:
+                    on_status(line)
+                    last = time.time()
+        else:
+            buf += ch
+    if proc.wait() != 0:
+        raise RuntimeError(f"Download of {model_id} failed. Check your connection.")
+    if on_status:
+        on_status("Download complete.")
 
 
 # --------------------------------------------------------------------------- #
@@ -103,14 +187,17 @@ def _load(model_id: str, on_status=None) -> None:
     dtype = torch.float16 if dev == "cuda" else torch.float32
 
     if on_status:
-        state = "loading" if is_downloaded(model_id) else "downloading (one-time)"
-        on_status(f"{state} {model_id}…")
+        on_status(f"loading {model_id}…")
 
+    # Belt-and-suspenders with the process-level HF_HUB_OFFLINE: load purely from
+    # the local cache, never the network. (generate() guarantees the model is
+    # already downloaded before we get here.)
     pipe = AutoPipelineForText2Image.from_pretrained(
         model_id,
         torch_dtype=dtype,
         safety_checker=None,  # local & offline; avoids an extra model + false positives
         use_safetensors=True,
+        local_files_only=True,
     )
     if dev == "cuda":
         # Stream submodules to the GPU only while they run — the decisive fit for 6 GB.
@@ -155,6 +242,11 @@ def generate(params: dict, on_step=None, on_status=None):
     torch = _torch()
     with _LOCK:
         model_id = params.get("model") or BASE_MODEL
+        if not is_downloaded(model_id):
+            raise RuntimeError(
+                f"Model '{model_id}' isn't downloaded yet. Download it first "
+                "(Generation settings ▸ Download)."
+            )
         _load(model_id, on_status=on_status)
 
         mode = params.get("mode", "txt2img")

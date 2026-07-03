@@ -157,8 +157,11 @@ export async function pullModel(
 // --------------------------------------------------------------------------- #
 export interface SdModel {
   id: string;
+  label: string;
   downloaded: boolean;
   turbo: boolean;
+  photoreal: boolean;
+  size_gb: number;
 }
 
 export interface SdInfo {
@@ -171,6 +174,28 @@ export async function getSdInfo(): Promise<SdInfo> {
   const res = await fetch("/api/generate/models");
   if (!res.ok) throw new Error(`sd models: ${res.status}`);
   return res.json();
+}
+
+/** Explicitly download an image model (opt-in). Streams status lines. */
+export async function pullSdModel(
+  model: string,
+  onStatus: (message: string) => void
+): Promise<void> {
+  const res = await fetch("/api/generate/pull", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  if (!res.ok) throw new Error(`sd pull: ${res.status}`);
+  await readLines(res, (line) => {
+    try {
+      const ev = JSON.parse(line);
+      if (ev.type === "status") onStatus(ev.message as string);
+      else if (ev.type === "error") throw new Error(ev.message);
+    } catch {
+      /* ignore keepalives */
+    }
+  });
 }
 
 export interface GenerateParams {

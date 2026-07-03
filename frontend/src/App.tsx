@@ -659,7 +659,12 @@ export default function App() {
     const trimmed = composerText.trim();
     if (genMode) {
       if (!trimmed) return; // a prompt is required to generate
-      generateImage(trimmed, composerImages);
+      // img2img source: the attached image, else the first pinned-panel image.
+      // Only one image is used (img2img can't merge several).
+      const genImages = composerImages.length
+        ? composerImages.slice(0, 1)
+        : pinnedImages.slice(0, 1);
+      generateImage(trimmed, genImages);
     } else {
       if (!trimmed && composerImages.length === 0) return;
       send(trimmed, composerImages);
@@ -735,6 +740,10 @@ export default function App() {
             sdModels={sdInfo.models}
             gen={gen}
             setGen={setGen}
+            pinnedInit={pinnedImages[0] ?? null}
+            onModelPulled={() => {
+              getSdInfo().then(setSdInfo).catch(() => {});
+            }}
           />
         </div>
       </main>
