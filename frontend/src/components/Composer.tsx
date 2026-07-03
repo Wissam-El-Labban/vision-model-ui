@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fileToResizedDataUrl } from "../fileUtils";
+import type { GenSettings } from "../types";
+import type { SdModel } from "../api";
 
 interface Props {
   text: string;
@@ -20,6 +22,13 @@ interface Props {
   setSystemPrompt: (v: string) => void;
   systemImage: string | null;
   setSystemImage: (v: string | null) => void;
+  // Image generation (diffusers).
+  genMode: boolean;
+  setGenMode: (v: boolean) => void;
+  sdAvailable: boolean;
+  sdModels: SdModel[];
+  gen: GenSettings;
+  setGen: (v: GenSettings) => void;
 }
 
 export default function Composer({
@@ -40,11 +49,34 @@ export default function Composer({
   setSystemPrompt,
   systemImage,
   setSystemImage,
+  genMode,
+  setGenMode,
+  sdAvailable,
+  sdModels,
+  gen,
+  setGen,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const sysRef = useRef<HTMLDivElement>(null);
+  const settingsRef = useRef<HTMLDivElement>(null);
   const [sysOpen, setSysOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const hasSystem = systemPrompt.trim().length > 0 || !!systemImage;
+  const patchGen = (p: Partial<typeof gen>) => setGen({ ...gen, ...p });
+  // Switching model applies its preset: Turbo is a few-step, no-guidance model;
+  // standard SD wants ~25 steps and CFG ~7.5.
+  const onModelChange = (id: string) => {
+    const turbo = sdModels.find((m) => m.id === id)?.turbo;
+    setGen({
+      ...gen,
+      model: id,
+      steps: turbo ? 2 : 25,
+      guidance: turbo ? 0 : 7.5,
+    });
+  };
+  // In generate mode, an attached image becomes the img2img init → the sub-mode
+  // is inferred from whether one is present.
+  const genSubmode = genMode && images.length > 0 ? "img2img" : "txt2img";
 
   // Close the system-prompt popover on any click outside it (parity with the
   // native model <select>, which closes itself).
@@ -59,6 +91,17 @@ export default function Composer({
     return () => document.removeEventListener("mousedown", onDown);
   }, [sysOpen]);
 
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
+        setSettingsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [settingsOpen]);
+
   function onKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -68,22 +111,52 @@ export default function Composer({
 
   return (
     <div className="composer">
-      {images.length > 0 && (
-        <div className="thumbs">
-          {images.map((src, i) => (
-            <div className="thumb" key={i}>
-              <img src={src} alt={`attachment ${i + 1}`} />
-              <div className="thumb-actions">
-                <button title="Rotate" onClick={() => onRotateImage(i)}>
-                  ↻
-                </button>
-                <button title="Remove" onClick={() => onRemoveImage(i)}>
-                  ✕
-                </button>
-              </div>
-            </div>
-          ))}
+      {sdAvailable && (
+        <div className="mode-toggle" role="tablist" aria-label="Composer mode">
+          <button
+            role="tab"
+            aria-selected={!genMode}
+            className={`mode-tab ${!genMode ? "active" : ""}`}
+            onClick={() => setGenMode(false)}
+          >
+            🔍 Analyze
+          </button>
+          <button
+            role="tab"
+            aria-selected={genMode}
+            className={`mode-tab ${genMode ? "active" : ""}`}
+            onClick={() => setGenMode(true)}
+          >
+            🎨 Generate
+          </button>
         </div>
+      )}
+
+      {images.length > 0 && (
+        <>
+          {genMode && (
+            <div className="init-hint">
+              {genSubmode === "img2img"
+                ? "🖼️ Attached image is the img2img starting point"
+                : ""}
+            </div>
+          )}
+          <div className="thumbs">
+            {images.map((src, i) => (
+              <div className="thumb" key={i}>
+                <img src={src} alt={`attachment ${i + 1}`} />
+                <div className="thumb-actions">
+                  <button title="Rotate" onClick={() => onRotateImage(i)}>
+                    ↻
+                  </button>
+                  <button title="Remove" onClick={() => onRemoveImage(i)}>
+                    ✕
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
       )}
 
       <div className="composer-row">
@@ -130,11 +203,70 @@ export default function Composer({
           )}
         </div>
 
+        {genMode && (
+          <div className="sys-control" ref={settingsRef}>
+            <button
+              className="btn ghost icon"
+              onClick={() => setSettingsOpen((v) => !v)}
+              title="Generation settings"
+            >
+              ⚙️
+            </button>
+            {settingsOpen && (
+              <div className="system-popover gen-popover">
+                <div className="popover-title">🎨 Generation settings</div>
+                <label className="lbl">Negative prompt</label>
+                <textarea
+                  className="block"
+                  rows={2}
+                  value={gen.negativePrompt}
+                  onChange={(e) => patchGen({ negativePrompt: e.target.value })}
+                  placeholder="What to avoid (optional)…"
+                />
+                <div className="gen-grid">
+                  <label>Steps
+                    <input type="number" min={1} max={50} value={gen.steps}
+                      onChange={(e) => patchGen({ steps: +e.target.value })} />
+                  </label>
+                  <label>Guidance
+                    <input type="number" min={0} max={20} step={0.5} value={gen.guidance}
+                      onChange={(e) => patchGen({ guidance: +e.target.value })} />
+                  </label>
+                  <label>Width
+                    <input type="number" min={256} max={1024} step={64} value={gen.width}
+                      onChange={(e) => patchGen({ width: +e.target.value })} />
+                  </label>
+                  <label>Height
+                    <input type="number" min={256} max={1024} step={64} value={gen.height}
+                      onChange={(e) => patchGen({ height: +e.target.value })} />
+                  </label>
+                  <label className={genSubmode === "img2img" ? "" : "muted-field"}>
+                    Strength
+                    <input type="number" min={0} max={1} step={0.05} value={gen.strength}
+                      disabled={genSubmode !== "img2img"}
+                      onChange={(e) => patchGen({ strength: +e.target.value })} />
+                  </label>
+                  <label>Seed
+                    <input type="text" inputMode="numeric" value={gen.seed}
+                      placeholder="random"
+                      onChange={(e) => patchGen({ seed: e.target.value.replace(/[^0-9]/g, "") })} />
+                  </label>
+                </div>
+                <p className="hint muted">
+                  {genSubmode === "img2img"
+                    ? "Image-to-image: strength controls how far from the attached image."
+                    : "Text-to-image: attach an image above to switch to image-to-image."}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
         <button
           className="btn icon"
-          title="Attach images"
+          title={genMode ? "Attach a starting image (img2img)" : "Attach images"}
           onClick={() => fileRef.current?.click()}
-          disabled={disabled}
+          disabled={disabled && !genMode}
         >
           📎
         </button>
@@ -154,12 +286,16 @@ export default function Composer({
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
           placeholder={
-            disabled
-              ? "Select a vision model to start…"
-              : "Ask about your image(s)… (drop or paste images anywhere, Enter to send)"
+            genMode
+              ? genSubmode === "img2img"
+                ? "Describe how to transform the attached image…"
+                : "Describe the image to generate… (attach an image for img2img)"
+              : disabled
+                ? "Select a vision model to start…"
+                : "Ask about your image(s)… (drop or paste images anywhere, Enter to send)"
           }
           rows={1}
-          disabled={disabled}
+          disabled={genMode ? false : disabled}
         />
 
         {streaming ? (
@@ -168,32 +304,50 @@ export default function Composer({
           </button>
         ) : (
           <button
-            className="btn send"
+            className={`btn send ${genMode ? "gen" : ""}`}
             onClick={onSubmit}
-            disabled={disabled || (!text.trim() && images.length === 0)}
+            title={genMode ? "Generate image" : "Send"}
+            disabled={
+              genMode ? !text.trim() : disabled || (!text.trim() && images.length === 0)
+            }
           >
-            ➤
+            {genMode ? "🎨" : "➤"}
           </button>
         )}
 
-        <div className="model-control" title="Vision model">
-          <span aria-hidden>🤖</span>
-          {models.vision.length > 0 ? (
-            <select value={model} onChange={(e) => setModel(e.target.value)}>
-              {models.vision.map((m) => (
-                <option key={m} value={m}>
-                  {m}
+        {genMode ? (
+          <div className="model-control" title="Image model">
+            <span aria-hidden>🎨</span>
+            <select value={gen.model} onChange={(e) => onModelChange(e.target.value)}>
+              {sdModels.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.id.split("/").pop()}
+                  {m.turbo ? " (fast)" : ""}
+                  {m.downloaded ? "" : " ⬇"}
                 </option>
               ))}
             </select>
-          ) : (
-            <input
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder="No vision models — type one"
-            />
-          )}
-        </div>
+          </div>
+        ) : (
+          <div className="model-control" title="Vision model">
+            <span aria-hidden>🤖</span>
+            {models.vision.length > 0 ? (
+              <select value={model} onChange={(e) => setModel(e.target.value)}>
+                {models.vision.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder="No vision models — type one"
+              />
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

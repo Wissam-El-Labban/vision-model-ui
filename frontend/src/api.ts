@@ -153,6 +153,81 @@ export async function pullModel(
 }
 
 // --------------------------------------------------------------------------- #
+// Local image generation (diffusers)
+// --------------------------------------------------------------------------- #
+export interface SdModel {
+  id: string;
+  downloaded: boolean;
+  turbo: boolean;
+}
+
+export interface SdInfo {
+  available: boolean;
+  device: string;
+  models: SdModel[];
+}
+
+export async function getSdInfo(): Promise<SdInfo> {
+  const res = await fetch("/api/generate/models");
+  if (!res.ok) throw new Error(`sd models: ${res.status}`);
+  return res.json();
+}
+
+export interface GenerateParams {
+  mode: "txt2img" | "img2img";
+  model: string;
+  prompt: string;
+  negative_prompt: string;
+  init_image_hash?: string | null;
+  steps?: number | null;
+  guidance?: number | null;
+  strength?: number | null;
+  width: number;
+  height: number;
+  seed?: number | null;
+  ollama_url: string;
+}
+
+interface GenerateHandlers {
+  onStatus?: (message: string) => void;
+  onProgress?: (step: number, total: number) => void;
+  onImage: (r: { hash: string; seed: number; width: number; height: number }) => void;
+  onError?: (message: string) => void;
+}
+
+/** Stream a local image generation (NDJSON: status / progress / image / error). */
+export async function generate(
+  params: GenerateParams,
+  handlers: GenerateHandlers,
+  signal?: AbortSignal
+): Promise<void> {
+  const res = await fetch("/api/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+    signal,
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `generate: ${res.status}`);
+  }
+  await readLines(res, (line) => {
+    let ev: { type: string; [k: string]: unknown };
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (ev.type === "status") handlers.onStatus?.(ev.message as string);
+    else if (ev.type === "progress")
+      handlers.onProgress?.(ev.step as number, ev.total as number);
+    else if (ev.type === "image")
+      handlers.onImage(ev as unknown as { hash: string; seed: number; width: number; height: number });
+    else if (ev.type === "error") handlers.onError?.(ev.message as string);
+  });
+}
+
+// --------------------------------------------------------------------------- #
 // Chat history persistence
 // --------------------------------------------------------------------------- #
 export async function listChats(): Promise<ChatSummary[]> {

@@ -1066,3 +1066,77 @@ textarea {
 .model-control input {
   max-width: 150px;
 }
+
+/* ---------- Image generation (Analyze / Generate) ---------- */
+.mode-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  margin: 0 auto 10px;
+  max-width: 1000px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  width: fit-content;
+}
+
+.mode-tab {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 5px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mode-tab.active {
+  background: var(--accent-2);
+  color: #fff;
+}
+
+.init-hint {
+  max-width: 1000px;
+  margin: 0 auto 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.btn.send.gen {
+  background: #8957e5;
+  border-color: #8957e5;
+}
+
+.gen-popover {
+  width: 380px;
+}
+
+.gen-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.gen-grid label {
+  display: flex;
+  flex-direction: column;
+  font-size: 11px;
+  color: var(--muted);
+  gap: 3px;
+}
+
+.gen-grid input {
+  width: 100%;
+}
+
+.gen-grid .muted-field {
+  opacity: 0.5;
+}
+
+.gen-popover .hint {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+}

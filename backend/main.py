@@ -4,6 +4,8 @@ Serves the built React frontend and proxies all Ollama interaction so the
 browser never talks to Ollama directly.
 """
 import json
+import queue
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -14,6 +16,7 @@ from pydantic import BaseModel
 
 from . import db
 from . import ollama_client as oc
+from . import sd_client as sd
 
 app = FastAPI(title="Vision Model Chat")
 
@@ -80,6 +83,21 @@ class TitleRequest(BaseModel):
     ollama_url: str = oc.DEFAULT_URL
 
 
+class GenerateRequest(BaseModel):
+    mode: str = "txt2img"  # txt2img | img2img
+    model: str | None = None
+    prompt: str = ""
+    negative_prompt: str = ""
+    init_image_hash: str | None = None
+    steps: int | None = None
+    guidance: float | None = None
+    strength: float | None = None
+    width: int = 512
+    height: int = 512
+    seed: int | None = None
+    ollama_url: str = oc.DEFAULT_URL
+
+
 # --------------------------------------------------------------------------- #
 # Models
 # --------------------------------------------------------------------------- #
@@ -135,6 +153,100 @@ def ps(ollama_url: str = oc.DEFAULT_URL):
         return {"models": oc.running(ollama_url)}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+# --------------------------------------------------------------------------- #
+# Local image generation (diffusers, in-process)
+# --------------------------------------------------------------------------- #
+@app.get("/api/generate/models")
+def generate_models():
+    return {"available": sd.available(), "device": sd.device(), "models": sd.list_models()}
+
+
+@app.post("/api/generate/unload")
+def generate_unload():
+    sd.unload()
+    return {"ok": True}
+
+
+@app.post("/api/generate")
+def generate(req: GenerateRequest):
+    """Run a local diffusion generation, streaming progress then the final image.
+
+    Frees VRAM from any resident Ollama vision model first (the 6 GB can't hold
+    both). The diffusion call is synchronous, so it runs in a worker thread that
+    pushes events onto a queue the response generator drains.
+    """
+    if not sd.available():
+        raise HTTPException(
+            status_code=503,
+            detail="Image generation deps (torch/diffusers) are not installed.",
+        )
+
+    # Resolve the init image (img2img) from the content-addressed store to a PIL.
+    init_image = None
+    if req.init_image_hash:
+        from PIL import Image
+
+        path = db.IMAGES_DIR / f"{req.init_image_hash}.jpg"
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="init image not found")
+        init_image = Image.open(path).convert("RGB")
+
+    def gen():
+        events: queue.Queue = queue.Queue()
+
+        def worker():
+            try:
+                events.put({"type": "status", "message": "Freeing VRAM (unloading vision model)…"})
+                try:
+                    oc.unload_all(req.ollama_url)
+                except Exception:
+                    pass  # best-effort; Ollama may be remote or already free
+
+                params = {
+                    "mode": req.mode,
+                    "model": req.model,
+                    "prompt": req.prompt,
+                    "negative_prompt": req.negative_prompt,
+                    "steps": req.steps,
+                    "guidance": req.guidance,
+                    "strength": req.strength,
+                    "width": req.width,
+                    "height": req.height,
+                    "seed": req.seed,
+                    "init_image": init_image,
+                }
+                image, seed = sd.generate(
+                    params,
+                    on_step=lambda s, t: events.put({"type": "progress", "step": s, "total": t}),
+                    on_status=lambda m: events.put({"type": "status", "message": m}),
+                )
+                full = sd.pil_to_data_url(image)
+                thumb = sd.pil_to_data_url(image, max_size=64)
+                h = db.save_image(full, thumb)
+                events.put(
+                    {
+                        "type": "image",
+                        "hash": h,
+                        "seed": seed,
+                        "width": image.size[0],
+                        "height": image.size[1],
+                    }
+                )
+            except Exception as exc:
+                events.put({"type": "error", "message": str(exc)})
+            finally:
+                events.put(None)  # sentinel: worker done
+
+        threading.Thread(target=worker, daemon=True).start()
+        while True:
+            item = events.get()
+            if item is None:
+                break
+            yield json.dumps(item) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 # --------------------------------------------------------------------------- #
@@ -219,6 +331,10 @@ def remove_chat(chat_id: str):
 def _unload_on_shutdown():
     try:
         oc.unload_all(oc.DEFAULT_URL)
+    except Exception:
+        pass
+    try:
+        sd.unload()
     except Exception:
         pass
 

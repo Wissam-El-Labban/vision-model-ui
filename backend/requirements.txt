@@ -2,3 +2,18 @@ fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 requests>=2.31.0
 pydantic>=2.0.0
+
+# --- Local image generation (diffusers, in-process) ---
+# torch is fetched from the CUDA 12.1 wheel index (bundles its own runtime; no
+# system CUDA toolkit needed). CPU-only machines still work, just slower.
+# Versions are pinned as a coherent set: newer diffusers/transformers require
+# torch >= 2.5 (they import torch.nn.attention.flex_attention), but the CUDA 12.1
+# torch 2.3.1 wheel is what keeps Pascal (GTX 10xx) GPUs supported here.
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.3.1
+diffusers==0.31.0
+transformers==4.46.3
+huggingface_hub==0.25.2
+accelerate==1.0.1
+safetensors>=0.4
+pillow>=10.0.0

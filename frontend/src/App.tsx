@@ -7,19 +7,22 @@ import ContextMeter from "./components/ContextMeter";
 import {
   appendMessage,
   deleteChat,
+  generate,
   generateTitle,
   getChat,
   getModels,
+  getSdInfo,
   listChats,
   putChat,
   streamChat,
   uploadImages,
   urlToDataUrl,
+  type SdInfo,
   type Usage,
 } from "./api";
 import { fileToResizedDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
 import { trimHistory } from "./context";
-import type { ChatMessage, ChatSummary } from "./types";
+import type { ChatMessage, ChatSummary, GenSettings } from "./types";
 
 const DEFAULT_URL = "http://localhost:11434";
 
@@ -39,6 +42,26 @@ export default function App() {
   const [model, setModel] = useState(() => localStorage.getItem("model") || "");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [systemImage, setSystemImage] = useState<string | null>(null);
+
+  // Image generation (diffusers). `genMode` flips the composer from analyze to
+  // generate; `sdInfo` reports availability + downloaded models; `gen` holds the
+  // tunable settings.
+  const [genMode, setGenMode] = useState(false);
+  const [sdInfo, setSdInfo] = useState<SdInfo>({
+    available: false,
+    device: "cpu",
+    models: [],
+  });
+  const [gen, setGen] = useState<GenSettings>({
+    model: "",
+    negativePrompt: "",
+    steps: 25,
+    guidance: 7.5,
+    strength: 0.6,
+    width: 512,
+    height: 512,
+    seed: "",
+  });
 
   const [pinnedImages, setPinnedImages] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -124,6 +147,18 @@ export default function App() {
   useEffect(() => {
     refreshChats();
   }, [refreshChats]);
+
+  // Probe the image-generation backend once; seed the default SD model.
+  useEffect(() => {
+    getSdInfo()
+      .then((info) => {
+        setSdInfo(info);
+        setGen((g) => (g.model ? g : { ...g, model: info.models[0]?.id ?? "" }));
+      })
+      .catch(() => {
+        /* deps not installed / backend older — generation stays hidden */
+      });
+  }, []);
 
   // Keep an existing chat's metadata (model / system prompt / pinned + system
   // image) in sync as the user edits it, debounced. Skipped until the chat row
@@ -448,6 +483,141 @@ export default function App() {
     ]
   );
 
+  const generateImage = useCallback(
+    async (prompt: string, images: string[]) => {
+      if (!gen.model) {
+        setError("No image model available.");
+        return;
+      }
+      setError(null);
+      const chatId = currentChatId;
+      const isFirstExchange = messages.length === 0;
+      const submode = images.length > 0 ? "img2img" : "txt2img";
+      const initUrl = submode === "img2img" ? images[0] : null;
+
+      // Show the prompt as a user turn, then an assistant placeholder we fill
+      // with progress text and finally the generated image.
+      const userMsg: ChatMessage = {
+        role: "user",
+        content: prompt,
+        images: initUrl ? [initUrl] : undefined,
+        model: gen.model,
+      };
+      setMessages((prev) => [
+        ...prev,
+        userMsg,
+        { role: "assistant", content: "🎨 Preparing…", model: gen.model },
+      ]);
+      setStreaming(true);
+
+      const setAssistant = (patch: Partial<ChatMessage>) =>
+        setMessages((prev) => {
+          const next = [...prev];
+          next[next.length - 1] = { ...next[next.length - 1], ...patch };
+          return next;
+        });
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+      let resultHash: string | null = null;
+      let resultDataUrl: string | null = null;
+      try {
+        const initHash = initUrl ? (await ensureHashes([initUrl]))[0] : null;
+        await generate(
+          {
+            mode: submode,
+            model: gen.model,
+            prompt,
+            negative_prompt: gen.negativePrompt,
+            init_image_hash: initHash,
+            steps: gen.steps,
+            guidance: gen.guidance,
+            strength: gen.strength,
+            width: gen.width,
+            height: gen.height,
+            seed: gen.seed ? parseInt(gen.seed, 10) : null,
+            ollama_url: ollamaUrl,
+          },
+          {
+            onStatus: (m) => setAssistant({ content: `🎨 ${m}` }),
+            onProgress: (step, total) =>
+              setAssistant({ content: `🎨 Generating… step ${step}/${total}` }),
+            onImage: async (r) => {
+              resultHash = r.hash;
+              // Load the stored image back as a data-URL for display + pin/reuse
+              // parity, and seed the hash cache so it isn't re-uploaded.
+              try {
+                resultDataUrl = await urlToDataUrl(`/api/images/${r.hash}.jpg`);
+                hashCache.current.set(resultDataUrl, r.hash);
+              } catch {
+                /* fall back to the URL below */
+              }
+              setAssistant({
+                content: "",
+                images: [resultDataUrl ?? `/api/images/${r.hash}.jpg`],
+              });
+            },
+            onError: (msg) => setAssistant({ content: `⚠️ ${msg}` }),
+          },
+          controller.signal
+        );
+      } catch (e) {
+        if ((e as Error).name !== "AbortError") {
+          setAssistant({ content: `⚠️ ${(e as Error).message}` });
+        }
+      } finally {
+        setStreaming(false);
+        abortRef.current = null;
+
+        // Persist (best-effort). Only if we actually produced an image.
+        if (resultHash) {
+          try {
+            await putChat(chatId, {
+              model: model || gen.model,
+              system_prompt: systemPrompt,
+              pinned_hashes: await ensureHashes(pinnedImages),
+              system_image_hash: systemImage
+                ? (await ensureHashes([systemImage]))[0]
+                : null,
+            });
+            setChatExists(true);
+            await appendMessage(chatId, {
+              role: "user",
+              content: prompt,
+              model: gen.model,
+              image_hashes: initUrl ? await ensureHashes([initUrl]) : [],
+            });
+            await appendMessage(chatId, {
+              role: "assistant",
+              content: "",
+              model: gen.model,
+              image_hashes: [resultHash],
+            });
+            if (isFirstExchange && model) {
+              await generateTitle(chatId, model, ollamaUrl).catch(() => "");
+            }
+            await refreshChats();
+            await getSdInfo().then(setSdInfo).catch(() => {});
+          } catch (err) {
+            console.error("persist failed", err);
+          }
+        }
+      }
+    },
+    [
+      gen,
+      model,
+      ollamaUrl,
+      systemPrompt,
+      systemImage,
+      pinnedImages,
+      messages,
+      currentChatId,
+      ensureHashes,
+      refreshChats,
+    ]
+  );
+
   const stop = useCallback(() => abortRef.current?.abort(), []);
 
   // Composer (full-width, bottom) state lives here so the input bar spans the
@@ -487,8 +657,13 @@ export default function App() {
   }
   function submitComposer() {
     const trimmed = composerText.trim();
-    if (!trimmed && composerImages.length === 0) return;
-    send(trimmed, composerImages);
+    if (genMode) {
+      if (!trimmed) return; // a prompt is required to generate
+      generateImage(trimmed, composerImages);
+    } else {
+      if (!trimmed && composerImages.length === 0) return;
+      send(trimmed, composerImages);
+    }
     setComposerText("");
     setComposerImages([]);
   }
@@ -532,7 +707,7 @@ export default function App() {
             <Chat
               messages={messages}
               streaming={streaming}
-              disabled={!model}
+              disabled={!model && !genMode}
               onDropFiles={addComposerFiles}
             />
           </div>
@@ -554,6 +729,12 @@ export default function App() {
             setSystemPrompt={setSystemPrompt}
             systemImage={systemImage}
             setSystemImage={setSystemImage}
+            genMode={genMode}
+            setGenMode={setGenMode}
+            sdAvailable={sdInfo.available}
+            sdModels={sdInfo.models}
+            gen={gen}
+            setGen={setGen}
           />
         </div>
       </main>

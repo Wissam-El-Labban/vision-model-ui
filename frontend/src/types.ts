@@ -13,6 +13,18 @@ export interface ChatMessage {
   model?: string;
 }
 
+/** User-tunable image-generation settings (diffusers). */
+export interface GenSettings {
+  model: string;
+  negativePrompt: string;
+  steps: number;
+  guidance: number;
+  strength: number;
+  width: number;
+  height: number;
+  seed: string; // blank = random; kept as string for the input field
+}
+
 export interface VersionInfo {
   installed: string | null;
   latest: string | null;
