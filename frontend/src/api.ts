@@ -191,6 +191,7 @@ export async function appendMessage(
     content: string;
     model: string | null;
     image_hashes: string[];
+    context_hashes?: string[];
   }
 ): Promise<void> {
   const res = await fetch(`/api/chats/${id}/messages`, {

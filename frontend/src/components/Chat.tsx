@@ -11,6 +11,33 @@ function modelColor(model?: string): string {
   return `hsl(${h} 60% 58%)`;
 }
 
+const ORDINALS: Record<string, number> = {
+  first: 1, second: 2, third: 3, fourth: 4, fifth: 5,
+  sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10,
+};
+
+/** Inject a placeholder thumbnail (`![](ctx://idx)`) after the model's manifest
+ *  references — "image N", "the Nth image", "pinned reference image" — so the
+ *  <img> renderer below can turn each into a clickable thumbnail. Only the first
+ *  mention of a given image gets a thumbnail (avoids repeating it), and only
+ *  indices that actually exist in this turn's context list are annotated. */
+function annotateImageRefs(content: string, count: number): string {
+  if (count <= 0) return content;
+  const injected = new Set<number>();
+  const inject = (whole: string, n: number): string => {
+    if (n < 1 || n > count || injected.has(n)) return whole;
+    injected.add(n);
+    return `${whole} ![](ctx://${n - 1})`;
+  };
+  return content
+    .replace(/\bimages?\s*#?\s*(\d{1,2})\b/gi, (m, n) => inject(m, parseInt(n, 10)))
+    .replace(
+      /\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+image\b/gi,
+      (m, ord) => inject(m, ORDINALS[ord.toLowerCase()])
+    )
+    .replace(/\bpinned reference images?\b/gi, (m) => inject(m, 1));
+}
+
 interface Props {
   messages: ChatMessage[];
   streaming: boolean;
@@ -22,6 +49,7 @@ interface Props {
 export default function Chat({ messages, streaming, disabled, onDropFiles }: Props) {
   const endRef = useRef<HTMLDivElement>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [zoom, setZoom] = useState<string | null>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -83,8 +111,33 @@ export default function Chat({ messages, streaming, disabled, onDropFiles }: Pro
                   {m.content ? (
                     m.role === "assistant" ? (
                       <div className="content markdown">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {m.content}
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          // Keep our ctx:// placeholder scheme (default strips it).
+                          urlTransform={(url) => url}
+                          components={{
+                            img: ({ src, alt }) => {
+                              const ctx = m.contextImages;
+                              if (typeof src === "string" && src.startsWith("ctx://") && ctx) {
+                                const idx = parseInt(src.slice(6), 10);
+                                const img = ctx[idx];
+                                if (!img) return null;
+                                return (
+                                  <button
+                                    type="button"
+                                    className="ctx-thumb"
+                                    title="Referenced image — click to expand"
+                                    onClick={() => setZoom(img)}
+                                  >
+                                    <img src={img} alt={`referenced image ${idx + 1}`} />
+                                  </button>
+                                );
+                              }
+                              return <img src={src} alt={alt} />;
+                            },
+                          }}
+                        >
+                          {annotateImageRefs(m.content, m.contextImages?.length ?? 0)}
                         </ReactMarkdown>
                       </div>
                     ) : (
@@ -101,6 +154,11 @@ export default function Chat({ messages, streaming, disabled, onDropFiles }: Pro
         })}
         <div ref={endRef} />
       </div>
+      {zoom && (
+        <div className="lightbox" onClick={() => setZoom(null)}>
+          <img src={zoom} alt="full size" />
+        </div>
+      )}
     </div>
   );
 }

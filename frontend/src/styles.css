@@ -499,6 +499,34 @@ textarea {
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
 }
 
+/* Inline thumbnail rendered next to a model's "image N" reference. */
+.ctx-thumb {
+  display: inline-flex;
+  vertical-align: middle;
+  margin: 0 2px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  cursor: zoom-in;
+  line-height: 0;
+  overflow: hidden;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.ctx-thumb:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(47, 129, 247, 0.3);
+}
+
+.ctx-thumb img {
+  height: 2.4em;
+  width: auto;
+  max-width: 96px;
+  object-fit: cover;
+  display: block;
+}
+
 /* ---------- Chat ---------- */
 .chat {
   flex: 1;

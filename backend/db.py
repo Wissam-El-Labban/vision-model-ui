@@ -65,6 +65,15 @@ CREATE TABLE IF NOT EXISTS message_images (
     image_hash TEXT NOT NULL,
     ordinal    INTEGER NOT NULL
 );
+-- The ordered set of images that were in the model's context when a message
+-- was generated (pinned + in-chat, in manifest order). Used to resolve the
+-- model's "image N" references back to a thumbnail. Distinct from
+-- message_images (images actually attached to/displayed on the message).
+CREATE TABLE IF NOT EXISTS message_context_images (
+    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    image_hash TEXT NOT NULL,
+    ordinal    INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS chat_pinned_images (
     chat_id    TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
     image_hash TEXT NOT NULL,
@@ -73,6 +82,7 @@ CREATE TABLE IF NOT EXISTS chat_pinned_images (
 CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_pinned_chat ON chat_pinned_images(chat_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_msgimg_msg ON message_images(message_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_msgctx_msg ON message_context_images(message_id, ordinal);
 """
 
 
@@ -130,6 +140,7 @@ def _gc_orphan_images(conn: sqlite3.Connection) -> None:
     for tbl, col in (
         ("chat_pinned_images", "image_hash"),
         ("message_images", "image_hash"),
+        ("message_context_images", "image_hash"),
     ):
         for row in conn.execute(f"SELECT DISTINCT {col} AS h FROM {tbl}"):
             referenced.add(row["h"])
@@ -196,12 +207,17 @@ def get_chat(chat_id: str) -> dict | None:
                 "SELECT image_hash FROM message_images WHERE message_id = ? ORDER BY ordinal",
                 (m["id"],),
             )
+            ctx = conn.execute(
+                "SELECT image_hash FROM message_context_images WHERE message_id = ? ORDER BY ordinal",
+                (m["id"],),
+            )
             messages.append(
                 {
                     "role": m["role"],
                     "content": m["content"],
                     "model": m["model"],
                     "images": [f"/api/images/{r['image_hash']}.jpg" for r in imgs],
+                    "context_images": [f"/api/images/{r['image_hash']}.jpg" for r in ctx],
                 }
             )
 
@@ -267,8 +283,14 @@ def append_message(
     content: str,
     model: str | None,
     image_hashes: list[str],
+    context_hashes: list[str] | None = None,
 ) -> str:
-    """Append a message to a chat. Returns the new message id."""
+    """Append a message to a chat. Returns the new message id.
+
+    `context_hashes` records the ordered images that were in the model's context
+    when this message was produced (used to resolve "image N" references to a
+    thumbnail); it is separate from `image_hashes` (images shown on the message).
+    """
     msg_id = str(uuid.uuid4())
     now = _now()
     with _connect() as conn:
@@ -285,6 +307,10 @@ def append_message(
         conn.executemany(
             "INSERT INTO message_images(message_id, image_hash, ordinal) VALUES (?, ?, ?)",
             [(msg_id, h, i) for i, h in enumerate(image_hashes)],
+        )
+        conn.executemany(
+            "INSERT INTO message_context_images(message_id, image_hash, ordinal) VALUES (?, ?, ?)",
+            [(msg_id, h, i) for i, h in enumerate(context_hashes or [])],
         )
         conn.execute(
             "UPDATE chats SET updated_at = ? WHERE id = ?", (now, chat_id)

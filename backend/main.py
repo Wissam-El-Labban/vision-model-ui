@@ -72,6 +72,7 @@ class MessageAppend(BaseModel):
     content: str = ""
     model: str | None = None
     image_hashes: list[str] = []
+    context_hashes: list[str] = []
 
 
 class TitleRequest(BaseModel):
@@ -191,7 +192,7 @@ def put_chat(chat_id: str, req: ChatUpsert):
 @app.post("/api/chats/{chat_id}/messages")
 def add_message(chat_id: str, req: MessageAppend):
     msg_id = db.append_message(
-        chat_id, req.role, req.content, req.model, req.image_hashes
+        chat_id, req.role, req.content, req.model, req.image_hashes, req.context_hashes
     )
     return {"id": msg_id}
 

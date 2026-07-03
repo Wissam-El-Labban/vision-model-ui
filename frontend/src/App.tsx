@@ -194,6 +194,9 @@ export default function App() {
           images: m.images.length
             ? await Promise.all(m.images.map(loadImg))
             : undefined,
+          contextImages: m.context_images.length
+            ? await Promise.all(m.context_images.map(loadImg))
+            : undefined,
         }))
       );
 
@@ -279,6 +282,16 @@ export default function App() {
             i === lastIdx ? "Image shared in this message" : "Image shared earlier in this chat"
           )
         );
+      });
+      // Record the manifest's ordered image list on the assistant turn so the UI
+      // can resolve the model's "image N" references back to a thumbnail.
+      setMessages((prev) => {
+        const next = [...prev];
+        const last = next[next.length - 1];
+        if (last?.role === "assistant") {
+          next[next.length - 1] = { ...last, contextImages: outImages };
+        }
+        return next;
       });
       const merged = sent.map((m, i) => {
         if (i !== lastIdx) {
@@ -374,6 +387,7 @@ export default function App() {
             content: assistantText,
             model,
             image_hashes: [],
+            context_hashes: await ensureHashes(outImages),
           });
 
           if (isFirstExchange) {

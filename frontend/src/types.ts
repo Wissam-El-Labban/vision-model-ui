@@ -5,6 +5,10 @@ export interface ChatMessage {
   content: string;
   /** Data-URL strings (data:image/...;base64,...) for display + sending. */
   images?: string[];
+  /** The ordered images that were in the model's context for this turn (pinned +
+   *  in-chat, in manifest order). Data-URLs. Used to resolve the model's
+   *  "image N" references to an inline thumbnail. Not displayed as attachments. */
+  contextImages?: string[];
   /** Which model this turn was sent to (for the per-chunk model indicator). */
   model?: string;
 }
@@ -36,6 +40,8 @@ export interface StoredMessage {
   content: string;
   model: string | null;
   images: string[];
+  /** URLs of the images that were in the model's context for this turn. */
+  context_images: string[];
 }
 
 /** Full chat detail from GET /api/chats/{id}. */
