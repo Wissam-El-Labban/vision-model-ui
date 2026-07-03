@@ -83,9 +83,15 @@ else
     # Update checks are now handled in the UI (opt-in), not here.
 fi
 
+# Keep Ollama local-only: force any instance we start to listen on loopback,
+# so the model server is never reachable from the network. (Ollama also reads
+# OLLAMA_HOST for CLI/serve; 127.0.0.1 is its default, but we set it explicitly
+# so this holds even if the environment had it overridden to 0.0.0.0.)
+export OLLAMA_HOST="127.0.0.1:11434"
+
 # Start Ollama service if not already running.
 if ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
-    echo -e "${YELLOW}Starting Ollama service...${NC}"
+    echo -e "${YELLOW}Starting Ollama service (local-only, ${OLLAMA_HOST})...${NC}"
     nohup ollama serve > /dev/null 2>&1 &
     for _ in {1..10}; do
         curl -s http://localhost:11434/api/tags > /dev/null 2>&1 && break
@@ -94,6 +100,13 @@ if ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
 fi
 if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
     echo -e "${GREEN}✓ Ollama service is running${NC}"
+    # If Ollama was ALREADY running, our OLLAMA_HOST can't rebind it — check that
+    # it isn't listening on a non-loopback (network-exposed) address and warn.
+    listen_addrs="$(ss -tlnH 2>/dev/null | awk '{print $4}' | grep ':11434' || true)"
+    if [ -n "$listen_addrs" ] && echo "$listen_addrs" | grep -qvE '^(127\.0\.0\.1|\[::1\]):11434$'; then
+        echo -e "${YELLOW}⚠️  Ollama is listening on a non-local address — it's exposed to the network.${NC}"
+        echo -e "${YELLOW}   Restart it local-only: pkill ollama && OLLAMA_HOST=127.0.0.1 ollama serve${NC}"
+    fi
 else
     echo -e "${YELLOW}⚠️  Could not reach Ollama. Start it with: ollama serve${NC}"
 fi
