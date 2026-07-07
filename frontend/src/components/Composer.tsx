@@ -115,7 +115,7 @@ export default function Composer({
   // so the active selection resolves to the default model's filename.
   const defaultFluxName = fluxModels.find((m) => m.default)?.name ?? "";
   const activeFlux = gen.fluxModel || defaultFluxName;
-  const prettyFlux = (name: string) => name.replace(/\.gguf$/i, "");
+  const prettyFlux = (name: string) => name.replace(/\.(gguf|safetensors|sft)$/i, "");
   const pickFlux = (m: FluxModel) => patchGen({ fluxModel: m.default ? "" : m.name });
 
   async function addFluxModel() {
@@ -447,7 +447,7 @@ export default function Composer({
                       <input
                         type="text"
                         value={fluxRepo}
-                        placeholder="owner/model (HuggingFace GGUF repo)"
+                        placeholder="owner/model (HuggingFace repo)"
                         disabled={fluxBusy}
                         onChange={(e) => setFluxRepo(e.target.value)}
                         onKeyDown={(e) => {
@@ -468,10 +468,11 @@ export default function Composer({
                     </div>
                     {fluxStatus && <div className="dl-status">{fluxStatus}</div>}
                     <p className="hint muted">
-                      Paste a HuggingFace GGUF repo (e.g.{" "}
+                      Paste a HuggingFace FLUX repo (e.g.{" "}
                       <code>QuantStack/FLUX.1-Kontext-dev-GGUF</code>), or{" "}
-                      <code>owner/repo:file.gguf</code> for a specific quant. Downloaded
-                      once, then fully offline.
+                      <code>owner/repo:file</code> for a specific <code>.gguf</code>/
+                      <code>.safetensors</code>. GGUF fits this GPU best; full safetensors
+                      are much larger. Downloaded once, then fully offline.
                     </p>
                   </div>
                 )}

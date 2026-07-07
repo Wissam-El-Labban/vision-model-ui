@@ -39,6 +39,9 @@ COMFY_URL = "http://127.0.0.1:8188"
 # text encoders + VAE are shared across all of them.
 DEFAULT_UNET = "flux1-kontext-dev-Q4_K_S.gguf"
 UNET_DIR = COMFY_DIR / "models" / "unet"
+# Loadable UNet formats: GGUF (via the GGUF node) and plain diffusion checkpoints
+# (via ComfyUI's built-in UNETLoader). Users can add either.
+UNET_EXTS = (".gguf", ".safetensors", ".sft")
 T5 = "t5-v1_1-xxl-encoder-Q4_K_M.gguf"
 CLIP_L = "clip_l.safetensors"
 VAE = "ae.safetensors"
@@ -196,9 +199,17 @@ def _fetch_output(filename: str, subfolder: str):
 # --------------------------------------------------------------------------- #
 # Workflow graphs
 # --------------------------------------------------------------------------- #
+def _unet_node(unet: str) -> dict:
+    """Pick the loader for the UNet's format: GGUF quantized vs. a plain
+    safetensors diffusion checkpoint (ComfyUI's built-in UNETLoader)."""
+    if unet.lower().endswith(".gguf"):
+        return {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": unet}}
+    return {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}}
+
+
 def _loaders(unet: str = DEFAULT_UNET) -> dict:
     return {
-        "unet": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": unet}},
+        "unet": _unet_node(unet),
         "clip": {"class_type": "DualCLIPLoaderGGUF",
                  "inputs": {"clip_name1": CLIP_L, "clip_name2": T5, "type": "flux"}},
         "vae": {"class_type": "VAELoader", "inputs": {"vae_name": VAE}},
@@ -335,12 +346,13 @@ def list_unets() -> list[dict]:
     """Installed FLUX UNets, default first. Each: name, default flag, size_gb."""
     out = []
     if UNET_DIR.is_dir():
-        for p in sorted(UNET_DIR.glob("*.gguf")):
-            out.append({
-                "name": p.name,
-                "default": p.name == DEFAULT_UNET,
-                "size_gb": round(p.stat().st_size / 1e9, 2),
-            })
+        for p in sorted(UNET_DIR.iterdir()):
+            if p.is_file() and p.suffix.lower() in UNET_EXTS:
+                out.append({
+                    "name": p.name,
+                    "default": p.name == DEFAULT_UNET,
+                    "size_gb": round(p.stat().st_size / 1e9, 2),
+                })
     out.sort(key=lambda m: (not m["default"], m["name"].lower()))
     return out
 
@@ -351,7 +363,7 @@ def _resolve_unet(model) -> str:
     if not model:
         return DEFAULT_UNET
     safe = os.path.basename(str(model))
-    if safe.endswith(".gguf") and (UNET_DIR / safe).exists():
+    if safe.lower().endswith(UNET_EXTS) and (UNET_DIR / safe).exists():
         return safe
     return DEFAULT_UNET
 
@@ -359,7 +371,7 @@ def _resolve_unet(model) -> str:
 def delete_unet(name: str) -> None:
     """Remove an extra UNet. The bundled default can never be deleted."""
     safe = os.path.basename(name or "")
-    if not safe.endswith(".gguf"):
+    if not safe.lower().endswith(UNET_EXTS):
         raise ValueError("Not a model file.")
     if safe == DEFAULT_UNET:
         raise ValueError("The default FLUX model can't be removed.")
@@ -374,8 +386,8 @@ _REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
 
 def _parse_repo(spec: str) -> tuple[str, str]:
     """Parse a paste into (repo_id, filename). Accepts:
-      owner/repo                      -> pick a GGUF from the repo automatically
-      owner/repo:file.gguf            -> that exact file
+      owner/repo                      -> auto-pick a UNet from the repo
+      owner/repo:file.safetensors     -> that exact file (any supported format)
       owner/repo/sub/dir/file.gguf    -> that exact file (path after the repo id)
     """
     spec = (spec or "").strip()
@@ -383,30 +395,42 @@ def _parse_repo(spec: str) -> tuple[str, str]:
     if ":" in spec:
         spec, filename = spec.split(":", 1)
         spec, filename = spec.strip(), filename.strip()
-    elif spec.lower().endswith(".gguf"):
+    elif spec.lower().endswith(UNET_EXTS):
         parts = spec.split("/")
         if len(parts) > 2:
             spec, filename = "/".join(parts[:2]), "/".join(parts[2:])
     if not _REPO_RE.match(spec):
         raise ValueError(f"'{spec}' isn't a valid HuggingFace repo (expected owner/name).")
+    if filename and not filename.lower().endswith(UNET_EXTS):
+        raise ValueError("Unsupported file — use a .gguf or .safetensors UNet.")
     return spec, filename
 
 
 # Runs in a child process (network allowed) so the serving process stays offline.
-# argv: repo, filename ("" = auto-pick a GGUF), dest_dir. Downloads straight into
+# argv: repo, filename ("" = auto-pick a UNet), dest_dir. Downloads straight into
 # the UNet dir (no HF-cache copy) and streams coarse progress on stdout.
 _DOWNLOAD_UNET = r"""
 import os, sys, time, urllib.request
 from urllib.error import HTTPError, URLError
+EXTS = (".gguf", ".safetensors", ".sft")
 repo, filename, dest_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     if not filename:
         from huggingface_hub import HfApi
-        ggufs = [f for f in HfApi().list_repo_files(repo) if f.lower().endswith(".gguf")]
-        if not ggufs:
-            print("ERROR: no .gguf files found in " + repo, flush=True); sys.exit(1)
+        files = [f for f in HfApi().list_repo_files(repo) if f.lower().endswith(EXTS)]
+        if not files:
+            print("ERROR: no .gguf or .safetensors UNet files found in " + repo, flush=True)
+            sys.exit(1)
+        ggufs = [f for f in files if f.lower().endswith(".gguf")]
+        # Prefer a GGUF (fits this GPU); pick a mid quant. Otherwise fall back to a
+        # top-level safetensors, skipping obvious multi-file shards.
+        others = [f for f in files if not f.lower().endswith(".gguf")
+                  and "/" not in f and "-of-" not in f.lower()] or \
+                 [f for f in files if not f.lower().endswith(".gguf")]
         filename = (next((f for f in ggufs if "Q4_K_S" in f), None)
-                    or next((f for f in ggufs if "Q4_K" in f), None) or ggufs[0])
+                    or next((f for f in ggufs if "Q4_K" in f), None)
+                    or (ggufs[0] if ggufs else None)
+                    or others[0])
     base = os.path.basename(filename)
     out = os.path.join(dest_dir, base)
     if os.path.exists(out):
