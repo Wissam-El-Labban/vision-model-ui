@@ -511,12 +511,15 @@ textarea {
   cursor: zoom-in;
   line-height: 0;
   overflow: hidden;
-  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+  transition: border-color 0.12s ease, box-shadow 0.15s ease;
 }
 
 .ctx-thumb:hover {
+  position: relative;
+  z-index: 2;
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(47, 129, 247, 0.3);
+  box-shadow: 0 0 0 2px rgba(47, 129, 247, 0.3),
+    0 10px 30px rgba(0, 0, 0, 0.45);
 }
 
 .ctx-thumb img {
@@ -525,6 +528,14 @@ textarea {
   max-width: 96px;
   object-fit: cover;
   display: block;
+  transition: height 0.15s ease, max-width 0.15s ease;
+}
+
+/* Hover grows the real box (not a transform) so surrounding words are pushed
+   aside and the line grows taller to make room. Click still opens the lightbox. */
+.ctx-thumb:hover img {
+  height: 200px;
+  max-width: min(320px, 60vw);
 }
 
 /* ---------- Chat ---------- */
