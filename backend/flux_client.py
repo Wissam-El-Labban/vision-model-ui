@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import time
 import urllib.parse
@@ -101,11 +102,18 @@ def ensure_server(on_status=None) -> None:
     # would over-offload and slow things down for no quality gain.) Loopback-only
     # for privacy; logs kept for troubleshooting.
     log = open(_RUNTIME / "comfyui.log", "w")  # noqa: SIM115
+    # Once installed the sidecar must never reach out: the GGUF loaders read local
+    # weight files, and these flags stop transformers / HF-hub from making metadata
+    # calls to huggingface.co behind our back. (The backend process already sets
+    # these, but pin them on the child explicitly so it holds regardless.)
+    env = {**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+           "HF_HUB_DISABLE_TELEMETRY": "1"}
     _proc = subprocess.Popen(
         [str(CVENV_PY), "main.py", "--listen", "127.0.0.1", "--port", "8188"],
         cwd=str(COMFY_DIR),
         stdout=log,
         stderr=subprocess.STDOUT,
+        env=env,
     )
     for _ in range(120):  # up to ~60s for boot
         if _server_up():

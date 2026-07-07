@@ -30,6 +30,22 @@ if ! command -v "$PYTHON" &> /dev/null; then
     exit 1
 fi
 
+# git + curl are required to fetch ComfyUI and download weights/Ollama. Vanilla
+# Debian/Ubuntu images often ship without them, so install them up front (before
+# the FLUX section, which may be skipped, and Ollama, which also needs curl).
+for _tool in git curl; do
+    if ! command -v "$_tool" &> /dev/null; then
+        echo -e "${YELLOW}$_tool not found. Installing...${NC}"
+        if command -v apt-get &> /dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y "$_tool"
+        fi
+        if ! command -v "$_tool" &> /dev/null; then
+            echo -e "${RED}✗ '$_tool' is required but couldn't be installed. Install it and re-run.${NC}"
+            exit 1
+        fi
+    fi
+done
+
 # Vanilla Debian/Ubuntu ship python3 without ensurepip, so `python3 -m venv`
 # fails ("ensurepip is not available"). pyenv-built Pythons bundle it, so this
 # check passes untouched on pyenv machines and only the vanilla path installs
