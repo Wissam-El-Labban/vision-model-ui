@@ -23,9 +23,47 @@ echo -e "${BLUE}========================================${NC}"
 echo ""
 
 # --- Python backend deps ---------------------------------------------------- #
-if [ ! -d "$VENV_DIR" ]; then
+PYTHON="${PYTHON:-python3}"
+
+if ! command -v "$PYTHON" &> /dev/null; then
+    echo -e "${RED}✗ '$PYTHON' not found. Install Python 3.9+ (or set PYTHON=/path/to/python).${NC}"
+    exit 1
+fi
+
+# Vanilla Debian/Ubuntu ship python3 without ensurepip, so `python3 -m venv`
+# fails ("ensurepip is not available"). pyenv-built Pythons bundle it, so this
+# check passes untouched on pyenv machines and only the vanilla path installs
+# the missing OS package.
+ensure_venv_support() {
+    "$PYTHON" -m ensurepip --version &> /dev/null && "$PYTHON" -c "import venv" &> /dev/null
+}
+
+if ! ensure_venv_support; then
+    PYVER="$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    PKG="python${PYVER}-venv"
+    echo -e "${YELLOW}Python venv support (ensurepip) is missing for $PYTHON.${NC}"
+    if command -v apt-get &> /dev/null; then
+        echo -e "${YELLOW}Installing $PKG (may prompt for sudo)...${NC}"
+        sudo apt-get update -qq && sudo apt-get install -y "$PKG" python3-pip
+    fi
+    if ! ensure_venv_support; then
+        echo -e "${RED}✗ Could not enable venv support. Install it manually, e.g.:${NC}"
+        echo -e "${RED}    sudo apt install $PKG python3-pip${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ venv support enabled${NC}"
+fi
+
+# A venv left over from a failed run can exist as a directory without a working
+# activate script — check for the activate script, not just the directory, and
+# rebuild it if it's incomplete.
+if [ ! -f "$VENV_DIR/bin/activate" ]; then
+    if [ -d "$VENV_DIR" ]; then
+        echo -e "${YELLOW}Removing incomplete virtual environment...${NC}"
+        rm -rf "$VENV_DIR"
+    fi
     echo -e "${YELLOW}Creating virtual environment...${NC}"
-    python3 -m venv "$VENV_DIR"
+    "$PYTHON" -m venv "$VENV_DIR"
     echo -e "${GREEN}✓ Virtual environment created${NC}"
 fi
 source "$VENV_DIR/bin/activate"
@@ -37,9 +75,23 @@ echo -e "${GREEN}✓ Backend dependencies ready${NC}"
 # --- Frontend build --------------------------------------------------------- #
 echo ""
 echo -e "${BLUE}Building frontend...${NC}"
+# Vanilla machines often have no Node.js. Vite 5 needs Node 18+, so install the
+# Node 20 LTS via NodeSource (falls back to distro apt package if that fails).
 if ! command -v npm &> /dev/null; then
-    echo -e "${RED}✗ npm not found. Install Node.js 18+ to build the UI.${NC}"
-    exit 1
+    echo -e "${YELLOW}Node.js/npm not found. Installing Node 20 LTS...${NC}"
+    if command -v apt-get &> /dev/null; then
+        if curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - ; then
+            sudo apt-get install -y nodejs
+        else
+            echo -e "${YELLOW}NodeSource unavailable — falling back to distro nodejs/npm...${NC}"
+            sudo apt-get update -qq && sudo apt-get install -y nodejs npm
+        fi
+    fi
+    if ! command -v npm &> /dev/null; then
+        echo -e "${RED}✗ npm still not found. Install Node.js 18+ manually to build the UI.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Node.js $(node --version) installed${NC}"
 fi
 pushd frontend > /dev/null
 if [ ! -d node_modules ]; then
