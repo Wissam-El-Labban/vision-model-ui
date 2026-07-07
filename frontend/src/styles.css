@@ -511,15 +511,14 @@ textarea {
   cursor: zoom-in;
   line-height: 0;
   overflow: hidden;
-  transition: border-color 0.12s ease, box-shadow 0.15s ease;
+  transition: border-color 0.12s ease, box-shadow 0.3s ease;
 }
 
 .ctx-thumb:hover {
   position: relative;
-  z-index: 2;
+  z-index: 5;
+  overflow: visible;
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(47, 129, 247, 0.3),
-    0 10px 30px rgba(0, 0, 0, 0.45);
 }
 
 .ctx-thumb img {
@@ -528,14 +527,20 @@ textarea {
   max-width: 96px;
   object-fit: cover;
   display: block;
-  transition: height 0.15s ease, max-width 0.15s ease;
+  border-radius: 2px;
+  transform-origin: center center;
+  /* Slower, purely-visual grow. Transform doesn't reflow layout, so the image
+     never moves/wraps and the cursor stays 100% inside it — no flicker. */
+  transition: transform 0.32s ease, box-shadow 0.32s ease;
 }
 
-/* Hover grows the real box (not a transform) so surrounding words are pushed
-   aside and the line grows taller to make room. Click still opens the lightbox. */
+/* Enlarge with a transform only: the layout box stays the tiny thumbnail size, so
+   nothing reflows or wraps (that reflow/wrap was the flicker). The image floats up
+   over the surrounding text. Click still opens the full-screen lightbox. */
 .ctx-thumb:hover img {
-  height: 200px;
-  max-width: min(320px, 60vw);
+  transform: scale(5.5);
+  box-shadow: 0 0 0 0.4px var(--accent),
+    0 5px 16px rgba(0, 0, 0, 0.5);
 }
 
 /* ---------- Chat ---------- */
