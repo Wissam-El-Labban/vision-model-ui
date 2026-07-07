@@ -1271,3 +1271,107 @@ textarea {
   margin-top: 6px;
   margin-bottom: 0;
 }
+
+/* FLUX model management (in the generation-settings popover). */
+.flux-models {
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.flux-model-list {
+  list-style: none;
+  margin: 6px 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.flux-model-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.flux-model-list li.active {
+  background: rgba(47, 129, 247, 0.12);
+}
+
+.flux-model-pick {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flux-radio {
+  color: var(--accent);
+  flex: none;
+}
+
+.flux-model-size {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.flux-model-tag {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  flex: none;
+}
+
+.flux-model-del {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  opacity: 0.7;
+  padding: 0 2px;
+  flex: none;
+}
+
+.flux-model-del:hover:not(:disabled) {
+  opacity: 1;
+}
+
+.flux-model-del:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.flux-add {
+  display: flex;
+  gap: 6px;
+}
+
+.flux-add input {
+  flex: 1;
+  min-width: 0;
+}
+
+.flux-models code {
+  font-size: 11px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 3px;
+}

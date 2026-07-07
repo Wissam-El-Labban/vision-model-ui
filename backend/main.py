@@ -92,6 +92,7 @@ class GenerateRequest(BaseModel):
     negative_prompt: str = ""
     init_image_hash: str | None = None
     ref_image_hashes: list[str] = []  # compose mode: IP-Adapter reference images
+    flux_model: str | None = None  # edit/compose: which FLUX UNet to use (None = default)
     steps: int | None = None
     guidance: float | None = None
     strength: float | None = None
@@ -213,6 +214,57 @@ def generate_pull(req: SdPullRequest):
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
+# --------------------------------------------------------------------------- #
+# FLUX Kontext UNet management (list / add from a HF repo / remove extras)
+# --------------------------------------------------------------------------- #
+@app.get("/api/flux/models")
+def flux_models():
+    return {"available": fx.available(), "models": fx.list_unets()}
+
+
+class FluxPullRequest(BaseModel):
+    repo: str
+
+
+@app.post("/api/flux/pull")
+def flux_pull(req: FluxPullRequest):
+    """Download an extra FLUX UNet from a HuggingFace repo (opt-in, streams status)."""
+    if not fx.available():
+        raise HTTPException(status_code=503, detail="FLUX Kontext isn't installed on this machine.")
+
+    def gen():
+        events: queue.Queue = queue.Queue()
+
+        def worker():
+            try:
+                fx.pull_unet(req.repo, on_status=lambda m: events.put({"type": "status", "message": m}))
+                events.put({"type": "done"})
+            except Exception as exc:
+                events.put({"type": "error", "message": str(exc)})
+            finally:
+                events.put(None)
+
+        threading.Thread(target=worker, daemon=True).start()
+        while True:
+            item = events.get()
+            if item is None:
+                break
+            yield json.dumps(item) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+@app.delete("/api/flux/models/{name}")
+def flux_delete(name: str):
+    try:
+        fx.delete_unet(name)
+        return {"ok": True}
+    except ValueError as exc:  # default model or non-model file
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Model not found.")
+
+
 @app.post("/api/generate")
 def generate(req: GenerateRequest):
     """Run a local image generation, streaming progress then the final image.
@@ -269,13 +321,13 @@ def generate(req: GenerateRequest):
                         if init_image is None:
                             raise ValueError("Edit needs a source image.")
                         image = fx.edit(init_image, req.prompt, steps=req.steps,
-                                        guidance=req.guidance, seed=seed,
+                                        guidance=req.guidance, seed=seed, model=req.flux_model,
                                         on_step=step_cb, on_status=status_cb)
                     else:  # compose
                         if not ref_images:
                             raise ValueError("Combine needs at least one reference image.")
                         image = fx.compose(ref_images, req.prompt, steps=req.steps,
-                                           guidance=req.guidance, seed=seed,
+                                           guidance=req.guidance, seed=seed, model=req.flux_model,
                                            on_step=step_cb, on_status=status_cb)
                 else:
                     fx.free()  # release FLUX's VRAM so the SD stack has the GPU

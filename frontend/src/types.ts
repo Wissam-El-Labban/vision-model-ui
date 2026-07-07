@@ -21,6 +21,8 @@ export type GenOp = "create" | "edit" | "compose";
  *  steps + guidance (guidance is Kontext's low ~2.5 scale in those modes). */
 export interface GenSettings {
   model: string;
+  /** Which FLUX UNet edit/compose run on. "" = the bundled default model. */
+  fluxModel: string;
   negativePrompt: string;
   steps: number;
   guidance: number;

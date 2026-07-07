@@ -10,6 +10,7 @@ import {
   generate,
   generateTitle,
   getChat,
+  getFluxModels,
   getModels,
   getSdInfo,
   listChats,
@@ -17,6 +18,7 @@ import {
   streamChat,
   uploadImages,
   urlToDataUrl,
+  type FluxModel,
   type SdInfo,
   type Usage,
 } from "./api";
@@ -58,6 +60,7 @@ export default function App() {
   });
   const [gen, setGen] = useState<GenSettings>({
     model: "",
+    fluxModel: "", // "" = bundled default FLUX model
     negativePrompt: "",
     steps: 25,
     guidance: 7.5,
@@ -67,6 +70,12 @@ export default function App() {
     height: 512,
     seed: "",
   });
+  // Installed FLUX UNets (default + any the user added). Refreshed after a
+  // download/removal so the composer's model picker stays in sync.
+  const [fluxModels, setFluxModels] = useState<FluxModel[]>([]);
+  const refreshFlux = useCallback(() => {
+    getFluxModels().then((r) => setFluxModels(r.models)).catch(() => {});
+  }, []);
 
   // Switching workflow retunes the shared step/guidance settings: create (SD)
   // wants ~25 steps + CFG 7.5 (turbo is its own preset via the model dropdown);
@@ -176,11 +185,12 @@ export default function App() {
       .then((info) => {
         setSdInfo(info);
         setGen((g) => (g.model ? g : { ...g, model: info.models[0]?.id ?? "" }));
+        if (info.flux) refreshFlux();
       })
       .catch(() => {
         /* deps not installed / backend older — generation stays hidden */
       });
-  }, []);
+  }, [refreshFlux]);
 
   // Keep an existing chat's metadata (model / system prompt / pinned + system
   // image) in sync as the user edits it, debounced. Skipped until the chat row
@@ -570,6 +580,7 @@ export default function App() {
           {
             mode,
             model: modelId,
+            flux_model: isFlux ? gen.fluxModel || null : null,
             prompt,
             negative_prompt: gen.negativePrompt,
             init_image_hash: initHash,
@@ -805,6 +816,7 @@ export default function App() {
             sdAvailable={sdInfo.available}
             fluxAvailable={sdInfo.flux}
             sdModels={sdInfo.models}
+            fluxModels={fluxModels}
             gen={gen}
             setGen={setGen}
             pinnedCount={pinnedImages.length}
@@ -812,6 +824,7 @@ export default function App() {
             onModelPulled={() => {
               getSdInfo().then(setSdInfo).catch(() => {});
             }}
+            onFluxModelsChanged={refreshFlux}
           />
         </div>
       </main>

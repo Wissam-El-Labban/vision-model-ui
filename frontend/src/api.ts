@@ -199,9 +199,63 @@ export async function pullSdModel(
   });
 }
 
+// --------------------------------------------------------------------------- #
+// FLUX Kontext UNet management (edit/compose models)
+// --------------------------------------------------------------------------- #
+export interface FluxModel {
+  name: string;
+  default: boolean; // the bundled model — can't be removed
+  size_gb: number;
+}
+
+export async function getFluxModels(): Promise<{ available: boolean; models: FluxModel[] }> {
+  const res = await fetch("/api/flux/models");
+  if (!res.ok) throw new Error(`flux models: ${res.status}`);
+  return res.json();
+}
+
+/** Download an extra FLUX UNet from a HuggingFace repo (owner/name or
+ *  owner/name:file.gguf). Streams coarse progress. */
+export async function pullFluxModel(
+  repo: string,
+  onStatus: (message: string) => void
+): Promise<void> {
+  const res = await fetch("/api/flux/pull", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `flux pull: ${res.status}`);
+  }
+  let failure: string | null = null;
+  await readLines(res, (line) => {
+    try {
+      const ev = JSON.parse(line);
+      if (ev.type === "status") onStatus(ev.message as string);
+      else if (ev.type === "error") failure = ev.message as string;
+    } catch {
+      /* ignore keepalives */
+    }
+  });
+  if (failure) throw new Error(failure);
+}
+
+export async function deleteFluxModel(name: string): Promise<void> {
+  const res = await fetch(`/api/flux/models/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `flux delete: ${res.status}`);
+  }
+}
+
 export interface GenerateParams {
   mode: "txt2img" | "img2img" | "edit" | "compose";
   model: string;
+  flux_model?: string | null; // edit/compose: which FLUX UNet (null = default)
   prompt: string;
   negative_prompt: string;
   init_image_hash?: string | null;

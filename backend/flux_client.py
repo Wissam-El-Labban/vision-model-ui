@@ -17,6 +17,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.parse
@@ -32,7 +33,12 @@ COMFY_DIR = _RUNTIME / "ComfyUI"
 CVENV_PY = _RUNTIME / "cvenv" / "bin" / "python"
 COMFY_URL = "http://127.0.0.1:8188"
 
-UNET = "flux1-kontext-dev-Q4_K_S.gguf"
+# The UNet (the actual FLUX model) is swappable: DEFAULT_UNET ships with the
+# runtime and can't be removed, but users can add extra GGUF UNets from any
+# HuggingFace repo (see `pull_unet`) and pick which one edit/compose runs on. The
+# text encoders + VAE are shared across all of them.
+DEFAULT_UNET = "flux1-kontext-dev-Q4_K_S.gguf"
+UNET_DIR = COMFY_DIR / "models" / "unet"
 T5 = "t5-v1_1-xxl-encoder-Q4_K_M.gguf"
 CLIP_L = "clip_l.safetensors"
 VAE = "ae.safetensors"
@@ -72,7 +78,7 @@ def available() -> bool:
     if not CVENV_PY.exists():
         return False
     need = [
-        COMFY_DIR / "models" / "unet" / UNET,
+        UNET_DIR / DEFAULT_UNET,
         COMFY_DIR / "models" / "clip" / T5,
         COMFY_DIR / "models" / "clip" / CLIP_L,
         COMFY_DIR / "models" / "vae" / VAE,
@@ -190,17 +196,17 @@ def _fetch_output(filename: str, subfolder: str):
 # --------------------------------------------------------------------------- #
 # Workflow graphs
 # --------------------------------------------------------------------------- #
-def _loaders() -> dict:
+def _loaders(unet: str = DEFAULT_UNET) -> dict:
     return {
-        "unet": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": UNET}},
+        "unet": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": unet}},
         "clip": {"class_type": "DualCLIPLoaderGGUF",
                  "inputs": {"clip_name1": CLIP_L, "clip_name2": T5, "type": "flux"}},
         "vae": {"class_type": "VAELoader", "inputs": {"vae_name": VAE}},
     }
 
 
-def _edit_graph(image_name, prompt, steps, guidance, seed, prefix):
-    g = _loaders()
+def _edit_graph(image_name, prompt, steps, guidance, seed, prefix, unet=DEFAULT_UNET):
+    g = _loaders(unet)
     g.update({
         "img": {"class_type": "LoadImage", "inputs": {"image": image_name}},
         "scale": {"class_type": "FluxKontextImageScale", "inputs": {"image": ["img", 0]}},
@@ -219,13 +225,13 @@ def _edit_graph(image_name, prompt, steps, guidance, seed, prefix):
     return g
 
 
-def _compose_graph(image_names, prompt, steps, guidance, seed, prefix):
+def _compose_graph(image_names, prompt, steps, guidance, seed, prefix, unet=DEFAULT_UNET):
     """Multi-image: stitch the inputs side-by-side into one canvas, then edit that
     single image. FLUX Kontext *dev* is a single-image model — stacking a
     ReferenceLatent per input just makes it echo the first image and ignore the
     rest. ImageStitch puts every subject in one latent the model can actually fuse
     (the community-standard multi-image recipe for Kontext dev)."""
-    g = _loaders()
+    g = _loaders(unet)
     # Load each input and join them left-to-right into a single image.
     g["img0"] = {"class_type": "LoadImage", "inputs": {"image": image_names[0]}}
     stitched = ("img0", 0)
@@ -298,23 +304,181 @@ def _run(graph, on_step=None, on_status=None):
     raise RuntimeError(f"FLUX generation produced no image ({status.get('status_str', 'unknown')}).")
 
 
-def edit(pil, prompt, steps=None, guidance=None, seed=0, on_step=None, on_status=None):
+def edit(pil, prompt, steps=None, guidance=None, seed=0, model=None, on_step=None, on_status=None):
     """Instruction-edit a single image ('make the cat eat the cauliflower')."""
     ensure_server(on_status=on_status)
+    unet = _resolve_unet(model)
     name = _upload_image(pil, f"edit_{uuid.uuid4().hex}.png")
-    g = _edit_graph(name, prompt or "", _steps(steps), _guidance(guidance), int(seed), "flux_edit")
+    g = _edit_graph(name, prompt or "", _steps(steps), _guidance(guidance), int(seed), "flux_edit", unet)
     if on_status:
         on_status("editing with FLUX Kontext…")
     return _run(g, on_step=on_step, on_status=on_status)
 
 
-def compose(pils, prompt, steps=None, guidance=None, seed=0, on_step=None, on_status=None):
+def compose(pils, prompt, steps=None, guidance=None, seed=0, model=None, on_step=None, on_status=None):
     """Combine multiple reference images into one new image."""
     ensure_server(on_status=on_status)
     if not pils:
         raise ValueError("compose requires at least one reference image")
+    unet = _resolve_unet(model)
     names = [_upload_image(p, f"ref{i}_{uuid.uuid4().hex}.png") for i, p in enumerate(pils)]
-    g = _compose_graph(names, prompt or "", _steps(steps), _guidance(guidance), int(seed), "flux_compose")
+    g = _compose_graph(names, prompt or "", _steps(steps), _guidance(guidance), int(seed), "flux_compose", unet)
     if on_status:
         on_status("composing with FLUX Kontext…")
     return _run(g, on_step=on_step, on_status=on_status)
+
+
+# --------------------------------------------------------------------------- #
+# Model management: list / add (from any HF repo) / remove extra UNets
+# --------------------------------------------------------------------------- #
+def list_unets() -> list[dict]:
+    """Installed FLUX UNets, default first. Each: name, default flag, size_gb."""
+    out = []
+    if UNET_DIR.is_dir():
+        for p in sorted(UNET_DIR.glob("*.gguf")):
+            out.append({
+                "name": p.name,
+                "default": p.name == DEFAULT_UNET,
+                "size_gb": round(p.stat().st_size / 1e9, 2),
+            })
+    out.sort(key=lambda m: (not m["default"], m["name"].lower()))
+    return out
+
+
+def _resolve_unet(model) -> str:
+    """Map a requested model name to an installed UNet file, guarding against path
+    traversal. Unknown / empty → the default model."""
+    if not model:
+        return DEFAULT_UNET
+    safe = os.path.basename(str(model))
+    if safe.endswith(".gguf") and (UNET_DIR / safe).exists():
+        return safe
+    return DEFAULT_UNET
+
+
+def delete_unet(name: str) -> None:
+    """Remove an extra UNet. The bundled default can never be deleted."""
+    safe = os.path.basename(name or "")
+    if not safe.endswith(".gguf"):
+        raise ValueError("Not a model file.")
+    if safe == DEFAULT_UNET:
+        raise ValueError("The default FLUX model can't be removed.")
+    p = UNET_DIR / safe
+    if not p.exists():
+        raise FileNotFoundError(safe)
+    p.unlink()
+
+
+_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
+
+
+def _parse_repo(spec: str) -> tuple[str, str]:
+    """Parse a paste into (repo_id, filename). Accepts:
+      owner/repo                      -> pick a GGUF from the repo automatically
+      owner/repo:file.gguf            -> that exact file
+      owner/repo/sub/dir/file.gguf    -> that exact file (path after the repo id)
+    """
+    spec = (spec or "").strip()
+    filename = ""
+    if ":" in spec:
+        spec, filename = spec.split(":", 1)
+        spec, filename = spec.strip(), filename.strip()
+    elif spec.lower().endswith(".gguf"):
+        parts = spec.split("/")
+        if len(parts) > 2:
+            spec, filename = "/".join(parts[:2]), "/".join(parts[2:])
+    if not _REPO_RE.match(spec):
+        raise ValueError(f"'{spec}' isn't a valid HuggingFace repo (expected owner/name).")
+    return spec, filename
+
+
+# Runs in a child process (network allowed) so the serving process stays offline.
+# argv: repo, filename ("" = auto-pick a GGUF), dest_dir. Downloads straight into
+# the UNet dir (no HF-cache copy) and streams coarse progress on stdout.
+_DOWNLOAD_UNET = r"""
+import os, sys, time, urllib.request
+from urllib.error import HTTPError, URLError
+repo, filename, dest_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    if not filename:
+        from huggingface_hub import HfApi
+        ggufs = [f for f in HfApi().list_repo_files(repo) if f.lower().endswith(".gguf")]
+        if not ggufs:
+            print("ERROR: no .gguf files found in " + repo, flush=True); sys.exit(1)
+        filename = (next((f for f in ggufs if "Q4_K_S" in f), None)
+                    or next((f for f in ggufs if "Q4_K" in f), None) or ggufs[0])
+    base = os.path.basename(filename)
+    out = os.path.join(dest_dir, base)
+    if os.path.exists(out):
+        print("ERROR: a model named " + base + " already exists.", flush=True); sys.exit(1)
+    url = "https://huggingface.co/%s/resolve/main/%s?download=true" % (repo, filename)
+    print("Downloading %s from %s…" % (base, repo), flush=True)
+    tmp = out + ".part"
+    with urllib.request.urlopen(url) as r:
+        total = int(r.headers.get("Content-Length", 0))
+        done = last = 0
+        with open(tmp, "wb") as f:
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk); done += len(chunk)
+                if time.time() - last > 0.5:
+                    if total:
+                        print("Downloading %s: %.2f/%.2f GB (%d%%)"
+                              % (base, done/1e9, total/1e9, 100*done//total), flush=True)
+                    else:
+                        print("Downloading %s: %.2f GB" % (base, done/1e9), flush=True)
+                    last = time.time()
+    os.replace(tmp, out)
+    print("DONE " + base, flush=True)
+except (HTTPError, URLError) as e:
+    print("ERROR: could not fetch from %s (%s)" % (repo, e), flush=True); sys.exit(1)
+"""
+
+
+def pull_unet(repo: str, on_status=None) -> None:
+    """Download an extra FLUX UNet from a HuggingFace repo (opt-in, streams status).
+
+    Like sd_client.pull, the fetch runs in a subprocess with the offline flags
+    dropped so the serving process itself never gains network access.
+    """
+    import sys  # PLC0415
+
+    repo_id, filename = _parse_repo(repo)
+    if not available():
+        raise RuntimeError("FLUX runtime isn't installed.")
+    UNET_DIR.mkdir(parents=True, exist_ok=True)
+    if on_status:
+        on_status(f"Resolving {repo_id}…")
+
+    env = {**os.environ}
+    env.pop("HF_HUB_OFFLINE", None)
+    env.pop("TRANSFORMERS_OFFLINE", None)
+    env["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _DOWNLOAD_UNET, repo_id, filename, str(UNET_DIR)],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
+    )
+    buf = b""
+    last = 0.0
+    err = None
+    while True:
+        ch = proc.stdout.read(1)
+        if not ch:
+            break
+        if ch in (b"\r", b"\n"):
+            line = buf.decode("utf-8", "replace").strip()
+            buf = b""
+            if line.startswith("ERROR:"):
+                err = line[6:].strip()
+            elif line and on_status and (time.time() - last) > 0.4:
+                on_status(line)
+                last = time.time()
+        else:
+            buf += ch
+    if proc.wait() != 0 or err:
+        raise RuntimeError(err or "Download failed. Check the repo id and your connection.")
+    if on_status:
+        on_status("Download complete.")

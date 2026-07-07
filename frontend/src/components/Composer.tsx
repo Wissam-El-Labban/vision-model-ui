@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { fileToResizedDataUrl } from "../fileUtils";
 import type { GenSettings, GenOp } from "../types";
-import { pullSdModel, type SdModel } from "../api";
+import {
+  pullSdModel,
+  pullFluxModel,
+  deleteFluxModel,
+  type SdModel,
+  type FluxModel,
+} from "../api";
 
 interface Props {
   text: string;
@@ -32,6 +38,8 @@ interface Props {
   /** FLUX Kontext (edit + compose) installed on the backend. */
   fluxAvailable: boolean;
   sdModels: SdModel[];
+  /** Installed FLUX UNets (edit/compose), default first. */
+  fluxModels: FluxModel[];
   gen: GenSettings;
   setGen: (v: GenSettings) => void;
   /** How many images are pinned in the panel (compose reference count). */
@@ -41,6 +49,8 @@ interface Props {
   pinnedInit: string | null;
   /** Refresh SD model info after a model is downloaded. */
   onModelPulled: () => void;
+  /** Refresh the FLUX model list after an add/remove. */
+  onFluxModelsChanged: () => void;
 }
 
 export default function Composer({
@@ -68,11 +78,13 @@ export default function Composer({
   sdAvailable,
   fluxAvailable,
   sdModels,
+  fluxModels,
   gen,
   setGen,
   pinnedCount,
   pinnedInit,
   onModelPulled,
+  onFluxModelsChanged,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const sysRef = useRef<HTMLDivElement>(null);
@@ -80,6 +92,9 @@ export default function Composer({
   const [sysOpen, setSysOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dlStatus, setDlStatus] = useState<string | null>(null);
+  const [fluxRepo, setFluxRepo] = useState("");
+  const [fluxStatus, setFluxStatus] = useState<string | null>(null);
+  const [fluxBusy, setFluxBusy] = useState(false);
   const selectedModel = sdModels.find((m) => m.id === gen.model);
 
   async function downloadModel() {
@@ -95,6 +110,45 @@ export default function Composer({
   }
   const hasSystem = systemPrompt.trim().length > 0 || !!systemImage;
   const patchGen = (p: Partial<typeof gen>) => setGen({ ...gen, ...p });
+
+  // FLUX model picking + management. "" in gen.fluxModel means "the default",
+  // so the active selection resolves to the default model's filename.
+  const defaultFluxName = fluxModels.find((m) => m.default)?.name ?? "";
+  const activeFlux = gen.fluxModel || defaultFluxName;
+  const prettyFlux = (name: string) => name.replace(/\.gguf$/i, "");
+  const pickFlux = (m: FluxModel) => patchGen({ fluxModel: m.default ? "" : m.name });
+
+  async function addFluxModel() {
+    const repo = fluxRepo.trim();
+    if (!repo || fluxBusy) return;
+    setFluxBusy(true);
+    setFluxStatus("Starting…");
+    try {
+      await pullFluxModel(repo, setFluxStatus);
+      setFluxRepo("");
+      setFluxStatus(null);
+      onFluxModelsChanged();
+    } catch (e) {
+      setFluxStatus(`⚠️ ${(e as Error).message}`);
+    } finally {
+      setFluxBusy(false);
+    }
+  }
+
+  async function removeFluxModel(name: string) {
+    if (fluxBusy) return;
+    setFluxBusy(true);
+    setFluxStatus(null);
+    try {
+      await deleteFluxModel(name);
+      if (gen.fluxModel === name) patchGen({ fluxModel: "" }); // fell back to default
+      onFluxModelsChanged();
+    } catch (e) {
+      setFluxStatus(`⚠️ ${(e as Error).message}`);
+    } finally {
+      setFluxBusy(false);
+    }
+  }
   // Switching model applies its preset: Turbo is a few-step, no-guidance model;
   // standard SD wants ~25 steps and CFG ~7.5.
   const onModelChange = (id: string) => {
@@ -357,6 +411,70 @@ export default function Composer({
                     expect a few minutes per image.
                   </p>
                 )}
+                {isFlux && fluxAvailable && (
+                  <div className="flux-models">
+                    <label className="lbl">FLUX models</label>
+                    <ul className="flux-model-list">
+                      {fluxModels.map((m) => (
+                        <li key={m.name} className={activeFlux === m.name ? "active" : ""}>
+                          <button
+                            type="button"
+                            className="flux-model-pick"
+                            title="Use this model"
+                            onClick={() => pickFlux(m)}
+                          >
+                            <span className="flux-radio">{activeFlux === m.name ? "●" : "○"}</span>
+                            {prettyFlux(m.name)}
+                          </button>
+                          <span className="flux-model-size">{m.size_gb} GB</span>
+                          {m.default ? (
+                            <span className="flux-model-tag">default</span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="flux-model-del"
+                              title="Remove this model"
+                              disabled={fluxBusy}
+                              onClick={() => removeFluxModel(m.name)}
+                            >
+                              🗑
+                            </button>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="flux-add">
+                      <input
+                        type="text"
+                        value={fluxRepo}
+                        placeholder="owner/model (HuggingFace GGUF repo)"
+                        disabled={fluxBusy}
+                        onChange={(e) => setFluxRepo(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            addFluxModel();
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={fluxBusy || !fluxRepo.trim()}
+                        onClick={addFluxModel}
+                      >
+                        ⬇ Add
+                      </button>
+                    </div>
+                    {fluxStatus && <div className="dl-status">{fluxStatus}</div>}
+                    <p className="hint muted">
+                      Paste a HuggingFace GGUF repo (e.g.{" "}
+                      <code>QuantStack/FLUX.1-Kontext-dev-GGUF</code>), or{" "}
+                      <code>owner/repo:file.gguf</code> for a specific quant. Downloaded
+                      once, then fully offline.
+                    </p>
+                  </div>
+                )}
                 <label className="lbl">Negative prompt</label>
                 <textarea
                   className="block"
@@ -475,9 +593,27 @@ export default function Composer({
         )}
 
         {genMode && isFlux ? (
-          <div className="model-control" title="Image engine">
+          <div className="model-control" title="FLUX model">
             <span aria-hidden>✨</span>
-            <span className="flux-engine">FLUX Kontext</span>
+            {fluxModels.length > 0 ? (
+              <select
+                value={activeFlux}
+                onChange={(e) =>
+                  patchGen({
+                    fluxModel: e.target.value === defaultFluxName ? "" : e.target.value,
+                  })
+                }
+              >
+                {fluxModels.map((m) => (
+                  <option key={m.name} value={m.name}>
+                    {prettyFlux(m.name)}
+                    {m.default ? " (default)" : ""}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="flux-engine">FLUX Kontext</span>
+            )}
           </div>
         ) : genMode ? (
           <div className="model-control" title="Image model">
