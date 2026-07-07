@@ -16,6 +16,25 @@ const ORDINALS: Record<string, number> = {
   sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10,
 };
 
+/** Save an image to disk. Works for both data URLs and same-origin
+ *  /api/images/<hash>.jpg URLs; the filename extension follows the source. */
+function downloadImage(src: string): void {
+  let name = "generated-image.png";
+  const mime = src.match(/^data:image\/(\w+)/);
+  if (mime) {
+    name = `generated-image.${mime[1] === "jpeg" ? "jpg" : mime[1]}`;
+  } else {
+    const last = src.split("/").pop() || "";
+    if (last.includes(".")) name = last;
+  }
+  const a = document.createElement("a");
+  a.href = src;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 /** Inject a placeholder thumbnail (`![](ctx://idx)`) after the model's manifest
  *  references — "image N", "the Nth image", "pinned reference image" — so the
  *  <img> renderer below can turn each into a clickable thumbnail. Every mention
@@ -50,6 +69,14 @@ export default function Chat({ messages, streaming, disabled, onDropFiles }: Pro
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Close the expanded image on Escape.
+  useEffect(() => {
+    if (!zoom) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setZoom(null);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [zoom]);
 
   return (
     <div className="chat">
@@ -100,7 +127,15 @@ export default function Chat({ messages, streaming, disabled, onDropFiles }: Pro
                   {m.images && m.images.length > 0 && (
                     <div className="msg-images">
                       {m.images.map((src, j) => (
-                        <img key={j} src={src} alt={`image ${j + 1}`} />
+                        <button
+                          key={j}
+                          type="button"
+                          className="msg-image-btn"
+                          title="Click to expand"
+                          onClick={() => setZoom(src)}
+                        >
+                          <img src={src} alt={`image ${j + 1}`} />
+                        </button>
                       ))}
                     </div>
                   )}
@@ -152,7 +187,17 @@ export default function Chat({ messages, streaming, disabled, onDropFiles }: Pro
       </div>
       {zoom && (
         <div className="lightbox" onClick={() => setZoom(null)}>
-          <img src={zoom} alt="full size" />
+          <div className="lightbox-body" onClick={(e) => e.stopPropagation()}>
+            <img src={zoom} alt="full size" />
+            <div className="lightbox-bar">
+              <button type="button" className="btn" onClick={() => downloadImage(zoom)}>
+                ⬇ Download
+              </button>
+              <button type="button" className="btn ghost" onClick={() => setZoom(null)}>
+                ✕ Close
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

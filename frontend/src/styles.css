@@ -499,6 +499,25 @@ textarea {
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
 }
 
+/* Expanded image + its action bar (download / close). */
+.lightbox-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  cursor: default;
+}
+
+.lightbox-body img {
+  /* Leave room for the action bar below without overflowing the viewport. */
+  max-height: 85vh;
+}
+
+.lightbox-bar {
+  display: flex;
+  gap: 10px;
+}
+
 /* Inline thumbnail rendered next to a model's "image N" reference. */
 .ctx-thumb {
   display: inline-flex;
@@ -784,11 +803,26 @@ textarea {
   margin-bottom: 8px;
 }
 
+.msg-image-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  line-height: 0;
+  cursor: zoom-in;
+  border-radius: 8px;
+}
+
+.msg-image-btn:hover img {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(47, 129, 247, 0.3);
+}
+
 .msg-images img {
   max-width: 180px;
   max-height: 180px;
   border-radius: 8px;
   border: 1px solid var(--border);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
 
 .cursor {
