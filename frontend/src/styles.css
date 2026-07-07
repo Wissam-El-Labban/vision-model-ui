@@ -518,7 +518,10 @@ textarea {
   position: relative;
   z-index: 5;
   overflow: visible;
+  /* Blue highlight shows immediately on the small thumbnail (no delay); only the
+     expansion below waits for hover intent. */
   border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(47, 129, 247, 0.3);
 }
 
 .ctx-thumb img {
@@ -541,6 +544,9 @@ textarea {
   transform: scale(5.5);
   box-shadow: 0 0 0 0.4px var(--accent),
     0 5px 16px rgba(0, 0, 0, 0.5);
+  /* Wait for hover intent (~1.2s) before growing. The delay lives only on the
+     hover rule, so moving away shrinks it back instantly (no delay). */
+  transition-delay: 0.6s;
 }
 
 /* ---------- Chat ---------- */
