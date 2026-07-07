@@ -5,6 +5,7 @@ browser never talks to Ollama directly.
 """
 import json
 import queue
+import random
 import threading
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import db
+from . import flux_client as fx
 from . import ollama_client as oc
 from . import sd_client as sd
 
@@ -84,14 +86,18 @@ class TitleRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    mode: str = "txt2img"  # txt2img | img2img
+    mode: str = "txt2img"  # txt2img | img2img | edit | compose
     model: str | None = None
     prompt: str = ""
     negative_prompt: str = ""
     init_image_hash: str | None = None
+    ref_image_hashes: list[str] = []  # compose mode: IP-Adapter reference images
     steps: int | None = None
     guidance: float | None = None
     strength: float | None = None
+    image_guidance_scale: float | None = None  # edit mode: source fidelity
+    ip_adapter_scale: float | None = None  # compose mode: reference influence
+    enhance: bool = True  # wrap photoreal prompts in a quality template
     width: int = 512
     height: int = 512
     seed: int | None = None
@@ -160,12 +166,18 @@ def ps(ollama_url: str = oc.DEFAULT_URL):
 # --------------------------------------------------------------------------- #
 @app.get("/api/generate/models")
 def generate_models():
-    return {"available": sd.available(), "device": sd.device(), "models": sd.list_models()}
+    return {
+        "available": sd.available(),
+        "device": sd.device(),
+        "models": sd.list_models(),
+        "flux": fx.available(),  # FLUX Kontext (edit + compose) ready?
+    }
 
 
 @app.post("/api/generate/unload")
 def generate_unload():
     sd.unload()
+    fx.free()
     return {"ok": True}
 
 
@@ -203,27 +215,38 @@ def generate_pull(req: SdPullRequest):
 
 @app.post("/api/generate")
 def generate(req: GenerateRequest):
-    """Run a local diffusion generation, streaming progress then the final image.
+    """Run a local image generation, streaming progress then the final image.
 
-    Frees VRAM from any resident Ollama vision model first (the 6 GB can't hold
-    both). The diffusion call is synchronous, so it runs in a worker thread that
+    create (txt2img/img2img) runs on the in-process SD stack; edit/compose run on
+    the FLUX Kontext sidecar. Either way the other GPU tenants (Ollama vision
+    model, and whichever image runtime isn't in use) are freed first, since the
+    GPU can't hold them at once. The synchronous call runs in a worker thread that
     pushes events onto a queue the response generator drains.
     """
-    if not sd.available():
+    is_flux = req.mode in ("edit", "compose")
+    if is_flux and not fx.available():
+        raise HTTPException(
+            status_code=503,
+            detail="FLUX Kontext (edit/compose) isn't installed on this machine.",
+        )
+    if not is_flux and not sd.available():
         raise HTTPException(
             status_code=503,
             detail="Image generation deps (torch/diffusers) are not installed.",
         )
 
-    # Resolve the init image (img2img) from the content-addressed store to a PIL.
-    init_image = None
-    if req.init_image_hash:
-        from PIL import Image
+    # Resolve stored image hashes to PIL objects (init image for img2img/edit,
+    # reference images for compose).
+    from PIL import Image
 
-        path = db.IMAGES_DIR / f"{req.init_image_hash}.jpg"
+    def _resolve(h: str):
+        path = db.IMAGES_DIR / f"{h}.jpg"
         if not path.exists():
-            raise HTTPException(status_code=404, detail="init image not found")
-        init_image = Image.open(path).convert("RGB")
+            raise HTTPException(status_code=404, detail=f"image {h} not found")
+        return Image.open(path).convert("RGB")
+
+    init_image = _resolve(req.init_image_hash) if req.init_image_hash else None
+    ref_images = [_resolve(h) for h in req.ref_image_hashes]
 
     def gen():
         events: queue.Queue = queue.Queue()
@@ -236,24 +259,42 @@ def generate(req: GenerateRequest):
                 except Exception:
                     pass  # best-effort; Ollama may be remote or already free
 
-                params = {
-                    "mode": req.mode,
-                    "model": req.model,
-                    "prompt": req.prompt,
-                    "negative_prompt": req.negative_prompt,
-                    "steps": req.steps,
-                    "guidance": req.guidance,
-                    "strength": req.strength,
-                    "width": req.width,
-                    "height": req.height,
-                    "seed": req.seed,
-                    "init_image": init_image,
-                }
-                image, seed = sd.generate(
-                    params,
-                    on_step=lambda s, t: events.put({"type": "progress", "step": s, "total": t}),
-                    on_status=lambda m: events.put({"type": "status", "message": m}),
-                )
+                status_cb = lambda m: events.put({"type": "status", "message": m})
+                step_cb = lambda s, t: events.put({"type": "progress", "step": s, "total": t})
+
+                if is_flux:
+                    sd.unload()  # free the SD pipeline so FLUX has the GPU
+                    seed = req.seed if req.seed is not None else random.randint(0, 2**31 - 1)
+                    if req.mode == "edit":
+                        if init_image is None:
+                            raise ValueError("Edit needs a source image.")
+                        image = fx.edit(init_image, req.prompt, steps=req.steps,
+                                        guidance=req.guidance, seed=seed,
+                                        on_step=step_cb, on_status=status_cb)
+                    else:  # compose
+                        if not ref_images:
+                            raise ValueError("Combine needs at least one reference image.")
+                        image = fx.compose(ref_images, req.prompt, steps=req.steps,
+                                           guidance=req.guidance, seed=seed,
+                                           on_step=step_cb, on_status=status_cb)
+                else:
+                    fx.free()  # release FLUX's VRAM so the SD stack has the GPU
+                    params = {
+                        "mode": req.mode,
+                        "model": req.model,
+                        "prompt": req.prompt,
+                        "negative_prompt": req.negative_prompt,
+                        "enhance": req.enhance,
+                        "steps": req.steps,
+                        "guidance": req.guidance,
+                        "strength": req.strength,
+                        "width": req.width,
+                        "height": req.height,
+                        "seed": req.seed,
+                        "init_image": init_image,
+                    }
+                    image, seed = sd.generate(params, on_step=step_cb, on_status=status_cb)
+
                 full = sd.pil_to_data_url(image)
                 thumb = sd.pil_to_data_url(image, max_size=64)
                 h = db.save_image(full, thumb)

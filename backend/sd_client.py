@@ -41,12 +41,44 @@ BASE_MODEL = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 TURBO_MODEL = "stabilityai/sd-turbo"
 PHOTOREAL_MODEL = "SG161222/Realistic_Vision_V5.1_noVAE"
 
-# id -> display metadata for the UI.
+# id -> display metadata for the UI. This module only handles create-mode
+# generation (txt2img / img2img). Instruction editing and multi-image
+# composition are handled by FLUX Kontext (see `flux_client.py`).
 MODELS = [
     {"id": TURBO_MODEL, "label": "SD-Turbo (fast)", "turbo": True, "photoreal": False, "size_gb": 2.5},
     {"id": BASE_MODEL, "label": "Stable Diffusion 1.5", "turbo": False, "photoreal": False, "size_gb": 4.0},
     {"id": PHOTOREAL_MODEL, "label": "Realistic Vision 5.1 (photoreal)", "turbo": False, "photoreal": True, "size_gb": 4.0},
 ]
+
+# The external VAE Realistic Vision expects (it ships as `_noVAE`). Without it the
+# bundled fallback VAE washes out color/detail. Downloaded alongside the photoreal
+# checkpoint (see `pull`) and assigned in `_load`.
+VAE_MODEL = "stabilityai/sd-vae-ft-mse"
+
+# Baseline anti-deformity negative prompt, always merged in (SD 1.5 mutates hands,
+# faces and anatomy badly without one — the single biggest cause of "horror"
+# output). The user's own negative prompt, if any, is prepended to this.
+DEFAULT_NEGATIVE = (
+    "deformed, distorted, disfigured, mutated, mutation, extra limbs, extra arms, "
+    "extra legs, missing limbs, fused fingers, too many fingers, mutated hands, "
+    "poorly drawn hands, poorly drawn face, bad anatomy, bad proportions, "
+    "malformed, cloned face, gross proportions, long neck, blurry, lowres, "
+    "worst quality, low quality, jpeg artifacts, watermark, signature, text, "
+    "cropped, out of frame, ugly, duplicate, morbid, mutilated"
+)
+
+# Positive quality wrapper for photoreal checkpoints (Realistic Vision responds
+# strongly to these tags). Applied only when the request opts into enhancement
+# and the model is flagged photoreal. `{prompt}` is the user's text.
+PHOTOREAL_TEMPLATE = (
+    "RAW photo, {prompt}, (high detailed skin:1.2), 8k uhd, dslr, soft lighting, "
+    "high quality, film grain, Fujifilm XT3, sharp focus"
+)
+
+
+def _model_meta(model_id: str) -> dict:
+    """UI metadata dict for a model id (empty dict if unknown)."""
+    return next((m for m in MODELS if m["id"] == model_id), {})
 
 # Generation is serialized: there's no VRAM to run two at once, and swapping the
 # resident pipeline mid-run would corrupt both.
@@ -105,27 +137,50 @@ def list_models() -> list[dict]:
 
 
 # The download runs in a child process so the network access is fully isolated
-# from the always-offline serving process. Only the files actually needed are
-# fetched (safetensors preferred), keeping the on-disk footprint minimal.
+# from the always-offline serving process. It reads a JSON list of asset specs on
+# argv (`{"repo","kind","patterns"}`): full diffusers pipelines vs. bare repo
+# snapshots (the VAE) that aren't loadable as a pipeline.
 _DOWNLOAD_SCRIPT = """
-import sys
-from diffusers import DiffusionPipeline
-m = sys.argv[1]
-try:
-    DiffusionPipeline.download(m, use_safetensors=True)
-except Exception:
-    DiffusionPipeline.download(m)  # some checkpoints ship only .bin weights
+import json, sys
+specs = json.loads(sys.argv[1])
+for s in specs:
+    repo, kind = s["repo"], s["kind"]
+    if kind == "pipeline":
+        from diffusers import DiffusionPipeline
+        # Prefer safetensors (smaller); fall back to the full set if a
+        # component lacks them.
+        try:
+            DiffusionPipeline.download(repo, use_safetensors=True)
+        except Exception:
+            DiffusionPipeline.download(repo)
+    else:  # snapshot: fetch only the files we need from a plain repo
+        from huggingface_hub import snapshot_download
+        snapshot_download(repo, allow_patterns=s.get("patterns") or None)
 """
 
 
+def _download_specs(model_id: str) -> list[dict]:
+    """Everything to fetch for `model_id`: the checkpoint plus its dependencies.
+
+    Photoreal checkpoints additionally need the external VAE (they ship `_noVAE`).
+    """
+    meta = _model_meta(model_id)
+    specs = [{"repo": model_id, "kind": "pipeline", "safetensors": True}]
+    if meta.get("photoreal"):
+        specs.append({"repo": VAE_MODEL, "kind": "snapshot",
+                      "patterns": ["*.json", "*.safetensors"]})
+    return specs
+
+
 def pull(model_id: str, on_status=None):
-    """Download a model's weights to the local cache (deliberate, opt-in).
+    """Download a model's weights (and dependencies) to the cache (opt-in).
 
     Runs in a subprocess whose environment has the offline flags removed, so this
     is the ONLY moment the app touches the network — and the long-lived serving
     process never has network-enabled HuggingFace access. Streams coarse progress
     from the child's output.
     """
+    import json  # PLC0415
     import subprocess  # PLC0415
     import sys  # PLC0415
     import time  # PLC0415
@@ -140,7 +195,7 @@ def pull(model_id: str, on_status=None):
     env["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
     proc = subprocess.Popen(
-        [sys.executable, "-c", _DOWNLOAD_SCRIPT, model_id],
+        [sys.executable, "-c", _DOWNLOAD_SCRIPT, json.dumps(_download_specs(model_id))],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -172,6 +227,18 @@ def pull(model_id: str, on_status=None):
 # --------------------------------------------------------------------------- #
 # Pipeline lifecycle
 # --------------------------------------------------------------------------- #
+def _apply_memory_opts(pipe, dev: str) -> None:
+    """Fit-for-VRAM optimizations, shared by every pipeline we load."""
+    if dev == "cuda":
+        # Stream submodules to the GPU only while they run — the decisive fit for 6 GB.
+        pipe.enable_model_cpu_offload()
+        pipe.enable_vae_slicing()
+        pipe.enable_vae_tiling()
+        pipe.enable_attention_slicing()
+    else:
+        pipe.to("cpu")
+
+
 def _load(model_id: str, on_status=None) -> None:
     """Ensure `model_id` is the resident pipeline. Evicts any other first."""
     global _txt2img, _img2img, _loaded_model
@@ -180,14 +247,15 @@ def _load(model_id: str, on_status=None) -> None:
 
     unload()  # free any previously-resident model before loading a new one
 
-    from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image  # PLC0415
-
     torch = _torch()
     dev = device()
     dtype = torch.float16 if dev == "cuda" else torch.float32
+    meta = _model_meta(model_id)
 
     if on_status:
         on_status(f"loading {model_id}…")
+
+    from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image  # PLC0415
 
     # Belt-and-suspenders with the process-level HF_HUB_OFFLINE: load purely from
     # the local cache, never the network. (generate() guarantees the model is
@@ -199,14 +267,32 @@ def _load(model_id: str, on_status=None) -> None:
         use_safetensors=True,
         local_files_only=True,
     )
-    if dev == "cuda":
-        # Stream submodules to the GPU only while they run — the decisive fit for 6 GB.
-        pipe.enable_model_cpu_offload()
-        pipe.enable_vae_slicing()
-        pipe.enable_vae_tiling()
-        pipe.enable_attention_slicing()
-    else:
-        pipe.to("cpu")
+
+    # DPM++ 2M SDE Karras: far fewer artifacts than the default PNDM scheduler at
+    # the same step count. Turbo has its own few-step schedule — leave it alone.
+    if not meta.get("turbo"):
+        from diffusers import DPMSolverMultistepScheduler  # PLC0415
+
+        pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+            pipe.scheduler.config,
+            use_karras_sigmas=True,
+            algorithm_type="sde-dpmsolver++",
+        )
+
+    # Realistic Vision ships without a VAE (`_noVAE`); load the external one it
+    # expects. Fail soft — a missing VAE only degrades color, it shouldn't block.
+    if meta.get("photoreal"):
+        try:
+            from diffusers import AutoencoderKL  # PLC0415
+
+            pipe.vae = AutoencoderKL.from_pretrained(
+                VAE_MODEL, torch_dtype=dtype, local_files_only=True
+            )
+        except Exception as exc:  # noqa: BLE001
+            if on_status:
+                on_status(f"(VAE {VAE_MODEL} unavailable, using fallback: {exc})")
+
+    _apply_memory_opts(pipe, dev)
 
     # img2img shares all components with txt2img — zero extra VRAM/weights.
     img2img = AutoPipelineForImage2Image.from_pipe(pipe)
@@ -266,9 +352,20 @@ def generate(params: dict, on_step=None, on_status=None):
                 on_step(step_index + 1, total)
             return cb_kwargs
 
+        meta = _model_meta(model_id)
+
+        # Prompt: optionally wrap photoreal models in a quality template.
+        prompt = params.get("prompt") or ""
+        if params.get("enhance", True) and meta.get("photoreal") and prompt.strip():
+            prompt = PHOTOREAL_TEMPLATE.format(prompt=prompt)
+
+        # Negative: always fold in the baseline anti-deformity list (user's first).
+        user_neg = (params.get("negative_prompt") or "").strip()
+        negative = ", ".join(p for p in (user_neg, DEFAULT_NEGATIVE) if p)
+
         common = dict(
-            prompt=params.get("prompt") or "",
-            negative_prompt=params.get("negative_prompt") or None,
+            prompt=prompt,
+            negative_prompt=negative,
             num_inference_steps=steps,
             guidance_scale=float(guidance),
             generator=generator,

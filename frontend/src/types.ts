@@ -13,13 +13,19 @@ export interface ChatMessage {
   model?: string;
 }
 
-/** User-tunable image-generation settings (diffusers). */
+/** Which image-generation workflow the composer is in. */
+export type GenOp = "create" | "edit" | "compose";
+
+/** User-tunable image-generation settings.
+ *  create (txt2img/img2img) uses the SD fields; edit/compose (FLUX Kontext) use
+ *  steps + guidance (guidance is Kontext's low ~2.5 scale in those modes). */
 export interface GenSettings {
   model: string;
   negativePrompt: string;
   steps: number;
   guidance: number;
-  strength: number;
+  strength: number; // img2img: how far from the source image
+  enhance: boolean; // wrap photoreal prompts in a quality template
   width: number;
   height: number;
   seed: string; // blank = random; kept as string for the input field

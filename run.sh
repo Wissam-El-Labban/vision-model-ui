@@ -101,6 +101,104 @@ npm run build
 popd > /dev/null
 echo -e "${GREEN}✓ Frontend built${NC}"
 
+# --- Image generation: FLUX Kontext (ComfyUI sidecar) ----------------------- #
+# "Create" (Stable Diffusion txt2img/img2img) rides on the backend venv above.
+# "Edit" and "Combine" run FLUX.1 Kontext inside its own ComfyUI runtime — a
+# separate venv + GGUF weights (~10 GB) — because Kontext-12B can't load in the
+# backend's torch 2.3 / diffusers 0.31 env. Everything below is idempotent and
+# stays local. Chat-only users can skip the heavy download: SKIP_FLUX=1 ./run.sh
+echo ""
+echo -e "${BLUE}========================================${NC}"
+echo -e "${BLUE}Setting up FLUX Kontext (image edit/combine)...${NC}"
+echo -e "${BLUE}========================================${NC}"
+echo ""
+
+FLUX_DIR="flux_runtime"
+COMFY_DIR="$FLUX_DIR/ComfyUI"
+CVENV="$FLUX_DIR/cvenv"
+# Pinned to the exact commits this workflow was validated against.
+COMFY_COMMIT="51bf508a0b1bde9416a0c221b0f33f8325305229"
+GGUF_COMMIT="6ea2651e7df66d7585f6ffee804b20e92fb38b8a"
+
+# repo|file|models-subdir — all non-gated HuggingFace weights (no token needed).
+FLUX_MODELS=(
+    "QuantStack/FLUX.1-Kontext-dev-GGUF|flux1-kontext-dev-Q4_K_S.gguf|unet"
+    "city96/t5-v1_1-xxl-encoder-gguf|t5-v1_1-xxl-encoder-Q4_K_M.gguf|clip"
+    "comfyanonymous/flux_text_encoders|clip_l.safetensors|clip"
+    "ffxvs/vae-flux|ae.safetensors|vae"
+)
+
+# Mirror flux_client.available(): installed only if the venv, ComfyUI, and every
+# weight are present.
+flux_installed() {
+    [ -x "$CVENV/bin/python" ] || return 1
+    [ -f "$COMFY_DIR/main.py" ] || return 1
+    local spec file sub
+    for spec in "${FLUX_MODELS[@]}"; do
+        IFS='|' read -r _ file sub <<< "$spec"
+        [ -f "$COMFY_DIR/models/$sub/$file" ] || return 1
+    done
+    return 0
+}
+
+if [ "${SKIP_FLUX:-0}" = "1" ]; then
+    echo -e "${YELLOW}SKIP_FLUX=1 — skipping FLUX setup (edit/combine will be unavailable; create still works).${NC}"
+elif flux_installed; then
+    echo -e "${GREEN}✓ FLUX Kontext already installed${NC}"
+else
+    # 1. ComfyUI + the GGUF loader node, pinned to known-good commits.
+    if [ ! -f "$COMFY_DIR/main.py" ]; then
+        echo -e "${YELLOW}Cloning ComfyUI...${NC}"
+        git clone --quiet https://github.com/comfyanonymous/ComfyUI "$COMFY_DIR"
+        git -C "$COMFY_DIR" checkout --quiet "$COMFY_COMMIT"
+    fi
+    if [ ! -d "$COMFY_DIR/custom_nodes/ComfyUI-GGUF" ]; then
+        echo -e "${YELLOW}Cloning ComfyUI-GGUF loader node...${NC}"
+        git clone --quiet https://github.com/city96/ComfyUI-GGUF \
+            "$COMFY_DIR/custom_nodes/ComfyUI-GGUF"
+        git -C "$COMFY_DIR/custom_nodes/ComfyUI-GGUF" checkout --quiet "$GGUF_COMMIT"
+    fi
+
+    # 2. ComfyUI's own venv — CUDA 12.1 torch (like the backend) + node deps.
+    if [ ! -x "$CVENV/bin/python" ]; then
+        echo -e "${YELLOW}Creating ComfyUI virtual environment...${NC}"
+        rm -rf "$CVENV"
+        "$PYTHON" -m venv "$CVENV"
+    fi
+    echo -e "${BLUE}Installing ComfyUI dependencies (torch + runtime, this is slow)...${NC}"
+    "$CVENV/bin/pip" install --upgrade pip --quiet
+    "$CVENV/bin/pip" install --quiet --extra-index-url https://download.pytorch.org/whl/cu121 \
+        -r "$COMFY_DIR/requirements.txt"
+    "$CVENV/bin/pip" install --quiet -r "$COMFY_DIR/custom_nodes/ComfyUI-GGUF/requirements.txt"
+
+    # 3. The four weight files (~10 GB). Downloaded atomically (.part → rename),
+    #    resumable across re-runs, and skipped once present.
+    for spec in "${FLUX_MODELS[@]}"; do
+        IFS='|' read -r repo file sub <<< "$spec"
+        dest_dir="$COMFY_DIR/models/$sub"
+        dest="$dest_dir/$file"
+        mkdir -p "$dest_dir"
+        if [ -f "$dest" ] && [ "$(stat -c%s "$dest")" -gt 1000000 ]; then
+            echo -e "${GREEN}✓ $file already present${NC}"
+            continue
+        fi
+        echo -e "${YELLOW}Downloading $file (this can take a while)...${NC}"
+        if ! curl -fL -C - --retry 3 -o "$dest.part" \
+             "https://huggingface.co/$repo/resolve/main/$file?download=true"; then
+            echo -e "${RED}✗ Failed to download $file. Re-run ./run.sh to resume.${NC}"
+            rm -f "$dest.part"
+            exit 1
+        fi
+        mv "$dest.part" "$dest"
+    done
+
+    if flux_installed; then
+        echo -e "${GREEN}✓ FLUX Kontext ready (edit + combine enabled)${NC}"
+    else
+        echo -e "${RED}✗ FLUX Kontext setup incomplete — edit/combine unavailable.${NC}"
+    fi
+fi
+
 # --- Ollama ----------------------------------------------------------------- #
 echo ""
 echo -e "${BLUE}========================================${NC}"

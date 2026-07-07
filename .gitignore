@@ -34,3 +34,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# FLUX Kontext runtime (ComfyUI + venv + GGUF weights, ~10GB — installed out of band)
+flux_runtime/

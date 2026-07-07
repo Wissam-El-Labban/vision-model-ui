@@ -1118,6 +1118,43 @@ textarea {
   color: #fff;
 }
 
+/* Second-level workflow picker (Create / Edit / Combine) under Generate. */
+.mode-toggle.sub {
+  margin-top: -4px;
+  padding: 2px;
+}
+
+.mode-toggle.sub .mode-tab {
+  padding: 4px 13px;
+  font-size: 12px;
+}
+
+.mode-toggle.sub .mode-tab.active {
+  background: #8957e5;
+}
+
+.enhance-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.enhance-row input {
+  width: auto;
+  margin: 0;
+}
+
+.flux-engine {
+  font-size: 13px;
+  font-weight: 600;
+  color: #b389ff;
+  padding: 0 4px;
+}
+
 .init-hint {
   display: flex;
   align-items: center;

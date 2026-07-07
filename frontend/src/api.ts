@@ -168,6 +168,7 @@ export interface SdInfo {
   available: boolean;
   device: string;
   models: SdModel[];
+  flux: boolean; // FLUX Kontext (edit + compose) installed?
 }
 
 export async function getSdInfo(): Promise<SdInfo> {
@@ -199,14 +200,16 @@ export async function pullSdModel(
 }
 
 export interface GenerateParams {
-  mode: "txt2img" | "img2img";
+  mode: "txt2img" | "img2img" | "edit" | "compose";
   model: string;
   prompt: string;
   negative_prompt: string;
   init_image_hash?: string | null;
+  ref_image_hashes?: string[]; // compose: FLUX Kontext reference images
   steps?: number | null;
   guidance?: number | null;
   strength?: number | null;
+  enhance?: boolean;
   width: number;
   height: number;
   seed?: number | null;

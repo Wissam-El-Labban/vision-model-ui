@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { fileToResizedDataUrl } from "../fileUtils";
-import type { GenSettings } from "../types";
+import type { GenSettings, GenOp } from "../types";
 import { pullSdModel, type SdModel } from "../api";
 
 interface Props {
@@ -25,10 +25,17 @@ interface Props {
   // Image generation (diffusers).
   genMode: boolean;
   setGenMode: (v: boolean) => void;
+  /** Which generate workflow (create / edit / compose). */
+  genOp: GenOp;
+  setGenOp: (v: GenOp) => void;
   sdAvailable: boolean;
+  /** FLUX Kontext (edit + compose) installed on the backend. */
+  fluxAvailable: boolean;
   sdModels: SdModel[];
   gen: GenSettings;
   setGen: (v: GenSettings) => void;
+  /** How many images are pinned in the panel (compose reference count). */
+  pinnedCount: number;
   /** First pinned-panel image, used as the img2img source when nothing is
    *  attached to the message. `null` when the panel is empty. */
   pinnedInit: string | null;
@@ -56,10 +63,14 @@ export default function Composer({
   setSystemImage,
   genMode,
   setGenMode,
+  genOp,
+  setGenOp,
   sdAvailable,
+  fluxAvailable,
   sdModels,
   gen,
   setGen,
+  pinnedCount,
   pinnedInit,
   onModelPulled,
 }: Props) {
@@ -95,11 +106,18 @@ export default function Composer({
       guidance: turbo ? 0 : 7.5,
     });
   };
-  // In generate mode the img2img init is the attached image, else the first
-  // pinned-panel image. The sub-mode is inferred from whether any is present.
+  const isEdit = genOp === "edit";
+  const isCompose = genOp === "compose";
+  // In create/edit the source is the attached image, else the first pinned-panel
+  // image. create infers txt2img vs img2img from whether one is present.
   const initSource = images.length > 0 ? "attached" : pinnedInit ? "pinned" : null;
-  const genSubmode = genMode && initSource ? "img2img" : "txt2img";
+  const genSubmode = genMode && !isEdit && !isCompose && initSource ? "img2img" : "txt2img";
   const initPreview = images.length > 0 ? images[0] : pinnedInit;
+  // compose blends every attached image, else every pinned one.
+  const composeCount = images.length > 0 ? images.length : pinnedCount;
+  // create runs on a selected SD checkpoint; edit/compose run on FLUX Kontext
+  // (a fixed engine — no model dropdown).
+  const isFlux = isEdit || isCompose;
 
   // Close the system-prompt popover on any click outside it (parity with the
   // native model <select>, which closes itself).
@@ -155,14 +173,75 @@ export default function Composer({
         </div>
       )}
 
-      {genMode && genSubmode === "img2img" && (
+      {genMode && (
+        <div className="mode-toggle sub" role="tablist" aria-label="Generate workflow">
+          <button
+            role="tab"
+            aria-selected={genOp === "create"}
+            className={`mode-tab ${genOp === "create" ? "active" : ""}`}
+            onClick={() => setGenOp("create")}
+            title="Text-to-image, or transform one attached image"
+          >
+            🖼️ Create
+          </button>
+          <button
+            role="tab"
+            aria-selected={genOp === "edit"}
+            className={`mode-tab ${genOp === "edit" ? "active" : ""}`}
+            onClick={() => setGenOp("edit")}
+            title="Instruction edit — 'make the cat eat the broccoli'"
+          >
+            ✏️ Edit
+          </button>
+          <button
+            role="tab"
+            aria-selected={genOp === "compose"}
+            className={`mode-tab ${genOp === "compose" ? "active" : ""}`}
+            onClick={() => setGenOp("compose")}
+            title="Blend several reference images into one new image"
+          >
+            🧩 Combine
+          </button>
+        </div>
+      )}
+
+      {genMode && genOp === "create" && genSubmode === "img2img" && (
         <div className="init-hint">
           {initPreview && (
             <img className="init-thumb" src={initPreview} alt="img2img source" />
           )}
           <span>
             Starting image ({initSource === "attached" ? "attached" : "from panel"}) — img2img
-            transforms this <em>one</em> image. It can't merge multiple images into a scene.
+            transforms this <em>one</em> image toward your prompt.
+          </span>
+        </div>
+      )}
+
+      {genMode && isEdit && (
+        <div className="init-hint">
+          {initPreview && (
+            <img className="init-thumb" src={initPreview} alt="edit source" />
+          )}
+          <span>
+            {initPreview ? (
+              <>Editing this image ({initSource === "attached" ? "attached" : "from panel"}) — write an
+              instruction like <em>“make the cat eat the broccoli”</em>.</>
+            ) : (
+              <>Attach or pin <em>one</em> image to edit, then write an instruction.</>
+            )}
+          </span>
+        </div>
+      )}
+
+      {genMode && isCompose && (
+        <div className="init-hint">
+          <span>
+            {composeCount > 0 ? (
+              <>Blending <em>{composeCount}</em> reference image{composeCount > 1 ? "s" : ""}{" "}
+              ({images.length > 0 ? "attached" : "from panel"}) into one new image guided by your prompt.</>
+            ) : (
+              <>Attach or pin the images you want to combine, then describe the result.</>
+            )}
           </span>
         </div>
       )}
@@ -243,7 +322,7 @@ export default function Composer({
             {settingsOpen && (
               <div className="system-popover gen-popover">
                 <div className="popover-title">🎨 Generation settings</div>
-                {selectedModel && !selectedModel.downloaded && (
+                {genOp === "create" && selectedModel && !selectedModel.downloaded && (
                   <div className="dl-box">
                     <div className="dl-row">
                       <span>
@@ -264,6 +343,20 @@ export default function Composer({
                     </p>
                   </div>
                 )}
+                {isFlux && !fluxAvailable && (
+                  <div className="dl-box">
+                    <p className="hint muted">
+                      ⚠️ FLUX Kontext isn't installed on this machine, so Edit and
+                      Combine are unavailable.
+                    </p>
+                  </div>
+                )}
+                {isFlux && (
+                  <p className="hint muted" style={{ marginTop: 0 }}>
+                    ✨ Powered by <strong>FLUX Kontext</strong> (local). High quality —
+                    expect a few minutes per image.
+                  </p>
+                )}
                 <label className="lbl">Negative prompt</label>
                 <textarea
                   className="block"
@@ -281,30 +374,43 @@ export default function Composer({
                     <input type="number" min={0} max={20} step={0.5} value={gen.guidance}
                       onChange={(e) => patchGen({ guidance: +e.target.value })} />
                   </label>
-                  <label>Width
-                    <input type="number" min={256} max={1024} step={64} value={gen.width}
-                      onChange={(e) => patchGen({ width: +e.target.value })} />
-                  </label>
-                  <label>Height
-                    <input type="number" min={256} max={1024} step={64} value={gen.height}
-                      onChange={(e) => patchGen({ height: +e.target.value })} />
-                  </label>
-                  <label className={genSubmode === "img2img" ? "" : "muted-field"}>
-                    Strength
-                    <input type="number" min={0} max={1} step={0.05} value={gen.strength}
-                      disabled={genSubmode !== "img2img"}
-                      onChange={(e) => patchGen({ strength: +e.target.value })} />
-                  </label>
+                  {genOp === "create" && (
+                    <>
+                      <label>Width
+                        <input type="number" min={256} max={1024} step={64} value={gen.width}
+                          onChange={(e) => patchGen({ width: +e.target.value })} />
+                      </label>
+                      <label>Height
+                        <input type="number" min={256} max={1024} step={64} value={gen.height}
+                          onChange={(e) => patchGen({ height: +e.target.value })} />
+                      </label>
+                      <label className={genSubmode === "img2img" ? "" : "muted-field"}>
+                        Strength
+                        <input type="number" min={0} max={1} step={0.05} value={gen.strength}
+                          disabled={genSubmode !== "img2img"}
+                          onChange={(e) => patchGen({ strength: +e.target.value })} />
+                      </label>
+                    </>
+                  )}
                   <label>Seed
                     <input type="text" inputMode="numeric" value={gen.seed}
                       placeholder="random"
                       onChange={(e) => patchGen({ seed: e.target.value.replace(/[^0-9]/g, "") })} />
                   </label>
                 </div>
+                {genOp === "create" && selectedModel?.photoreal && (
+                  <label className="enhance-row">
+                    <input type="checkbox" checked={gen.enhance}
+                      onChange={(e) => patchGen({ enhance: e.target.checked })} />
+                    Enhance photoreal prompt (adds quality tags)
+                  </label>
+                )}
                 <p className="hint muted">
-                  {genSubmode === "img2img"
-                    ? "Image-to-image: strength controls how far from the attached image."
-                    : "Text-to-image: attach an image above to switch to image-to-image."}
+                  {isFlux
+                    ? "Guidance ~2.5 follows the instruction closely; lower it for looser, more creative edits."
+                    : genSubmode === "img2img"
+                      ? "Image-to-image: strength controls how far from the attached image."
+                      : "Text-to-image: attach an image above to switch to image-to-image."}
                 </p>
               </div>
             )}
@@ -336,9 +442,13 @@ export default function Composer({
           onKeyDown={onKeyDown}
           placeholder={
             genMode
-              ? genSubmode === "img2img"
-                ? "Describe how to transform the attached image…"
-                : "Describe the image to generate… (attach an image for img2img)"
+              ? isEdit
+                ? "Instruction to apply… e.g. “make the cat eat the broccoli”"
+                : isCompose
+                  ? "Describe the combined image to create from the references…"
+                  : genSubmode === "img2img"
+                    ? "Describe how to transform the attached image…"
+                    : "Describe the image to generate… (attach an image for img2img)"
               : disabled
                 ? "Select a vision model to start…"
                 : "Ask about your image(s)… (drop or paste images anywhere, Enter to send)"
@@ -364,7 +474,12 @@ export default function Composer({
           </button>
         )}
 
-        {genMode ? (
+        {genMode && isFlux ? (
+          <div className="model-control" title="Image engine">
+            <span aria-hidden>✨</span>
+            <span className="flux-engine">FLUX Kontext</span>
+          </div>
+        ) : genMode ? (
           <div className="model-control" title="Image model">
             <span aria-hidden>🎨</span>
             <select value={gen.model} onChange={(e) => onModelChange(e.target.value)}>

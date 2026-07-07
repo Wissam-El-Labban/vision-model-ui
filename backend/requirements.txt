@@ -17,3 +17,4 @@ huggingface_hub==0.25.2
 accelerate==1.0.1
 safetensors>=0.4
 pillow>=10.0.0
+websocket-client==1.8.0

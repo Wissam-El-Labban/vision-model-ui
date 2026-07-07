@@ -22,7 +22,7 @@ import {
 } from "./api";
 import { fileToResizedDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
 import { trimHistory } from "./context";
-import type { ChatMessage, ChatSummary, GenSettings } from "./types";
+import type { ChatMessage, ChatSummary, GenSettings, GenOp } from "./types";
 
 const DEFAULT_URL = "http://localhost:11434";
 
@@ -47,10 +47,14 @@ export default function App() {
   // generate; `sdInfo` reports availability + downloaded models; `gen` holds the
   // tunable settings.
   const [genMode, setGenMode] = useState(false);
+  // Which generate workflow: create (txt2img/img2img), edit (instruction), or
+  // compose (blend multiple reference images).
+  const [genOp, setGenOp] = useState<GenOp>("create");
   const [sdInfo, setSdInfo] = useState<SdInfo>({
     available: false,
     device: "cpu",
     models: [],
+    flux: false,
   });
   const [gen, setGen] = useState<GenSettings>({
     model: "",
@@ -58,10 +62,28 @@ export default function App() {
     steps: 25,
     guidance: 7.5,
     strength: 0.6,
+    enhance: true,
     width: 512,
     height: 512,
     seed: "",
   });
+
+  // Switching workflow retunes the shared step/guidance settings: create (SD)
+  // wants ~25 steps + CFG 7.5 (turbo is its own preset via the model dropdown);
+  // edit/compose (FLUX Kontext) want ~20 steps + its low ~2.5 guidance scale.
+  const changeOp = useCallback(
+    (op: GenOp) => {
+      setGenOp(op);
+      setGen((g) => {
+        if (op === "create") {
+          const turbo = sdInfo.models.find((m) => m.id === g.model)?.turbo;
+          return { ...g, steps: turbo ? 2 : 25, guidance: turbo ? 0 : 7.5 };
+        }
+        return { ...g, steps: 20, guidance: 2.5 }; // FLUX Kontext
+      });
+    },
+    [sdInfo.models]
+  );
 
   const [pinnedImages, setPinnedImages] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -484,29 +506,49 @@ export default function App() {
   );
 
   const generateImage = useCallback(
-    async (prompt: string, images: string[]) => {
-      if (!gen.model) {
+    async (prompt: string, op: GenOp, images: string[]) => {
+      // create runs on the selected SD model; edit/compose run on FLUX Kontext.
+      const isFlux = op === "edit" || op === "compose";
+      const modelId = isFlux ? "FLUX Kontext" : gen.model;
+      if (!isFlux && !gen.model) {
         setError("No image model available.");
+        return;
+      }
+      if (isFlux && !sdInfo.flux) {
+        setError("FLUX Kontext (edit/combine) isn't installed on this machine.");
         return;
       }
       setError(null);
       const chatId = currentChatId;
       const isFirstExchange = messages.length === 0;
-      const submode = images.length > 0 ? "img2img" : "txt2img";
-      const initUrl = submode === "img2img" ? images[0] : null;
+
+      // compose blends every reference image; create/edit use one source image
+      // and (for create) infer txt2img vs img2img from its presence.
+      const isCompose = op === "compose";
+      const initUrl = isCompose ? null : images[0] ?? null;
+      const refUrls = isCompose ? images : [];
+      const mode =
+        op === "edit"
+          ? "edit"
+          : isCompose
+            ? "compose"
+            : initUrl
+              ? "img2img"
+              : "txt2img";
+      const shownImages = isCompose ? refUrls : initUrl ? [initUrl] : undefined;
 
       // Show the prompt as a user turn, then an assistant placeholder we fill
       // with progress text and finally the generated image.
       const userMsg: ChatMessage = {
         role: "user",
         content: prompt,
-        images: initUrl ? [initUrl] : undefined,
-        model: gen.model,
+        images: shownImages,
+        model: modelId,
       };
       setMessages((prev) => [
         ...prev,
         userMsg,
-        { role: "assistant", content: "🎨 Preparing…", model: gen.model },
+        { role: "assistant", content: "🎨 Preparing…", model: modelId },
       ]);
       setStreaming(true);
 
@@ -523,16 +565,19 @@ export default function App() {
       let resultDataUrl: string | null = null;
       try {
         const initHash = initUrl ? (await ensureHashes([initUrl]))[0] : null;
+        const refHashes = refUrls.length ? await ensureHashes(refUrls) : [];
         await generate(
           {
-            mode: submode,
-            model: gen.model,
+            mode,
+            model: modelId,
             prompt,
             negative_prompt: gen.negativePrompt,
             init_image_hash: initHash,
+            ref_image_hashes: refHashes,
             steps: gen.steps,
             guidance: gen.guidance,
             strength: gen.strength,
+            enhance: gen.enhance,
             width: gen.width,
             height: gen.height,
             seed: gen.seed ? parseInt(gen.seed, 10) : null,
@@ -573,7 +618,7 @@ export default function App() {
         if (resultHash) {
           try {
             await putChat(chatId, {
-              model: model || gen.model,
+              model: model || modelId,
               system_prompt: systemPrompt,
               pinned_hashes: await ensureHashes(pinnedImages),
               system_image_hash: systemImage
@@ -584,13 +629,17 @@ export default function App() {
             await appendMessage(chatId, {
               role: "user",
               content: prompt,
-              model: gen.model,
-              image_hashes: initUrl ? await ensureHashes([initUrl]) : [],
+              model: modelId,
+              image_hashes: isCompose
+                ? await ensureHashes(refUrls)
+                : initUrl
+                  ? await ensureHashes([initUrl])
+                  : [],
             });
             await appendMessage(chatId, {
               role: "assistant",
               content: "",
-              model: gen.model,
+              model: modelId,
               image_hashes: [resultHash],
             });
             if (isFirstExchange && model) {
@@ -606,6 +655,7 @@ export default function App() {
     },
     [
       gen,
+      sdInfo.flux,
       model,
       ollamaUrl,
       systemPrompt,
@@ -659,12 +709,26 @@ export default function App() {
     const trimmed = composerText.trim();
     if (genMode) {
       if (!trimmed) return; // a prompt is required to generate
-      // img2img source: the attached image, else the first pinned-panel image.
-      // Only one image is used (img2img can't merge several).
-      const genImages = composerImages.length
-        ? composerImages.slice(0, 1)
-        : pinnedImages.slice(0, 1);
-      generateImage(trimmed, genImages);
+      // Source images come from the message attachments, else the pinned panel.
+      const attached = composerImages.length ? composerImages : pinnedImages;
+      if (genOp === "compose") {
+        // Blend every available reference image (needs at least one).
+        if (attached.length === 0) {
+          setError("Combine needs at least one reference image (attach or pin some).");
+          return;
+        }
+        generateImage(trimmed, "compose", attached);
+      } else if (genOp === "edit") {
+        // Instruction edit works on one source image.
+        if (attached.length === 0) {
+          setError("Edit needs a source image to change (attach or pin one).");
+          return;
+        }
+        generateImage(trimmed, "edit", attached.slice(0, 1));
+      } else {
+        // create: txt2img, or img2img from a single source image.
+        generateImage(trimmed, "create", attached.slice(0, 1));
+      }
     } else {
       if (!trimmed && composerImages.length === 0) return;
       send(trimmed, composerImages);
@@ -736,10 +800,14 @@ export default function App() {
             setSystemImage={setSystemImage}
             genMode={genMode}
             setGenMode={setGenMode}
+            genOp={genOp}
+            setGenOp={changeOp}
             sdAvailable={sdInfo.available}
+            fluxAvailable={sdInfo.flux}
             sdModels={sdInfo.models}
             gen={gen}
             setGen={setGen}
+            pinnedCount={pinnedImages.length}
             pinnedInit={pinnedImages[0] ?? null}
             onModelPulled={() => {
               getSdInfo().then(setSdInfo).catch(() => {});
