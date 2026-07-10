@@ -429,10 +429,11 @@ export default function Composer({
                         ? "QuantStack/FLUX.1-Kontext-dev-GGUF"
                         : "city96/FLUX.1-dev-gguf"}</code>), or{" "}
                       <code>owner/repo:file</code> for a specific <code>.gguf</code>/
-                      <code>.safetensors</code>. A bare repo picks the highest quant that
-                      fits this GPU (Q8_0). Models with <code>kontext</code> in the name
-                      serve Edit/Combine; the rest serve Create. Downloaded once, then
-                      fully offline.
+                      <code>.safetensors</code>. A bare repo picks the highest quant
+                      (Q8_0), or the largest checkpoint if the repo ships no GGUF;
+                      unquantized models load in fp8 to fit this GPU. Models with{" "}
+                      <code>kontext</code> in the name serve Edit/Combine; the rest serve
+                      Create. Downloaded once, then fully offline.
                     </p>
                   </div>
                 )}

@@ -288,7 +288,13 @@ def _unet_node(unet: str) -> dict:
     safetensors diffusion checkpoint (ComfyUI's built-in UNETLoader)."""
     if unet.lower().endswith(".gguf"):
         return {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": unet}}
-    return {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}}
+    # An unquantized FLUX transformer is ~23.8 GB in bf16, which won't fit this 24 GB
+    # card alongside the text encoders. fp8 is native on sm_89, so cast the weights on
+    # load rather than refusing the model.
+    p = UNET_DIR / unet
+    big = p.exists() and p.stat().st_size > 16e9
+    dtype = "fp8_e4m3fn" if big else "default"
+    return {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": dtype}}
 
 
 def _loaders(unet: str) -> dict:
@@ -621,41 +627,140 @@ def _parse_repo(spec: str) -> tuple[str, str]:
     return spec, filename
 
 
-# Runs in a child process (network allowed) so the serving process stays offline.
-# argv: repo, filename ("" = auto-pick a UNet), dest_dir. Downloads straight into
-# the UNet dir (no HF-cache copy) and streams coarse progress on stdout.
-_DOWNLOAD_UNET = r"""
-import os, sys, time, urllib.request
+# Companion files a FLUX repo ships next to the transformer — adapters, the VAE, the
+# text encoders. They're the same extension as the UNet, so name is the only signal.
+_AUX_RE = re.compile(
+    r"lora|vae|\bae\b|text_encoder|tokenizer|clip|t5|controlnet|embed|encoder|decoder",
+    re.I,
+)
+# Task-specific FLUX variants. They're real transformers, but they condition on extra
+# inputs (a mask, a control image) that our graphs don't feed, so they lose to a base
+# model of the same size — a repo shipping both means the base one is what was wanted.
+_VARIANT_RE = re.compile(r"fill|canny|depth|redux|inpaint|outpaint", re.I)
+
+
+def _pick_unet(files: list[dict], repo: str) -> str:
+    """Choose the transformer from a repo's tensor files (each: name, size).
+
+    Auto-pick has nothing to go on but names and sizes, so: drop the companion files,
+    drop shards (UNETLoader takes a single file), then prefer a GGUF — it's the cheaper
+    tier — and otherwise take the largest checkpoint, which in a FLUX repo is always
+    the transformer. Picking by list order instead is what made an unquantized repo
+    resolve to its alphabetically-first file, `ae.safetensors`.
+    """
+    if not files:
+        raise ValueError(f"No .gguf or .safetensors files found in {repo}.")
+    real = [f for f in files if not _AUX_RE.search(f["name"])]
+    cand = [f for f in real if "-of-" not in f["name"].lower()]
+    if not cand:
+        if real:
+            raise ValueError(
+                f"{repo} only ships a sharded checkpoint, which ComfyUI can't load. "
+                "It needs a single-file .gguf or .safetensors UNet."
+            )
+        listed = ", ".join(sorted(os.path.basename(f["name"]) for f in files)[:6])
+        raise ValueError(
+            f"No UNet found in {repo} — it only holds companion files ({listed}). "
+            "Pass owner/repo:file to name a UNet yourself."
+        )
+    # Sorting by name first makes `max` break size ties deterministically.
+    cand.sort(key=lambda f: f["name"])
+    cand = [f for f in cand if not _VARIANT_RE.search(f["name"])] or cand
+    ggufs = [f for f in cand if f["name"].lower().endswith(".gguf")]
+    if ggufs:
+        for quant in ("Q8_0", "Q6_K", "Q4_K"):
+            hit = next((f for f in ggufs if quant in f["name"]), None)
+            if hit:
+                return hit["name"]
+        return max(ggufs, key=lambda f: f["size"])["name"]
+    return max(cand, key=lambda f: f["size"])["name"]
+
+
+# A FLUX transformer names its blocks `double_blocks`/`single_blocks` (original layout)
+# or `transformer_blocks` (diffusers). A LoRA names its blocks the same way and only
+# differs in the adapter tensors hung off them — and every naming convention in the
+# wild (`lora_A`, `lora_down`, `proj_lora1.down`, `lora_unet_…`) spells out "lora",
+# while no transformer tensor does. So test for that first, before the block names.
+_UNET_KEYS = ("double_blocks.", "single_blocks.", "transformer_blocks.")
+# An all-in-one checkpoint bundles the text encoders and VAE alongside the transformer.
+# It also carries the block names above, so look for the bundled parts first.
+_BUNDLE_KEYS = ("text_encoders.", "conditioner.", "vae.", "first_stage_model.")
+
+
+def _looks_like_unet(keys: list[str]) -> bool:
+    return any(m in k for k in keys for m in _UNET_KEYS)
+
+
+def _reject_reason(keys: list[str]) -> str | None:
+    """Why this safetensors checkpoint can't serve as a UNet, or None if it can.
+
+    An unrecognized layout is allowed through: this catches the known-wrong files a
+    repo might hand us, it isn't a whitelist of blessed architectures.
+    """
+    lowered = [k.lower() for k in keys]
+    if any("lora" in k for k in lowered):
+        return "it's a LoRA adapter, not a full UNet"
+    if any(k.startswith(_BUNDLE_KEYS) for k in lowered):
+        return ("it bundles the text encoders and VAE, and this runtime loads a bare "
+                "diffusion model — look for one under split_files/diffusion_models/")
+    if _looks_like_unet(keys):
+        return None
+    if any(k.startswith(("encoder.", "decoder.")) for k in lowered):
+        return "it's a VAE, not a UNet"
+    return None
+
+
+# Runs in a child process (network allowed) so the serving process stays offline. The
+# child only does I/O — probe (list files + sizes), inspect (read a safetensors header),
+# fetch (stream into the UNet dir, no HF-cache copy) — so the rules for picking and
+# validating a UNet stay in the parent, offline and testable. Progress goes to stdout.
+_HF_CHILD = r'''
+import json, os, struct, sys, time, urllib.request
 from urllib.error import HTTPError, URLError
+
 EXTS = (".gguf", ".safetensors", ".sft")
-repo, filename, dest_dir = sys.argv[1], sys.argv[2], sys.argv[3]
-try:
-    if not filename:
-        from huggingface_hub import HfApi
-        files = [f for f in HfApi().list_repo_files(repo) if f.lower().endswith(EXTS)]
-        if not files:
-            print("ERROR: no .gguf or .safetensors UNet files found in " + repo, flush=True)
-            sys.exit(1)
-        ggufs = [f for f in files if f.lower().endswith(".gguf")]
-        # Prefer a GGUF (fits this GPU); pick the highest quant this 24 GB card can
-        # hold. Otherwise fall back to a top-level safetensors, skipping obvious
-        # multi-file shards.
-        others = [f for f in files if not f.lower().endswith(".gguf")
-                  and "/" not in f and "-of-" not in f.lower()] or \
-                 [f for f in files if not f.lower().endswith(".gguf")]
-        filename = (next((f for f in ggufs if "Q8_0" in f), None)
-                    or next((f for f in ggufs if "Q6_K" in f), None)
-                    or next((f for f in ggufs if "Q4_K" in f), None)
-                    or (ggufs[0] if ggufs else None)
-                    or others[0])
+MAX_HEADER = 64 << 20  # a safetensors header is KBs; larger means it isn't one
+TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or ""
+
+def _url(repo, filename):
+    return "https://huggingface.co/%s/resolve/main/%s?download=true" % (repo, filename)
+
+def _open(url, headers=None):
+    headers = dict(headers or {})
+    if TOKEN:  # gated repos serve weights only to an accepted license
+        headers["Authorization"] = "Bearer " + TOKEN
+    return urllib.request.urlopen(urllib.request.Request(url, headers=headers))
+
+def _ranged(url, first, last):
+    # Refuse a server that ignores Range and would hand back the whole multi-GB file.
+    with _open(url, {"Range": "bytes=%d-%d" % (first, last)}) as r:
+        if r.status != 206:
+            raise RuntimeError("huggingface.co ignored a range request")
+        return r.read(last - first + 1)
+
+def probe(repo):
+    from huggingface_hub import HfApi
+    # files_metadata gives sizes; list_repo_files doesn't.
+    info = HfApi().model_info(repo, files_metadata=True)
+    print(json.dumps([{"name": s.rfilename, "size": s.size or 0} for s in info.siblings
+                      if s.rfilename.lower().endswith(EXTS)]), flush=True)
+
+def inspect(repo, filename):
+    url = _url(repo, filename)
+    n = struct.unpack("<Q", _ranged(url, 0, 7))[0]
+    if n > MAX_HEADER:
+        raise RuntimeError("%s has no readable safetensors header" % filename)
+    header = json.loads(_ranged(url, 8, 8 + n - 1))
+    print(json.dumps([k for k in header if k != "__metadata__"]), flush=True)
+
+def fetch(repo, filename, dest_dir):
     base = os.path.basename(filename)
     out = os.path.join(dest_dir, base)
     if os.path.exists(out):
-        print("ERROR: a model named " + base + " already exists.", flush=True); sys.exit(1)
-    url = "https://huggingface.co/%s/resolve/main/%s?download=true" % (repo, filename)
+        raise RuntimeError("a model named %s already exists." % base)
     print("Downloading %s from %s…" % (base, repo), flush=True)
     tmp = out + ".part"
-    with urllib.request.urlopen(url) as r:
+    with _open(_url(repo, filename)) as r:
         total = int(r.headers.get("Content-Length", 0))
         done = last = 0
         with open(tmp, "wb") as f:
@@ -673,25 +778,32 @@ try:
                     last = time.time()
     os.replace(tmp, out)
     print("DONE " + base, flush=True)
-except (HTTPError, URLError) as e:
-    print("ERROR: could not fetch from %s (%s)" % (repo, e), flush=True); sys.exit(1)
-"""
+
+try:
+    {"probe": probe, "inspect": inspect, "fetch": fetch}[sys.argv[1]](*sys.argv[2:])
+except HTTPError as e:
+    # A gated repo (FLUX.1-dev among them) lists its files to anyone but serves the
+    # weights only to an accepted license, so this is the common failure, not a typo.
+    if e.code in (401, 403):
+        print("ERROR: %s is gated — accept its license on huggingface.co and set "
+              "HF_TOKEN, or use an ungated mirror." % sys.argv[2], flush=True)
+    else:
+        print("ERROR: huggingface.co returned %s for %s" % (e.code, sys.argv[2]), flush=True)
+    sys.exit(1)
+except URLError as e:
+    print("ERROR: could not reach huggingface.co (%s)" % e, flush=True); sys.exit(1)
+except Exception as e:
+    print("ERROR: %s" % e, flush=True); sys.exit(1)
+'''
 
 
-def pull_unet(repo: str, on_status=None) -> None:
-    """Download an extra FLUX UNet from a HuggingFace repo (opt-in, streams status).
+def _run_child(args: list[str], on_status=None) -> list[str]:
+    """Run one `_HF_CHILD` mode, streaming its stdout, and return the lines it printed.
 
-    The fetch runs in a subprocess with the offline flags dropped so the serving
-    process itself never gains network access.
+    The offline flags are dropped for the child alone, so the serving process itself
+    never gains network access.
     """
     import sys  # PLC0415
-
-    repo_id, filename = _parse_repo(repo)
-    if not available():
-        raise RuntimeError("FLUX runtime isn't installed.")
-    UNET_DIR.mkdir(parents=True, exist_ok=True)
-    if on_status:
-        on_status(f"Resolving {repo_id}…")
 
     env = {**os.environ}
     env.pop("HF_HUB_OFFLINE", None)
@@ -699,9 +811,10 @@ def pull_unet(repo: str, on_status=None) -> None:
     env["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
     proc = subprocess.Popen(
-        [sys.executable, "-c", _DOWNLOAD_UNET, repo_id, filename, str(UNET_DIR)],
+        [sys.executable, "-c", _HF_CHILD, *args],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
     )
+    lines: list[str] = []
     buf = b""
     last = 0.0
     err = None
@@ -714,12 +827,55 @@ def pull_unet(repo: str, on_status=None) -> None:
             buf = b""
             if line.startswith("ERROR:"):
                 err = line[6:].strip()
-            elif line and on_status and (time.time() - last) > 0.4:
-                on_status(line)
-                last = time.time()
+            elif line:
+                lines.append(line)
+                if on_status and (time.time() - last) > 0.4:
+                    on_status(line)
+                    last = time.time()
         else:
             buf += ch
     if proc.wait() != 0 or err:
         raise RuntimeError(err or "Download failed. Check the repo id and your connection.")
-    if on_status:
-        on_status("Download complete.")
+    return lines
+
+
+def _json_line(lines: list[str]) -> list:
+    """The child's JSON payload, ignoring any warning HuggingFace wrote to stderr."""
+    for line in reversed(lines):
+        if line.startswith("["):
+            return json.loads(line)
+    raise RuntimeError("HuggingFace returned nothing usable. Check the repo id.")
+
+
+def pull_unet(repo: str, on_status=None) -> None:
+    """Download an extra FLUX UNet from a HuggingFace repo (opt-in, streams status).
+
+    A bare `owner/repo` auto-picks the transformer; `owner/repo:file` names it outright.
+    Either way a safetensors checkpoint is checked against its header before the bytes
+    are spent, so a LoRA or VAE can't land in the UNet dir and be loaded as a model.
+    """
+    repo_id, filename = _parse_repo(repo)
+    if not available():
+        raise RuntimeError("FLUX runtime isn't installed.")
+    UNET_DIR.mkdir(parents=True, exist_ok=True)
+    say = on_status or (lambda _msg: None)
+
+    say(f"Resolving {repo_id}…")
+    if not filename:
+        filename = _pick_unet(_json_line(_run_child(["probe", repo_id])), repo_id)
+        say(f"Selected {os.path.basename(filename)}.")
+
+    if filename.lower().endswith((".safetensors", ".sft")):
+        say(f"Checking {os.path.basename(filename)}…")
+        keys = _json_line(_run_child(["inspect", repo_id, filename]))
+        reason = _reject_reason(keys)
+        if reason:
+            raise RuntimeError(
+                f"{os.path.basename(filename)} can't be used — {reason}. "
+                "Pass owner/repo:file to name the UNet yourself."
+            )
+        if not _looks_like_unet(keys):
+            say(f"{os.path.basename(filename)} doesn't look like a FLUX UNet — loading anyway.")
+
+    _run_child(["fetch", repo_id, filename, str(UNET_DIR)], say)
+    say("Download complete.")
