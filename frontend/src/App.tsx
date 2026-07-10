@@ -510,11 +510,12 @@ export default function App() {
       const chatId = currentChatId;
       const isFirstExchange = messages.length === 0;
 
-      // compose blends every reference image; create/edit use one source image
-      // and (for create) infer txt2img vs img2img from its presence.
+      // compose blends every reference image. edit takes the first image as the
+      // scene being changed and the rest as subject references. create uses one
+      // source image, and infers txt2img vs img2img from its presence.
       const isCompose = op === "compose";
       const initUrl = isCompose ? null : images[0] ?? null;
-      const refUrls = isCompose ? images : [];
+      const refUrls = isCompose ? images : op === "edit" ? images.slice(1) : [];
       const mode =
         op === "edit"
           ? "edit"
@@ -705,12 +706,13 @@ export default function App() {
         }
         generateImage(trimmed, "compose", attached);
       } else if (genOp === "edit") {
-        // Instruction edit works on one source image.
+        // The first image is the one being edited; any others are references the
+        // instruction can pull subjects from ("add the man from the second photo").
         if (attached.length === 0) {
           setError("Edit needs a source image to change (attach or pin one).");
           return;
         }
-        generateImage(trimmed, "edit", attached.slice(0, 1));
+        generateImage(trimmed, "edit", attached);
       } else {
         // create: txt2img, or img2img from a single source image.
         generateImage(trimmed, "create", attached.slice(0, 1));

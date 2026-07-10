@@ -270,7 +270,9 @@ def generate(req: GenerateRequest):
                 if req.mode == "edit":
                     if init_image is None:
                         raise ValueError("Edit needs a source image.")
-                    image = fx.edit(init_image, req.prompt, **common)
+                    # Extra images are references the instruction can draw subjects
+                    # from; init_image stays the thing being edited.
+                    image = fx.edit(init_image, req.prompt, refs=ref_images, **common)
                 elif req.mode == "compose":
                     if not ref_images:
                         raise ValueError("Combine needs at least one reference image.")

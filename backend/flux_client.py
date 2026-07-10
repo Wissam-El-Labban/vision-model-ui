@@ -78,9 +78,16 @@ DEFAULT_STEPS = 20
 # Guidance is mode-specific. Kontext follows an instruction at ~2.5; dev needs a
 # higher ~3.5 to bind a text-only prompt. Feeding either the other's value (or a
 # stray SD-scale 7.5 from shared settings) blows out the image.
+#
+# Do not raise KONTEXT_GUIDANCE to "make edits stronger" — it does the opposite.
+# At 3.5 the model clings to the reference image and silently ignores the
+# instruction, returning the source unchanged (measured on a two-reference edit).
 KONTEXT_GUIDANCE = 2.5
 CREATE_GUIDANCE = 3.5
 GUIDANCE_MIN, GUIDANCE_MAX = 0.5, 10.0
+
+# How the model lays out multiple reference images. See `_conditioning`.
+REF_METHOD = "offset"
 
 # FLUX responds to natural photographic language, not SD 1.5's comma-separated
 # quality tags — a tag salad actively hurts it. Applied when the caller opts in.
@@ -127,6 +134,25 @@ def _dim(v, default: int = 1024) -> int:
         return default
     d = min(max(d, 256), 1536)
     return d - (d % 16)
+
+
+# The ~1 MP shapes Kontext was trained on. Mirrors ComfyUI's
+# PREFERRED_KONTEXT_RESOLUTIONS (comfy_extras/nodes_flux.py); we need them in
+# Python because compose sizes an EmptySD3LatentImage rather than snapping a real
+# image through FluxKontextImageScale.
+PREFERRED_KONTEXT_RESOLUTIONS = [
+    (672, 1568), (688, 1504), (720, 1456), (752, 1392), (800, 1328), (832, 1248),
+    (880, 1184), (944, 1104), (1024, 1024), (1104, 944), (1184, 880), (1248, 832),
+    (1328, 800), (1392, 752), (1456, 720), (1504, 688), (1568, 672),
+]
+
+
+def _kontext_resolution(pil) -> tuple[int, int]:
+    """Nearest Kontext resolution by aspect ratio — the same rule the scale node uses."""
+    w, h = pil.size
+    aspect = w / h if h else 1.0
+    _, bw, bh = min((abs(aspect - rw / rh), rw, rh) for rw, rh in PREFERRED_KONTEXT_RESOLUTIONS)
+    return bw, bh
 
 _proc: subprocess.Popen | None = None  # the ComfyUI child, if we started it
 
@@ -283,22 +309,34 @@ def _sampler(latent_src, steps, seed, denoise=1.0) -> dict:
                        "sampler_name": "euler", "scheduler": "simple", "denoise": denoise}}
 
 
-def _conditioning(prompt: str, guidance: float, ref_latent=None) -> dict:
+def _conditioning(prompt: str, guidance: float, ref_latents=()) -> dict:
     """Text conditioning shared by every graph. `guide` is what the sampler reads.
 
-    `ref_latent` splices in Kontext's ReferenceLatent node, which conditions on the
-    encoded source image so the edit preserves identity. Only Kontext UNets
-    understand it — leave it None for plain dev (create) graphs.
+    `ref_latents` chains one Kontext `ReferenceLatent` node per encoded reference
+    image. The node *appends* to the conditioning, and `Flux.extra_conds` forwards
+    the whole list, so the model sees each reference as its own token block with its
+    own RoPE offsets — the images stay distinct. Only Kontext UNets understand this;
+    pass nothing for plain dev (create) graphs.
     """
     g = {
         "pos": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}},
         "neg": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["clip", 0]}},
     }
     src = "pos"
-    if ref_latent is not None:
-        g["ref"] = {"class_type": "ReferenceLatent",
-                    "inputs": {"conditioning": ["pos", 0], "latent": list(ref_latent)}}
-        src = "ref"
+    for i, lat in enumerate(ref_latents):
+        node = f"ref{i}"
+        g[node] = {"class_type": "ReferenceLatent",
+                   "inputs": {"conditioning": [src, 0], "latent": list(lat)}}
+        src = node
+    # With several references the model needs to know how to lay them out. "offset"
+    # (also ComfyUI's default) packs each into its own region of a shared coordinate
+    # frame and preserved composition best in testing; "index" gives each its own
+    # RoPE index but makes the last subject dominate the frame. Pin it explicitly so
+    # a ComfyUI upgrade can't silently change the default under us.
+    if len(ref_latents) > 1:
+        g["refmethod"] = {"class_type": "FluxKontextMultiReferenceLatentMethod",
+                          "inputs": {"conditioning": [src, 0], "reference_latents_method": REF_METHOD}}
+        src = "refmethod"
     g["guide"] = {"class_type": "FluxGuidance",
                   "inputs": {"conditioning": [src, 0], "guidance": guidance}}
     return g
@@ -340,41 +378,50 @@ def _img2img_graph(image_name, prompt, strength, steps, guidance, seed, prefix, 
     return g
 
 
-def _edit_graph(image_name, prompt, steps, guidance, seed, prefix, unet):
-    """Instruction-edit a single image on a Kontext UNet: encode the source, feed it
-    back as a ReferenceLatent so identity survives, and fully denoise from it."""
+def _encode_image(g, name, key):
+    """LoadImage -> snap to a Kontext-native resolution -> VAEEncode. Returns the
+    latent output ref. Every reference goes through the resolution snap: it keeps
+    the token count (and VRAM) bounded and matches how Kontext was trained."""
+    g[f"{key}_img"] = {"class_type": "LoadImage", "inputs": {"image": name}}
+    g[f"{key}_scale"] = {"class_type": "FluxKontextImageScale", "inputs": {"image": [f"{key}_img", 0]}}
+    g[key] = {"class_type": "VAEEncode", "inputs": {"pixels": [f"{key}_scale", 0], "vae": ["vae", 0]}}
+    return (key, 0)
+
+
+def _edit_graph(scene_name, ref_names, prompt, steps, guidance, seed, prefix, unet):
+    """Instruction-edit `scene_name` on a Kontext UNet.
+
+    The scene is encoded once and used twice: as the latent being denoised, and as
+    the first ReferenceLatent (which is what preserves its identity and background).
+    Any `ref_names` are chained on as additional references — that's how a subject
+    from another photo gets carried into this one.
+    """
     g = _loaders(unet)
-    g["img"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
-    g["scale"] = {"class_type": "FluxKontextImageScale", "inputs": {"image": ["img", 0]}}
-    g["enc"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["scale", 0], "vae": ["vae", 0]}}
-    g.update(_conditioning(prompt, guidance, ref_latent=("enc", 0)))
-    g["sampler"] = _sampler(("enc", 0), steps, seed)
+    scene = _encode_image(g, scene_name, "enc")
+    refs = [scene] + [_encode_image(g, n, f"src{i}") for i, n in enumerate(ref_names)]
+    g.update(_conditioning(prompt, guidance, ref_latents=refs))
+    g["sampler"] = _sampler(scene, steps, seed)
     g.update(_tail(prefix))
     return g
 
 
-def _compose_graph(image_names, prompt, steps, guidance, seed, prefix, unet):
-    """Multi-image: stitch the inputs side-by-side into one canvas, then edit that
-    single image. FLUX Kontext *dev* is a single-image model — stacking a
-    ReferenceLatent per input just makes it echo the first image and ignore the
-    rest. ImageStitch puts every subject in one latent the model can actually fuse
-    (the community-standard multi-image recipe for Kontext dev)."""
+def _compose_graph(image_names, prompt, width, height, steps, guidance, seed, prefix, unet):
+    """Multi-image: build a new scene from every input, each kept as its own
+    reference image.
+
+    Earlier versions stitched the inputs side-by-side into one canvas. That is
+    strictly worse: it fuses everything into one coordinate frame, downscales each
+    subject, and leaves the model free to treat the result as a diptych (it did —
+    it edited only the left half). Chaining a ReferenceLatent per input keeps each
+    image in its own token block with its own position offsets, which is what
+    actually transfers a subject between photos.
+    """
     g = _loaders(unet)
-    # Load each input and join them left-to-right into a single image.
-    g["img0"] = {"class_type": "LoadImage", "inputs": {"image": image_names[0]}}
-    stitched = ("img0", 0)
-    for i, name in enumerate(image_names[1:], start=1):
-        g[f"img{i}"] = {"class_type": "LoadImage", "inputs": {"image": name}}
-        g[f"stitch{i}"] = {"class_type": "ImageStitch",
-                           "inputs": {"image1": list(stitched), "image2": [f"img{i}", 0],
-                                      "direction": "right", "match_image_size": True,
-                                      "spacing_width": 0, "spacing_color": "white"}}
-        stitched = (f"stitch{i}", 0)
-    # Scale the combined canvas to a Kontext-friendly resolution, then edit it.
-    g["scale"] = {"class_type": "FluxKontextImageScale", "inputs": {"image": list(stitched)}}
-    g["enc"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["scale", 0], "vae": ["vae", 0]}}
-    g.update(_conditioning(prompt, guidance, ref_latent=("enc", 0)))
-    g["sampler"] = _sampler(("enc", 0), steps, seed)
+    refs = [_encode_image(g, n, f"src{i}") for i, n in enumerate(image_names)]
+    g.update(_conditioning(prompt, guidance, ref_latents=refs))
+    g["latent"] = {"class_type": "EmptySD3LatentImage",
+                   "inputs": {"width": width, "height": height, "batch_size": 1}}
+    g["sampler"] = _sampler(("latent", 0), steps, seed)
     g.update(_tail(prefix))
     return g
 
@@ -455,13 +502,21 @@ def img2img(pil, prompt, strength=None, steps=None, guidance=None, seed=0,
     return _run(g, on_step=on_step, on_status=on_status)
 
 
-def edit(pil, prompt, steps=None, guidance=None, seed=0, model=None, on_step=None, on_status=None):
-    """Instruction-edit a single image ('make the cat eat the cauliflower')."""
+def edit(pil, prompt, refs=(), steps=None, guidance=None, seed=0, model=None,
+         on_step=None, on_status=None):
+    """Instruction-edit an image ('make the cat eat the cauliflower').
+
+    `refs` are optional extra images the instruction may draw subjects from, e.g.
+    'add the man from the reference photo'. `pil` is always the image being edited:
+    its composition and background are what survive.
+    """
     ensure_server(on_status=on_status)
     unet = _resolve_unet(model, ROLE_EDIT)
-    name = _upload_image(pil, f"edit_{uuid.uuid4().hex}.png")
-    g = _edit_graph(name, prompt or "", _steps(steps), _guidance(guidance, KONTEXT_GUIDANCE),
-                    int(seed), "flux_edit", unet)
+    tag = uuid.uuid4().hex
+    scene = _upload_image(pil, f"edit_{tag}.png")
+    ref_names = [_upload_image(p, f"editref{i}_{tag}.png") for i, p in enumerate(refs)]
+    g = _edit_graph(scene, ref_names, prompt or "", _steps(steps),
+                    _guidance(guidance, KONTEXT_GUIDANCE), int(seed), "flux_edit", unet)
     if on_status:
         on_status("editing with FLUX Kontext…")
     return _run(g, on_step=on_step, on_status=on_status)
@@ -473,9 +528,12 @@ def compose(pils, prompt, steps=None, guidance=None, seed=0, model=None, on_step
     if not pils:
         raise ValueError("compose requires at least one reference image")
     unet = _resolve_unet(model, ROLE_EDIT)
-    names = [_upload_image(p, f"ref{i}_{uuid.uuid4().hex}.png") for i, p in enumerate(pils)]
-    g = _compose_graph(names, prompt or "", _steps(steps), _guidance(guidance, KONTEXT_GUIDANCE),
-                       int(seed), "flux_compose", unet)
+    tag = uuid.uuid4().hex
+    names = [_upload_image(p, f"ref{i}_{tag}.png") for i, p in enumerate(pils)]
+    # The new scene takes its shape from the first reference.
+    width, height = _kontext_resolution(pils[0])
+    g = _compose_graph(names, prompt or "", width, height, _steps(steps),
+                       _guidance(guidance, KONTEXT_GUIDANCE), int(seed), "flux_compose", unet)
     if on_status:
         on_status("composing with FLUX Kontext…")
     return _run(g, on_step=on_step, on_status=on_status)

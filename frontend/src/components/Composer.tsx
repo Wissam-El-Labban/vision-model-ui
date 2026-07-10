@@ -137,6 +137,8 @@ export default function Composer({
   const initPreview = images.length > 0 ? images[0] : pinnedInit;
   // compose blends every attached image, else every pinned one.
   const composeCount = images.length > 0 ? images.length : pinnedCount;
+  // edit: everything after the first source image is a subject reference.
+  const editRefCount = Math.max((images.length > 0 ? images.length : pinnedCount) - 1, 0);
 
   // Close the system-prompt popover on any click outside it (parity with the
   // native model <select>, which closes itself).
@@ -243,10 +245,20 @@ export default function Composer({
           )}
           <span>
             {initPreview ? (
-              <>Editing this image ({initSource === "attached" ? "attached" : "from panel"}) — write an
-              instruction like <em>“make the cat eat the broccoli”</em>.</>
+              <>
+                Editing this image ({initSource === "attached" ? "attached" : "from panel"})
+                {editRefCount > 0 ? (
+                  <>, using the other {editRefCount} as reference{editRefCount > 1 ? "s" : ""} — e.g.{" "}
+                  <em>“add the man in the black suit from the reference photo, keeping everyone else
+                  unchanged”</em>.</>
+                ) : (
+                  <> — write an instruction like <em>“make the cat eat the broccoli”</em>. Attach more
+                  images to pull subjects from them.</>
+                )}
+              </>
             ) : (
-              <>Attach or pin <em>one</em> image to edit, then write an instruction.</>
+              <>Attach or pin an image to edit (the <em>first</em> one is the image that changes; any
+              others are references), then write an instruction.</>
             )}
           </span>
         </div>
