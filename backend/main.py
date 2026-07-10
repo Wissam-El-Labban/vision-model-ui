@@ -15,10 +15,10 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import images  # noqa: F401  (imported first: pins HF offline env)
 from . import db
 from . import flux_client as fx
 from . import ollama_client as oc
-from . import sd_client as sd
 
 app = FastAPI(title="Vision Model Chat")
 
@@ -86,21 +86,19 @@ class TitleRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
+    # Every mode runs on FLUX. There is no negative prompt: FLUX samples at cfg=1.0,
+    # where the negative branch has no effect.
     mode: str = "txt2img"  # txt2img | img2img | edit | compose
-    model: str | None = None
     prompt: str = ""
-    negative_prompt: str = ""
-    init_image_hash: str | None = None
-    ref_image_hashes: list[str] = []  # compose mode: IP-Adapter reference images
-    flux_model: str | None = None  # edit/compose: which FLUX UNet to use (None = default)
+    init_image_hash: str | None = None  # img2img / edit: the source image
+    ref_image_hashes: list[str] = []  # compose: reference images to fuse
+    flux_model: str | None = None  # which FLUX UNet (None = that mode's default)
     steps: int | None = None
     guidance: float | None = None
-    strength: float | None = None
-    image_guidance_scale: float | None = None  # edit mode: source fidelity
-    ip_adapter_scale: float | None = None  # compose mode: reference influence
-    enhance: bool = True  # wrap photoreal prompts in a quality template
-    width: int = 512
-    height: int = 512
+    strength: float | None = None  # img2img: how far to drift from the source
+    enhance: bool = True  # wrap create prompts in a photoreal template
+    width: int = 1024  # FLUX is trained at ~1 megapixel
+    height: int = 1024
     seed: int | None = None
     ollama_url: str = oc.DEFAULT_URL
 
@@ -163,62 +161,20 @@ def ps(ollama_url: str = oc.DEFAULT_URL):
 
 
 # --------------------------------------------------------------------------- #
-# Local image generation (diffusers, in-process)
+# Image generation (FLUX, via the ComfyUI sidecar)
 # --------------------------------------------------------------------------- #
-@app.get("/api/generate/models")
-def generate_models():
-    return {
-        "available": sd.available(),
-        "device": sd.device(),
-        "models": sd.list_models(),
-        "flux": fx.available(),  # FLUX Kontext (edit + compose) ready?
-    }
-
-
 @app.post("/api/generate/unload")
 def generate_unload():
-    sd.unload()
     fx.free()
     return {"ok": True}
 
 
-class SdPullRequest(BaseModel):
-    model: str
-
-
-@app.post("/api/generate/pull")
-def generate_pull(req: SdPullRequest):
-    """Explicitly download an image model's weights (opt-in, streams status)."""
-    if not sd.available():
-        raise HTTPException(status_code=503, detail="Image generation deps not installed.")
-
-    def gen():
-        events: queue.Queue = queue.Queue()
-
-        def worker():
-            try:
-                sd.pull(req.model, on_status=lambda m: events.put({"type": "status", "message": m}))
-                events.put({"type": "done"})
-            except Exception as exc:
-                events.put({"type": "error", "message": str(exc)})
-            finally:
-                events.put(None)
-
-        threading.Thread(target=worker, daemon=True).start()
-        while True:
-            item = events.get()
-            if item is None:
-                break
-            yield json.dumps(item) + "\n"
-
-    return StreamingResponse(gen(), media_type="application/x-ndjson")
-
-
 # --------------------------------------------------------------------------- #
-# FLUX Kontext UNet management (list / add from a HF repo / remove extras)
+# FLUX UNet management (list / add from a HF repo / remove extras)
 # --------------------------------------------------------------------------- #
 @app.get("/api/flux/models")
 def flux_models():
+    """Installed UNets, each tagged with the role (create | edit) it can serve."""
     return {"available": fx.available(), "models": fx.list_unets()}
 
 
@@ -230,7 +186,7 @@ class FluxPullRequest(BaseModel):
 def flux_pull(req: FluxPullRequest):
     """Download an extra FLUX UNet from a HuggingFace repo (opt-in, streams status)."""
     if not fx.available():
-        raise HTTPException(status_code=503, detail="FLUX Kontext isn't installed on this machine.")
+        raise HTTPException(status_code=503, detail="FLUX isn't installed on this machine.")
 
     def gen():
         events: queue.Queue = queue.Queue()
@@ -269,22 +225,15 @@ def flux_delete(name: str):
 def generate(req: GenerateRequest):
     """Run a local image generation, streaming progress then the final image.
 
-    create (txt2img/img2img) runs on the in-process SD stack; edit/compose run on
-    the FLUX Kontext sidecar. Either way the other GPU tenants (Ollama vision
-    model, and whichever image runtime isn't in use) are freed first, since the
-    GPU can't hold them at once. The synchronous call runs in a worker thread that
-    pushes events onto a queue the response generator drains.
+    Every mode runs on FLUX in the ComfyUI sidecar: create (txt2img/img2img) on
+    FLUX dev, edit/compose on FLUX Kontext. The other GPU tenant (the Ollama vision
+    model) is freed first, since the GPU can't hold both. The synchronous call runs
+    in a worker thread that pushes events onto a queue the response generator drains.
     """
-    is_flux = req.mode in ("edit", "compose")
-    if is_flux and not fx.available():
+    if not fx.available():
         raise HTTPException(
             status_code=503,
-            detail="FLUX Kontext (edit/compose) isn't installed on this machine.",
-        )
-    if not is_flux and not sd.available():
-        raise HTTPException(
-            status_code=503,
-            detail="Image generation deps (torch/diffusers) are not installed.",
+            detail="FLUX isn't installed on this machine. Run ./run.sh to fetch the weights.",
         )
 
     # Resolve stored image hashes to PIL objects (init image for img2img/edit,
@@ -314,41 +263,29 @@ def generate(req: GenerateRequest):
                 status_cb = lambda m: events.put({"type": "status", "message": m})
                 step_cb = lambda s, t: events.put({"type": "progress", "step": s, "total": t})
 
-                if is_flux:
-                    sd.unload()  # free the SD pipeline so FLUX has the GPU
-                    seed = req.seed if req.seed is not None else random.randint(0, 2**31 - 1)
-                    if req.mode == "edit":
-                        if init_image is None:
-                            raise ValueError("Edit needs a source image.")
-                        image = fx.edit(init_image, req.prompt, steps=req.steps,
-                                        guidance=req.guidance, seed=seed, model=req.flux_model,
-                                        on_step=step_cb, on_status=status_cb)
-                    else:  # compose
-                        if not ref_images:
-                            raise ValueError("Combine needs at least one reference image.")
-                        image = fx.compose(ref_images, req.prompt, steps=req.steps,
-                                           guidance=req.guidance, seed=seed, model=req.flux_model,
-                                           on_step=step_cb, on_status=status_cb)
-                else:
-                    fx.free()  # release FLUX's VRAM so the SD stack has the GPU
-                    params = {
-                        "mode": req.mode,
-                        "model": req.model,
-                        "prompt": req.prompt,
-                        "negative_prompt": req.negative_prompt,
-                        "enhance": req.enhance,
-                        "steps": req.steps,
-                        "guidance": req.guidance,
-                        "strength": req.strength,
-                        "width": req.width,
-                        "height": req.height,
-                        "seed": req.seed,
-                        "init_image": init_image,
-                    }
-                    image, seed = sd.generate(params, on_step=step_cb, on_status=status_cb)
+                seed = req.seed if req.seed is not None else random.randint(0, 2**31 - 1)
+                common = dict(steps=req.steps, guidance=req.guidance, seed=seed,
+                              model=req.flux_model, on_step=step_cb, on_status=status_cb)
 
-                full = sd.pil_to_data_url(image)
-                thumb = sd.pil_to_data_url(image, max_size=64)
+                if req.mode == "edit":
+                    if init_image is None:
+                        raise ValueError("Edit needs a source image.")
+                    image = fx.edit(init_image, req.prompt, **common)
+                elif req.mode == "compose":
+                    if not ref_images:
+                        raise ValueError("Combine needs at least one reference image.")
+                    image = fx.compose(ref_images, req.prompt, **common)
+                elif req.mode == "img2img":
+                    if init_image is None:
+                        raise ValueError("Image-to-image needs a source image.")
+                    image = fx.img2img(init_image, req.prompt, strength=req.strength,
+                                       enhance=req.enhance, **common)
+                else:  # txt2img
+                    image = fx.create(req.prompt, width=req.width, height=req.height,
+                                      enhance=req.enhance, **common)
+
+                full = images.pil_to_data_url(image)
+                thumb = images.pil_to_data_url(image, max_size=64)
                 h = db.save_image(full, thumb)
                 events.put(
                     {
@@ -459,7 +396,7 @@ def _unload_on_shutdown():
     except Exception:
         pass
     try:
-        sd.unload()
+        fx.free()
     except Exception:
         pass
 

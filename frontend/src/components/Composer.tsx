@@ -1,13 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fileToResizedDataUrl } from "../fileUtils";
 import type { GenSettings, GenOp } from "../types";
-import {
-  pullSdModel,
-  pullFluxModel,
-  deleteFluxModel,
-  type SdModel,
-  type FluxModel,
-} from "../api";
+import { pullFluxModel, deleteFluxModel, type FluxModel } from "../api";
 
 interface Props {
   text: string;
@@ -28,17 +22,15 @@ interface Props {
   setSystemPrompt: (v: string) => void;
   systemImage: string | null;
   setSystemImage: (v: string | null) => void;
-  // Image generation (diffusers).
+  // Image generation (FLUX).
   genMode: boolean;
   setGenMode: (v: boolean) => void;
   /** Which generate workflow (create / edit / compose). */
   genOp: GenOp;
   setGenOp: (v: GenOp) => void;
-  sdAvailable: boolean;
-  /** FLUX Kontext (edit + compose) installed on the backend. */
+  /** FLUX sidecar + weights installed on the backend. */
   fluxAvailable: boolean;
-  sdModels: SdModel[];
-  /** Installed FLUX UNets (edit/compose), default first. */
+  /** Installed FLUX UNets, defaults first. Filtered by role per mode. */
   fluxModels: FluxModel[];
   gen: GenSettings;
   setGen: (v: GenSettings) => void;
@@ -47,8 +39,6 @@ interface Props {
   /** First pinned-panel image, used as the img2img source when nothing is
    *  attached to the message. `null` when the panel is empty. */
   pinnedInit: string | null;
-  /** Refresh SD model info after a model is downloaded. */
-  onModelPulled: () => void;
   /** Refresh the FLUX model list after an add/remove. */
   onFluxModelsChanged: () => void;
 }
@@ -75,15 +65,12 @@ export default function Composer({
   setGenMode,
   genOp,
   setGenOp,
-  sdAvailable,
   fluxAvailable,
-  sdModels,
   fluxModels,
   gen,
   setGen,
   pinnedCount,
   pinnedInit,
-  onModelPulled,
   onFluxModelsChanged,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -91,29 +78,23 @@ export default function Composer({
   const settingsRef = useRef<HTMLDivElement>(null);
   const [sysOpen, setSysOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [dlStatus, setDlStatus] = useState<string | null>(null);
   const [fluxRepo, setFluxRepo] = useState("");
   const [fluxStatus, setFluxStatus] = useState<string | null>(null);
   const [fluxBusy, setFluxBusy] = useState(false);
-  const selectedModel = sdModels.find((m) => m.id === gen.model);
 
-  async function downloadModel() {
-    if (!selectedModel) return;
-    setDlStatus("Starting…");
-    try {
-      await pullSdModel(selectedModel.id, setDlStatus);
-      onModelPulled();
-      setDlStatus(null);
-    } catch (e) {
-      setDlStatus(`⚠️ ${(e as Error).message}`);
-    }
-  }
   const hasSystem = systemPrompt.trim().length > 0 || !!systemImage;
   const patchGen = (p: Partial<typeof gen>) => setGen({ ...gen, ...p });
 
-  // FLUX model picking + management. "" in gen.fluxModel means "the default",
-  // so the active selection resolves to the default model's filename.
-  const defaultFluxName = fluxModels.find((m) => m.default)?.name ?? "";
+  const isEdit = genOp === "edit";
+  const isCompose = genOp === "compose";
+  // create runs on a plain FLUX dev UNet; edit/compose need a Kontext UNet, which
+  // additionally conditions on the source image. The two sets are disjoint.
+  const role = isEdit || isCompose ? "edit" : "create";
+  const roleModels = fluxModels.filter((m) => m.role === role);
+
+  // "" in gen.fluxModel means "this mode's default", so the active selection
+  // resolves to the default model's filename within the current role.
+  const defaultFluxName = roleModels.find((m) => m.default)?.name ?? "";
   const activeFlux = gen.fluxModel || defaultFluxName;
   const prettyFlux = (name: string) => name.replace(/\.(gguf|safetensors|sft)$/i, "");
   const pickFlux = (m: FluxModel) => patchGen({ fluxModel: m.default ? "" : m.name });
@@ -149,19 +130,6 @@ export default function Composer({
       setFluxBusy(false);
     }
   }
-  // Switching model applies its preset: Turbo is a few-step, no-guidance model;
-  // standard SD wants ~25 steps and CFG ~7.5.
-  const onModelChange = (id: string) => {
-    const turbo = sdModels.find((m) => m.id === id)?.turbo;
-    setGen({
-      ...gen,
-      model: id,
-      steps: turbo ? 2 : 25,
-      guidance: turbo ? 0 : 7.5,
-    });
-  };
-  const isEdit = genOp === "edit";
-  const isCompose = genOp === "compose";
   // In create/edit the source is the attached image, else the first pinned-panel
   // image. create infers txt2img vs img2img from whether one is present.
   const initSource = images.length > 0 ? "attached" : pinnedInit ? "pinned" : null;
@@ -169,9 +137,6 @@ export default function Composer({
   const initPreview = images.length > 0 ? images[0] : pinnedInit;
   // compose blends every attached image, else every pinned one.
   const composeCount = images.length > 0 ? images.length : pinnedCount;
-  // create runs on a selected SD checkpoint; edit/compose run on FLUX Kontext
-  // (a fixed engine — no model dropdown).
-  const isFlux = isEdit || isCompose;
 
   // Close the system-prompt popover on any click outside it (parity with the
   // native model <select>, which closes itself).
@@ -206,7 +171,7 @@ export default function Composer({
 
   return (
     <div className="composer">
-      {sdAvailable && (
+      {fluxAvailable && (
         <div className="mode-toggle" role="tablist" aria-label="Composer mode">
           <button
             role="tab"
@@ -376,46 +341,25 @@ export default function Composer({
             {settingsOpen && (
               <div className="system-popover gen-popover">
                 <div className="popover-title">🎨 Generation settings</div>
-                {genOp === "create" && selectedModel && !selectedModel.downloaded && (
+                {!fluxAvailable && (
                   <div className="dl-box">
-                    <div className="dl-row">
-                      <span>
-                        <strong>{selectedModel.label}</strong> isn't downloaded
-                        {" "}(~{selectedModel.size_gb} GB, one-time).
-                      </span>
-                    </div>
-                    {dlStatus ? (
-                      <div className="dl-status">{dlStatus}</div>
-                    ) : (
-                      <button className="btn block" onClick={downloadModel}>
-                        ⬇ Download {selectedModel.label}
-                      </button>
-                    )}
                     <p className="hint muted">
-                      The only network call this app makes. After download,
-                      generation is fully offline.
+                      ⚠️ FLUX isn't installed on this machine, so image generation is
+                      unavailable. Run <code>./run.sh</code> to fetch the weights.
                     </p>
                   </div>
                 )}
-                {isFlux && !fluxAvailable && (
-                  <div className="dl-box">
-                    <p className="hint muted">
-                      ⚠️ FLUX Kontext isn't installed on this machine, so Edit and
-                      Combine are unavailable.
-                    </p>
-                  </div>
-                )}
-                {isFlux && (
-                  <p className="hint muted" style={{ marginTop: 0 }}>
-                    ✨ Powered by <strong>FLUX Kontext</strong> (local). High quality —
-                    expect a few minutes per image.
-                  </p>
-                )}
-                {isFlux && fluxAvailable && (
+                <p className="hint muted" style={{ marginTop: 0 }}>
+                  ✨ Powered by <strong>{role === "edit" ? "FLUX Kontext" : "FLUX.1-dev"}</strong>{" "}
+                  (local). High quality — expect about a minute per image.
+                </p>
+                {fluxAvailable && (
                   <div className="flux-models">
-                    <label className="lbl">FLUX models</label>
+                    <label className="lbl">
+                      {role === "edit" ? "FLUX Kontext models" : "FLUX create models"}
+                    </label>
                     <ul className="flux-model-list">
-                      {fluxModels.map((m) => (
+                      {roleModels.map((m) => (
                         <li key={m.name} className={activeFlux === m.name ? "active" : ""}>
                           <button
                             type="button"
@@ -469,38 +413,34 @@ export default function Composer({
                     {fluxStatus && <div className="dl-status">{fluxStatus}</div>}
                     <p className="hint muted">
                       Paste a HuggingFace FLUX repo (e.g.{" "}
-                      <code>QuantStack/FLUX.1-Kontext-dev-GGUF</code>), or{" "}
+                      <code>{role === "edit"
+                        ? "QuantStack/FLUX.1-Kontext-dev-GGUF"
+                        : "city96/FLUX.1-dev-gguf"}</code>), or{" "}
                       <code>owner/repo:file</code> for a specific <code>.gguf</code>/
-                      <code>.safetensors</code>. GGUF fits this GPU best; full safetensors
-                      are much larger. Downloaded once, then fully offline.
+                      <code>.safetensors</code>. A bare repo picks the highest quant that
+                      fits this GPU (Q8_0). Models with <code>kontext</code> in the name
+                      serve Edit/Combine; the rest serve Create. Downloaded once, then
+                      fully offline.
                     </p>
                   </div>
                 )}
-                <label className="lbl">Negative prompt</label>
-                <textarea
-                  className="block"
-                  rows={2}
-                  value={gen.negativePrompt}
-                  onChange={(e) => patchGen({ negativePrompt: e.target.value })}
-                  placeholder="What to avoid (optional)…"
-                />
                 <div className="gen-grid">
                   <label>Steps
-                    <input type="number" min={1} max={50} value={gen.steps}
+                    <input type="number" min={8} max={40} value={gen.steps}
                       onChange={(e) => patchGen({ steps: +e.target.value })} />
                   </label>
                   <label>Guidance
-                    <input type="number" min={0} max={20} step={0.5} value={gen.guidance}
+                    <input type="number" min={0.5} max={10} step={0.5} value={gen.guidance}
                       onChange={(e) => patchGen({ guidance: +e.target.value })} />
                   </label>
                   {genOp === "create" && (
                     <>
                       <label>Width
-                        <input type="number" min={256} max={1024} step={64} value={gen.width}
+                        <input type="number" min={256} max={1536} step={64} value={gen.width}
                           onChange={(e) => patchGen({ width: +e.target.value })} />
                       </label>
                       <label>Height
-                        <input type="number" min={256} max={1024} step={64} value={gen.height}
+                        <input type="number" min={256} max={1536} step={64} value={gen.height}
                           onChange={(e) => patchGen({ height: +e.target.value })} />
                       </label>
                       <label className={genSubmode === "img2img" ? "" : "muted-field"}>
@@ -517,19 +457,19 @@ export default function Composer({
                       onChange={(e) => patchGen({ seed: e.target.value.replace(/[^0-9]/g, "") })} />
                   </label>
                 </div>
-                {genOp === "create" && selectedModel?.photoreal && (
+                {genOp === "create" && (
                   <label className="enhance-row">
                     <input type="checkbox" checked={gen.enhance}
                       onChange={(e) => patchGen({ enhance: e.target.checked })} />
-                    Enhance photoreal prompt (adds quality tags)
+                    Enhance photoreal prompt (adds camera + lighting detail)
                   </label>
                 )}
                 <p className="hint muted">
-                  {isFlux
-                    ? "Guidance ~2.5 follows the instruction closely; lower it for looser, more creative edits."
+                  {role === "edit"
+                    ? "Guidance ~2.5 follows the instruction closely; raise it if the subject isn't changing enough."
                     : genSubmode === "img2img"
                       ? "Image-to-image: strength controls how far from the attached image."
-                      : "Text-to-image: attach an image above to switch to image-to-image."}
+                      : "Text-to-image: guidance ~3.5. Attach an image above to switch to image-to-image."}
                 </p>
               </div>
             )}
@@ -593,10 +533,10 @@ export default function Composer({
           </button>
         )}
 
-        {genMode && isFlux ? (
+        {genMode ? (
           <div className="model-control" title="FLUX model">
             <span aria-hidden>✨</span>
-            {fluxModels.length > 0 ? (
+            {roleModels.length > 0 ? (
               <select
                 value={activeFlux}
                 onChange={(e) =>
@@ -605,7 +545,7 @@ export default function Composer({
                   })
                 }
               >
-                {fluxModels.map((m) => (
+                {roleModels.map((m) => (
                   <option key={m.name} value={m.name}>
                     {prettyFlux(m.name)}
                     {m.default ? " (default)" : ""}
@@ -613,20 +553,10 @@ export default function Composer({
                 ))}
               </select>
             ) : (
-              <span className="flux-engine">FLUX Kontext</span>
+              <span className="flux-engine">
+                {role === "edit" ? "FLUX Kontext" : "FLUX.1-dev"}
+              </span>
             )}
-          </div>
-        ) : genMode ? (
-          <div className="model-control" title="Image model">
-            <span aria-hidden>🎨</span>
-            <select value={gen.model} onChange={(e) => onModelChange(e.target.value)}>
-              {sdModels.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                  {m.downloaded ? "" : " ⬇"}
-                </option>
-              ))}
-            </select>
           </div>
         ) : (
           <div className="model-control" title="Vision model">

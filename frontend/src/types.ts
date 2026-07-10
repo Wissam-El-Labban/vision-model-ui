@@ -16,18 +16,17 @@ export interface ChatMessage {
 /** Which image-generation workflow the composer is in. */
 export type GenOp = "create" | "edit" | "compose";
 
-/** User-tunable image-generation settings.
- *  create (txt2img/img2img) uses the SD fields; edit/compose (FLUX Kontext) use
- *  steps + guidance (guidance is Kontext's low ~2.5 scale in those modes). */
+/** User-tunable image-generation settings. Every mode runs on FLUX.
+ *  There is no negative prompt: FLUX samples at cfg=1.0, where the negative
+ *  branch has no effect. Guidance is mode-scaled — ~3.5 for create (FLUX dev),
+ *  ~2.5 for edit/compose (Kontext). */
 export interface GenSettings {
-  model: string;
-  /** Which FLUX UNet edit/compose run on. "" = the bundled default model. */
+  /** Which FLUX UNet the current mode runs on. "" = that mode's default. */
   fluxModel: string;
-  negativePrompt: string;
   steps: number;
   guidance: number;
   strength: number; // img2img: how far from the source image
-  enhance: boolean; // wrap photoreal prompts in a quality template
+  enhance: boolean; // wrap create prompts in a photoreal template
   width: number;
   height: number;
   seed: string; // blank = random; kept as string for the input field

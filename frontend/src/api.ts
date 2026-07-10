@@ -153,58 +153,15 @@ export async function pullModel(
 }
 
 // --------------------------------------------------------------------------- #
-// Local image generation (diffusers)
+// FLUX UNet management. Every mode runs on FLUX: `create` models serve
+// txt2img/img2img, `edit` models (Kontext) serve edit/compose.
 // --------------------------------------------------------------------------- #
-export interface SdModel {
-  id: string;
-  label: string;
-  downloaded: boolean;
-  turbo: boolean;
-  photoreal: boolean;
-  size_gb: number;
-}
+export type FluxRole = "create" | "edit";
 
-export interface SdInfo {
-  available: boolean;
-  device: string;
-  models: SdModel[];
-  flux: boolean; // FLUX Kontext (edit + compose) installed?
-}
-
-export async function getSdInfo(): Promise<SdInfo> {
-  const res = await fetch("/api/generate/models");
-  if (!res.ok) throw new Error(`sd models: ${res.status}`);
-  return res.json();
-}
-
-/** Explicitly download an image model (opt-in). Streams status lines. */
-export async function pullSdModel(
-  model: string,
-  onStatus: (message: string) => void
-): Promise<void> {
-  const res = await fetch("/api/generate/pull", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model }),
-  });
-  if (!res.ok) throw new Error(`sd pull: ${res.status}`);
-  await readLines(res, (line) => {
-    try {
-      const ev = JSON.parse(line);
-      if (ev.type === "status") onStatus(ev.message as string);
-      else if (ev.type === "error") throw new Error(ev.message);
-    } catch {
-      /* ignore keepalives */
-    }
-  });
-}
-
-// --------------------------------------------------------------------------- #
-// FLUX Kontext UNet management (edit/compose models)
-// --------------------------------------------------------------------------- #
 export interface FluxModel {
   name: string;
-  default: boolean; // the bundled model — can't be removed
+  role: FluxRole; // which modes this UNet can serve
+  default: boolean; // a bundled model — can't be removed
   size_gb: number;
 }
 
@@ -254,16 +211,14 @@ export async function deleteFluxModel(name: string): Promise<void> {
 
 export interface GenerateParams {
   mode: "txt2img" | "img2img" | "edit" | "compose";
-  model: string;
-  flux_model?: string | null; // edit/compose: which FLUX UNet (null = default)
+  flux_model?: string | null; // which FLUX UNet ("" / null = that mode's default)
   prompt: string;
-  negative_prompt: string;
-  init_image_hash?: string | null;
-  ref_image_hashes?: string[]; // compose: FLUX Kontext reference images
+  init_image_hash?: string | null; // img2img / edit: the source image
+  ref_image_hashes?: string[]; // compose: reference images to fuse
   steps?: number | null;
   guidance?: number | null;
-  strength?: number | null;
-  enhance?: boolean;
+  strength?: number | null; // img2img: how far to drift from the source
+  enhance?: boolean; // wrap create prompts in a photoreal template
   width: number;
   height: number;
   seed?: number | null;

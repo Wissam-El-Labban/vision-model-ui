@@ -12,14 +12,12 @@ import {
   getChat,
   getFluxModels,
   getModels,
-  getSdInfo,
   listChats,
   putChat,
   streamChat,
   uploadImages,
   urlToDataUrl,
   type FluxModel,
-  type SdInfo,
   type Usage,
 } from "./api";
 import { fileToResizedDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
@@ -45,54 +43,46 @@ export default function App() {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [systemImage, setSystemImage] = useState<string | null>(null);
 
-  // Image generation (diffusers). `genMode` flips the composer from analyze to
-  // generate; `sdInfo` reports availability + downloaded models; `gen` holds the
-  // tunable settings.
+  // Image generation (FLUX). `genMode` flips the composer from analyze to
+  // generate; `fluxAvailable` reports whether the sidecar + weights are present;
+  // `gen` holds the tunable settings.
   const [genMode, setGenMode] = useState(false);
   // Which generate workflow: create (txt2img/img2img), edit (instruction), or
   // compose (blend multiple reference images).
   const [genOp, setGenOp] = useState<GenOp>("create");
-  const [sdInfo, setSdInfo] = useState<SdInfo>({
-    available: false,
-    device: "cpu",
-    models: [],
-    flux: false,
-  });
+  const [fluxAvailable, setFluxAvailable] = useState(false);
   const [gen, setGen] = useState<GenSettings>({
-    model: "",
-    fluxModel: "", // "" = bundled default FLUX model
-    negativePrompt: "",
-    steps: 25,
-    guidance: 7.5,
+    fluxModel: "", // "" = the current mode's default FLUX model
+    steps: 20,
+    guidance: 3.5, // create (FLUX dev); edit/compose retune to 2.5
     strength: 0.6,
     enhance: true,
-    width: 512,
-    height: 512,
+    width: 1024, // FLUX is trained at ~1 megapixel
+    height: 1024,
     seed: "",
   });
-  // Installed FLUX UNets (default + any the user added). Refreshed after a
+  // Installed FLUX UNets (defaults + any the user added). Refreshed after a
   // download/removal so the composer's model picker stays in sync.
   const [fluxModels, setFluxModels] = useState<FluxModel[]>([]);
   const refreshFlux = useCallback(() => {
-    getFluxModels().then((r) => setFluxModels(r.models)).catch(() => {});
+    getFluxModels()
+      .then((r) => {
+        setFluxAvailable(r.available);
+        setFluxModels(r.models);
+      })
+      .catch(() => {
+        /* backend older / weights missing — generation stays hidden */
+      });
   }, []);
 
-  // Switching workflow retunes the shared step/guidance settings: create (SD)
-  // wants ~25 steps + CFG 7.5 (turbo is its own preset via the model dropdown);
-  // edit/compose (FLUX Kontext) want ~20 steps + its low ~2.5 guidance scale.
-  const changeOp = useCallback(
-    (op: GenOp) => {
-      setGenOp(op);
-      setGen((g) => {
-        if (op === "create") {
-          const turbo = sdInfo.models.find((m) => m.id === g.model)?.turbo;
-          return { ...g, steps: turbo ? 2 : 25, guidance: turbo ? 0 : 7.5 };
-        }
-        return { ...g, steps: 20, guidance: 2.5 }; // FLUX Kontext
-      });
-    },
-    [sdInfo.models]
-  );
+  // Switching workflow retunes guidance, which is mode-scaled: create runs FLUX
+  // dev (~3.5 to bind a text-only prompt), edit/compose run Kontext (~2.5 to
+  // follow an instruction). It also clears `fluxModel`, since the two modes draw
+  // from disjoint sets of UNets.
+  const changeOp = useCallback((op: GenOp) => {
+    setGenOp(op);
+    setGen((g) => ({ ...g, fluxModel: "", steps: 20, guidance: op === "create" ? 3.5 : 2.5 }));
+  }, []);
 
   const [pinnedImages, setPinnedImages] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -179,17 +169,9 @@ export default function App() {
     refreshChats();
   }, [refreshChats]);
 
-  // Probe the image-generation backend once; seed the default SD model.
+  // Probe the image-generation backend once.
   useEffect(() => {
-    getSdInfo()
-      .then((info) => {
-        setSdInfo(info);
-        setGen((g) => (g.model ? g : { ...g, model: info.models[0]?.id ?? "" }));
-        if (info.flux) refreshFlux();
-      })
-      .catch(() => {
-        /* deps not installed / backend older — generation stays hidden */
-      });
+    refreshFlux();
   }, [refreshFlux]);
 
   // Keep an existing chat's metadata (model / system prompt / pinned + system
@@ -517,15 +499,11 @@ export default function App() {
 
   const generateImage = useCallback(
     async (prompt: string, op: GenOp, images: string[]) => {
-      // create runs on the selected SD model; edit/compose run on FLUX Kontext.
-      const isFlux = op === "edit" || op === "compose";
-      const modelId = isFlux ? "FLUX Kontext" : gen.model;
-      if (!isFlux && !gen.model) {
-        setError("No image model available.");
-        return;
-      }
-      if (isFlux && !sdInfo.flux) {
-        setError("FLUX Kontext (edit/combine) isn't installed on this machine.");
+      // Every mode runs on FLUX: create on FLUX dev, edit/compose on Kontext.
+      const isKontext = op === "edit" || op === "compose";
+      const modelId = isKontext ? "FLUX Kontext" : "FLUX dev";
+      if (!fluxAvailable) {
+        setError("FLUX isn't installed on this machine. Run ./run.sh to fetch the weights.");
         return;
       }
       setError(null);
@@ -579,10 +557,8 @@ export default function App() {
         await generate(
           {
             mode,
-            model: modelId,
-            flux_model: isFlux ? gen.fluxModel || null : null,
+            flux_model: gen.fluxModel || null,
             prompt,
-            negative_prompt: gen.negativePrompt,
             init_image_hash: initHash,
             ref_image_hashes: refHashes,
             steps: gen.steps,
@@ -657,7 +633,6 @@ export default function App() {
               await generateTitle(chatId, model, ollamaUrl).catch(() => "");
             }
             await refreshChats();
-            await getSdInfo().then(setSdInfo).catch(() => {});
           } catch (err) {
             console.error("persist failed", err);
           }
@@ -666,7 +641,7 @@ export default function App() {
     },
     [
       gen,
-      sdInfo.flux,
+      fluxAvailable,
       model,
       ollamaUrl,
       systemPrompt,
@@ -813,17 +788,12 @@ export default function App() {
             setGenMode={setGenMode}
             genOp={genOp}
             setGenOp={changeOp}
-            sdAvailable={sdInfo.available}
-            fluxAvailable={sdInfo.flux}
-            sdModels={sdInfo.models}
+            fluxAvailable={fluxAvailable}
             fluxModels={fluxModels}
             gen={gen}
             setGen={setGen}
             pinnedCount={pinnedImages.length}
             pinnedInit={pinnedImages[0] ?? null}
-            onModelPulled={() => {
-              getSdInfo().then(setSdInfo).catch(() => {});
-            }}
             onFluxModelsChanged={refreshFlux}
           />
         </div>

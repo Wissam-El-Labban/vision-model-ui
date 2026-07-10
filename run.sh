@@ -117,15 +117,19 @@ npm run build
 popd > /dev/null
 echo -e "${GREEN}✓ Frontend built${NC}"
 
-# --- Image generation: FLUX Kontext (ComfyUI sidecar) ----------------------- #
-# "Create" (Stable Diffusion txt2img/img2img) rides on the backend venv above.
-# "Edit" and "Combine" run FLUX.1 Kontext inside its own ComfyUI runtime — a
-# separate venv + GGUF weights (~10 GB) — because Kontext-12B can't load in the
-# backend's torch 2.3 / diffusers 0.31 env. Everything below is idempotent and
-# stays local. Chat-only users can skip the heavy download: SKIP_FLUX=1 ./run.sh
+# --- Image generation: FLUX (ComfyUI sidecar) ------------------------------- #
+# ALL image generation runs here — the backend venv above holds no torch at all.
+# "Create" (txt2img/img2img) runs on FLUX.1-dev; "Edit" and "Combine" run on
+# FLUX.1 Kontext, which additionally conditions on the source image. Both are 12B
+# models needing torch >= 2.4, so they live in a separate venv with GGUF weights
+# (~30 GB). Everything below is idempotent and stays local. Chat-only users can
+# skip the heavy download: SKIP_FLUX=1 ./run.sh
+#
+# Q8_0 is the quality tier for a 24 GB card. To reclaim the ~9 GB of superseded
+# Q4 weights from an older install: PRUNE_OLD=1 ./run.sh
 echo ""
 echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}Setting up FLUX Kontext (image edit/combine)...${NC}"
+echo -e "${BLUE}Setting up FLUX (image generation)...${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
 
@@ -137,11 +141,20 @@ COMFY_COMMIT="51bf508a0b1bde9416a0c221b0f33f8325305229"
 GGUF_COMMIT="6ea2651e7df66d7585f6ffee804b20e92fb38b8a"
 
 # repo|file|models-subdir — all non-gated HuggingFace weights (no token needed).
+# FLUX itself is gated upstream; these community mirrors aren't.
 FLUX_MODELS=(
-    "QuantStack/FLUX.1-Kontext-dev-GGUF|flux1-kontext-dev-Q4_K_S.gguf|unet"
-    "city96/t5-v1_1-xxl-encoder-gguf|t5-v1_1-xxl-encoder-Q4_K_M.gguf|clip"
+    "city96/FLUX.1-dev-gguf|flux1-dev-Q8_0.gguf|unet"
+    "QuantStack/FLUX.1-Kontext-dev-GGUF|flux1-kontext-dev-Q8_0.gguf|unet"
+    "city96/t5-v1_1-xxl-encoder-gguf|t5-v1_1-xxl-encoder-Q8_0.gguf|clip"
     "comfyanonymous/flux_text_encoders|clip_l.safetensors|clip"
     "ffxvs/vae-flux|ae.safetensors|vae"
+)
+
+# Weights from the pre-Q8 (Tesla T4) layout. Superseded, never loaded — but they
+# are ~9 GB, so offer to reclaim rather than deleting behind the user's back.
+FLUX_OLD_MODELS=(
+    "unet/flux1-kontext-dev-Q4_K_S.gguf"
+    "clip/t5-v1_1-xxl-encoder-Q4_K_M.gguf"
 )
 
 # Mirror flux_client.available(): installed only if the venv, ComfyUI, and every
@@ -157,10 +170,20 @@ flux_installed() {
     return 0
 }
 
+# Reclaim the superseded Q4 weights (opt-in — this deletes files).
+if [ "${PRUNE_OLD:-0}" = "1" ]; then
+    for rel in "${FLUX_OLD_MODELS[@]}"; do
+        if [ -f "$COMFY_DIR/models/$rel" ]; then
+            echo -e "${YELLOW}Removing superseded weight: $rel${NC}"
+            rm -f "$COMFY_DIR/models/$rel"
+        fi
+    done
+fi
+
 if [ "${SKIP_FLUX:-0}" = "1" ]; then
-    echo -e "${YELLOW}SKIP_FLUX=1 — skipping FLUX setup (edit/combine will be unavailable; create still works).${NC}"
+    echo -e "${YELLOW}SKIP_FLUX=1 — skipping FLUX setup (image generation will be unavailable).${NC}"
 elif flux_installed; then
-    echo -e "${GREEN}✓ FLUX Kontext already installed${NC}"
+    echo -e "${GREEN}✓ FLUX already installed${NC}"
 else
     # 1. ComfyUI + the GGUF loader node, pinned to known-good commits.
     if [ ! -f "$COMFY_DIR/main.py" ]; then

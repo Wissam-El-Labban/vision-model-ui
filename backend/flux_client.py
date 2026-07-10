@@ -1,13 +1,21 @@
-"""FLUX.1 Kontext image editing / composition via a local ComfyUI sidecar.
+"""All image generation — create, edit, compose — via a local ComfyUI sidecar.
 
-Parallels `sd_client.py` and `ollama_client.py`: the FastAPI backend owns the
-model runtime and the browser never talks to it directly. FLUX Kontext is a 12B
-model that can't run in this backend's torch 2.3 / diffusers 0.31 environment, so
-it runs inside ComfyUI (its own venv, GGUF-quantized) which we drive over HTTP.
+Parallels `ollama_client.py`: the FastAPI backend owns the model runtime and the
+browser never talks to it directly. FLUX is a 12B model that needs torch >= 2.4,
+so it runs inside ComfyUI (its own venv, GGUF-quantized) which we drive over HTTP.
+The backend process itself holds no torch at all.
 
-ComfyUI is started on demand (first edit/compose) and left resident. GPU is shared
-with Ollama + the SD stack, so callers unload those first and can call `free()` to
-release FLUX's VRAM when switching back to chat / create.
+Two UNets share the runtime, because the architectures differ in what they
+condition on:
+  - **FLUX.1-dev** for `create` (txt2img / img2img). Pure text conditioning.
+  - **FLUX.1 Kontext** for `edit` / `compose`. Additionally takes a `ReferenceLatent`
+    of the source image, which is what makes it preserve identity while editing.
+Using one for the other's job produces bad output, so `_resolve_unet` keys on role.
+
+ComfyUI is started on demand and left resident. The GPU is shared with Ollama, so
+callers unload it first and can call `free()` to release FLUX's VRAM. Only one
+UNet fits alongside the text encoders at a time; ComfyUI evicts as needed when a
+graph names a different one.
 
 Everything is local: ComfyUI listens only on loopback and the weights were fetched
 once (see the one-time setup); generation makes no outbound calls.
@@ -33,34 +41,65 @@ COMFY_DIR = _RUNTIME / "ComfyUI"
 CVENV_PY = _RUNTIME / "cvenv" / "bin" / "python"
 COMFY_URL = "http://127.0.0.1:8188"
 
-# The UNet (the actual FLUX model) is swappable: DEFAULT_UNET ships with the
-# runtime and can't be removed, but users can add extra GGUF UNets from any
-# HuggingFace repo (see `pull_unet`) and pick which one edit/compose runs on. The
-# text encoders + VAE are shared across all of them.
-DEFAULT_UNET = "flux1-kontext-dev-Q4_K_S.gguf"
+# The UNets are swappable: the two defaults below ship with the runtime and can't
+# be removed, but users can add extra UNets from any HuggingFace repo (see
+# `pull_unet`) and pick which one a mode runs on. The text encoders + VAE are
+# shared across all of them.
+#
+# Q8_0 is the quality tier this 24 GB card is sized for: ~12.6 GB of UNet plus
+# activations at 1024x1024 peaks around 16 GB. (The T5 encoder is only resident
+# while conditioning runs; ComfyUI offloads it before sampling.)
+DEFAULT_CREATE_UNET = "flux1-dev-Q8_0.gguf"  # txt2img / img2img
+DEFAULT_KONTEXT_UNET = "flux1-kontext-dev-Q8_0.gguf"  # edit / compose
+DEFAULT_UNETS = (DEFAULT_CREATE_UNET, DEFAULT_KONTEXT_UNET)
+
 UNET_DIR = COMFY_DIR / "models" / "unet"
 # Loadable UNet formats: GGUF (via the GGUF node) and plain diffusion checkpoints
 # (via ComfyUI's built-in UNETLoader). Users can add either.
 UNET_EXTS = (".gguf", ".safetensors", ".sft")
-T5 = "t5-v1_1-xxl-encoder-Q4_K_M.gguf"
+T5 = "t5-v1_1-xxl-encoder-Q8_0.gguf"
 CLIP_L = "clip_l.safetensors"
 VAE = "ae.safetensors"
 
-# Quality-first defaults: 20 steps + Q4 quant is the sweet spot on this GPU;
-# fewer steps / smaller quant visibly degrade output, so they aren't the knobs
-# we turn for speed (keeping models resident is).
+# Roles. A Kontext UNet takes a ReferenceLatent of the source image; a plain dev
+# UNet doesn't. Filename is the only signal we have for a user-added model.
+ROLE_CREATE = "create"
+ROLE_EDIT = "edit"
+
+
+def _role_of(unet: str) -> str:
+    return ROLE_EDIT if "kontext" in unet.lower() else ROLE_CREATE
+
+
+# Quality-first defaults: 20 steps at Q8 is the sweet spot on this GPU; fewer
+# steps visibly degrades output, so that isn't the knob we turn for speed
+# (keeping models resident is).
 DEFAULT_STEPS = 20
-DEFAULT_GUIDANCE = 2.5
+# Guidance is mode-specific. Kontext follows an instruction at ~2.5; dev needs a
+# higher ~3.5 to bind a text-only prompt. Feeding either the other's value (or a
+# stray SD-scale 7.5 from shared settings) blows out the image.
+KONTEXT_GUIDANCE = 2.5
+CREATE_GUIDANCE = 3.5
+GUIDANCE_MIN, GUIDANCE_MAX = 0.5, 10.0
+
+# FLUX responds to natural photographic language, not SD 1.5's comma-separated
+# quality tags — a tag salad actively hurts it. Applied when the caller opts in.
+#
+# Deliberately says nothing about lighting, depth of field, or framing: those are
+# the user's to set, and baking in "natural lighting" would fight a prompt like
+# "a neon-lit alley at night". Only medium and surface realism are asserted.
+PHOTOREAL_TEMPLATE = (
+    "A photorealistic, high-resolution photograph. {prompt}. Shot on a full-frame "
+    "DSLR, realistic skin texture and pores, fine detail, sharp focus."
+)
 
 
-def _guidance(v) -> float:
-    """Kontext wants a low guidance (~2.5). Guard against a stray SD-scale value
-    (e.g. 7.5) arriving from the shared settings and blowing out the edit."""
+def _guidance(v, default: float) -> float:
     try:
         g = float(v)
     except (TypeError, ValueError):
-        return DEFAULT_GUIDANCE
-    return g if 0.5 <= g <= 5.0 else DEFAULT_GUIDANCE
+        return default
+    return g if GUIDANCE_MIN <= g <= GUIDANCE_MAX else default
 
 
 def _steps(v) -> int:
@@ -69,6 +108,25 @@ def _steps(v) -> int:
     except (TypeError, ValueError):
         return DEFAULT_STEPS
     return s if 8 <= s <= 40 else DEFAULT_STEPS
+
+
+def _strength(v) -> float:
+    """img2img denoise: 0 = return the input, 1 = ignore it."""
+    try:
+        s = float(v)
+    except (TypeError, ValueError):
+        return 0.6
+    return min(max(s, 0.05), 1.0)
+
+
+def _dim(v, default: int = 1024) -> int:
+    """FLUX is trained at ~1 megapixel. Snap to the multiple of 16 the VAE needs."""
+    try:
+        d = int(v)
+    except (TypeError, ValueError):
+        return default
+    d = min(max(d, 256), 1536)
+    return d - (d % 16)
 
 _proc: subprocess.Popen | None = None  # the ComfyUI child, if we started it
 
@@ -81,7 +139,7 @@ def available() -> bool:
     if not CVENV_PY.exists():
         return False
     need = [
-        UNET_DIR / DEFAULT_UNET,
+        *(UNET_DIR / u for u in DEFAULT_UNETS),
         COMFY_DIR / "models" / "clip" / T5,
         COMFY_DIR / "models" / "clip" / CLIP_L,
         COMFY_DIR / "models" / "vae" / VAE,
@@ -132,7 +190,7 @@ def ensure_server(on_status=None) -> None:
 
 
 def free() -> None:
-    """Release FLUX's VRAM (call before handing the GPU back to chat / SD)."""
+    """Release FLUX's VRAM (call before handing the GPU back to chat)."""
     if not _server_up():
         return
     try:
@@ -207,7 +265,7 @@ def _unet_node(unet: str) -> dict:
     return {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}}
 
 
-def _loaders(unet: str = DEFAULT_UNET) -> dict:
+def _loaders(unet: str) -> dict:
     return {
         "unet": _unet_node(unet),
         "clip": {"class_type": "DualCLIPLoaderGGUF",
@@ -216,27 +274,86 @@ def _loaders(unet: str = DEFAULT_UNET) -> dict:
     }
 
 
-def _edit_graph(image_name, prompt, steps, guidance, seed, prefix, unet=DEFAULT_UNET):
-    g = _loaders(unet)
-    g.update({
-        "img": {"class_type": "LoadImage", "inputs": {"image": image_name}},
-        "scale": {"class_type": "FluxKontextImageScale", "inputs": {"image": ["img", 0]}},
-        "enc": {"class_type": "VAEEncode", "inputs": {"pixels": ["scale", 0], "vae": ["vae", 0]}},
+def _sampler(latent_src, steps, seed, denoise=1.0) -> dict:
+    """FLUX samples at cfg=1.0 — the negative branch is unused, which is why this
+    app exposes no negative prompt. Guidance is carried by FluxGuidance instead."""
+    return {"class_type": "KSampler",
+            "inputs": {"model": ["unet", 0], "positive": ["guide", 0], "negative": ["neg", 0],
+                       "latent_image": list(latent_src), "seed": seed, "steps": steps, "cfg": 1.0,
+                       "sampler_name": "euler", "scheduler": "simple", "denoise": denoise}}
+
+
+def _conditioning(prompt: str, guidance: float, ref_latent=None) -> dict:
+    """Text conditioning shared by every graph. `guide` is what the sampler reads.
+
+    `ref_latent` splices in Kontext's ReferenceLatent node, which conditions on the
+    encoded source image so the edit preserves identity. Only Kontext UNets
+    understand it — leave it None for plain dev (create) graphs.
+    """
+    g = {
         "pos": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}},
-        "ref": {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["pos", 0], "latent": ["enc", 0]}},
-        "guide": {"class_type": "FluxGuidance", "inputs": {"conditioning": ["ref", 0], "guidance": guidance}},
         "neg": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["clip", 0]}},
-        "sampler": {"class_type": "KSampler",
-                    "inputs": {"model": ["unet", 0], "positive": ["guide", 0], "negative": ["neg", 0],
-                               "latent_image": ["enc", 0], "seed": seed, "steps": steps, "cfg": 1.0,
-                               "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
-        "dec": {"class_type": "VAEDecode", "inputs": {"samples": ["sampler", 0], "vae": ["vae", 0]}},
-        "save": {"class_type": "SaveImage", "inputs": {"images": ["dec", 0], "filename_prefix": prefix}},
-    })
+    }
+    src = "pos"
+    if ref_latent is not None:
+        g["ref"] = {"class_type": "ReferenceLatent",
+                    "inputs": {"conditioning": ["pos", 0], "latent": list(ref_latent)}}
+        src = "ref"
+    g["guide"] = {"class_type": "FluxGuidance",
+                  "inputs": {"conditioning": [src, 0], "guidance": guidance}}
     return g
 
 
-def _compose_graph(image_names, prompt, steps, guidance, seed, prefix, unet=DEFAULT_UNET):
+def _tail(prefix: str) -> dict:
+    return {
+        "dec": {"class_type": "VAEDecode", "inputs": {"samples": ["sampler", 0], "vae": ["vae", 0]}},
+        "save": {"class_type": "SaveImage", "inputs": {"images": ["dec", 0], "filename_prefix": prefix}},
+    }
+
+
+def _txt2img_graph(prompt, width, height, steps, guidance, seed, prefix, unet):
+    """Text-to-image on a plain FLUX dev UNet. No ReferenceLatent — that node is
+    Kontext's identity-preserving path and would pin the output to a source image.
+
+    EmptySD3LatentImage (not EmptyLatentImage): FLUX's VAE is 16-channel, and the
+    4-channel SD latent would decode to noise.
+    """
+    g = _loaders(unet)
+    g.update(_conditioning(prompt, guidance))
+    g["latent"] = {"class_type": "EmptySD3LatentImage",
+                   "inputs": {"width": width, "height": height, "batch_size": 1}}
+    g["sampler"] = _sampler(("latent", 0), steps, seed)
+    g.update(_tail(prefix))
+    return g
+
+
+def _img2img_graph(image_name, prompt, strength, steps, guidance, seed, prefix, unet):
+    """Image-to-image: encode the input and partially denoise it. `strength` is the
+    denoise fraction — how far the result may drift from the attached image."""
+    g = _loaders(unet)
+    g.update(_conditioning(prompt, guidance))
+    g["img"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
+    g["scale"] = {"class_type": "FluxKontextImageScale", "inputs": {"image": ["img", 0]}}
+    g["enc"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["scale", 0], "vae": ["vae", 0]}}
+    g["sampler"] = _sampler(("enc", 0), steps, seed, denoise=strength)
+    g.update(_tail(prefix))
+    return g
+
+
+def _edit_graph(image_name, prompt, steps, guidance, seed, prefix, unet):
+    """Instruction-edit a single image on a Kontext UNet: encode the source, feed it
+    back as a ReferenceLatent so identity survives, and fully denoise from it."""
+    g = _loaders(unet)
+    g["img"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
+    g["scale"] = {"class_type": "FluxKontextImageScale", "inputs": {"image": ["img", 0]}}
+    g["enc"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["scale", 0], "vae": ["vae", 0]}}
+    g.update(_conditioning(prompt, guidance, ref_latent=("enc", 0)))
+    g["sampler"] = _sampler(("enc", 0), steps, seed)
+    g.update(_tail(prefix))
+    return g
+
+
+def _compose_graph(image_names, prompt, steps, guidance, seed, prefix, unet):
     """Multi-image: stitch the inputs side-by-side into one canvas, then edit that
     single image. FLUX Kontext *dev* is a single-image model — stacking a
     ReferenceLatent per input just makes it echo the first image and ignore the
@@ -256,16 +373,9 @@ def _compose_graph(image_names, prompt, steps, guidance, seed, prefix, unet=DEFA
     # Scale the combined canvas to a Kontext-friendly resolution, then edit it.
     g["scale"] = {"class_type": "FluxKontextImageScale", "inputs": {"image": list(stitched)}}
     g["enc"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["scale", 0], "vae": ["vae", 0]}}
-    g["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}}
-    g["ref"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["pos", 0], "latent": ["enc", 0]}}
-    g["guide"] = {"class_type": "FluxGuidance", "inputs": {"conditioning": ["ref", 0], "guidance": guidance}}
-    g["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["clip", 0]}}
-    g["sampler"] = {"class_type": "KSampler",
-                    "inputs": {"model": ["unet", 0], "positive": ["guide", 0], "negative": ["neg", 0],
-                               "latent_image": ["enc", 0], "seed": seed, "steps": steps, "cfg": 1.0,
-                               "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}}
-    g["dec"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sampler", 0], "vae": ["vae", 0]}}
-    g["save"] = {"class_type": "SaveImage", "inputs": {"images": ["dec", 0], "filename_prefix": prefix}}
+    g.update(_conditioning(prompt, guidance, ref_latent=("enc", 0)))
+    g["sampler"] = _sampler(("enc", 0), steps, seed)
+    g.update(_tail(prefix))
     return g
 
 
@@ -315,12 +425,43 @@ def _run(graph, on_step=None, on_status=None):
     raise RuntimeError(f"FLUX generation produced no image ({status.get('status_str', 'unknown')}).")
 
 
+def _prompt_for(prompt: str, enhance: bool) -> str:
+    p = (prompt or "").strip()
+    return PHOTOREAL_TEMPLATE.format(prompt=p.rstrip(".")) if enhance and p else p
+
+
+def create(prompt, width=None, height=None, steps=None, guidance=None, seed=0,
+           model=None, enhance=True, on_step=None, on_status=None):
+    """Text-to-image on FLUX dev ('a candid photo of a woman laughing')."""
+    ensure_server(on_status=on_status)
+    unet = _resolve_unet(model, ROLE_CREATE)
+    g = _txt2img_graph(_prompt_for(prompt, enhance), _dim(width), _dim(height), _steps(steps),
+                       _guidance(guidance, CREATE_GUIDANCE), int(seed), "flux_create", unet)
+    if on_status:
+        on_status("generating with FLUX…")
+    return _run(g, on_step=on_step, on_status=on_status)
+
+
+def img2img(pil, prompt, strength=None, steps=None, guidance=None, seed=0,
+            model=None, enhance=True, on_step=None, on_status=None):
+    """Transform an attached image on FLUX dev, keeping its composition."""
+    ensure_server(on_status=on_status)
+    unet = _resolve_unet(model, ROLE_CREATE)
+    name = _upload_image(pil, f"init_{uuid.uuid4().hex}.png")
+    g = _img2img_graph(name, _prompt_for(prompt, enhance), _strength(strength), _steps(steps),
+                       _guidance(guidance, CREATE_GUIDANCE), int(seed), "flux_img2img", unet)
+    if on_status:
+        on_status("transforming with FLUX…")
+    return _run(g, on_step=on_step, on_status=on_status)
+
+
 def edit(pil, prompt, steps=None, guidance=None, seed=0, model=None, on_step=None, on_status=None):
     """Instruction-edit a single image ('make the cat eat the cauliflower')."""
     ensure_server(on_status=on_status)
-    unet = _resolve_unet(model)
+    unet = _resolve_unet(model, ROLE_EDIT)
     name = _upload_image(pil, f"edit_{uuid.uuid4().hex}.png")
-    g = _edit_graph(name, prompt or "", _steps(steps), _guidance(guidance), int(seed), "flux_edit", unet)
+    g = _edit_graph(name, prompt or "", _steps(steps), _guidance(guidance, KONTEXT_GUIDANCE),
+                    int(seed), "flux_edit", unet)
     if on_status:
         on_status("editing with FLUX Kontext…")
     return _run(g, on_step=on_step, on_status=on_status)
@@ -331,9 +472,10 @@ def compose(pils, prompt, steps=None, guidance=None, seed=0, model=None, on_step
     ensure_server(on_status=on_status)
     if not pils:
         raise ValueError("compose requires at least one reference image")
-    unet = _resolve_unet(model)
+    unet = _resolve_unet(model, ROLE_EDIT)
     names = [_upload_image(p, f"ref{i}_{uuid.uuid4().hex}.png") for i, p in enumerate(pils)]
-    g = _compose_graph(names, prompt or "", _steps(steps), _guidance(guidance), int(seed), "flux_compose", unet)
+    g = _compose_graph(names, prompt or "", _steps(steps), _guidance(guidance, KONTEXT_GUIDANCE),
+                       int(seed), "flux_compose", unet)
     if on_status:
         on_status("composing with FLUX Kontext…")
     return _run(g, on_step=on_step, on_status=on_status)
@@ -343,38 +485,53 @@ def compose(pils, prompt, steps=None, guidance=None, seed=0, model=None, on_step
 # Model management: list / add (from any HF repo) / remove extra UNets
 # --------------------------------------------------------------------------- #
 def list_unets() -> list[dict]:
-    """Installed FLUX UNets, default first. Each: name, default flag, size_gb."""
+    """Installed FLUX UNets, defaults first. Each: name, role, default flag, size_gb.
+
+    `role` tells the UI which mode a model can serve: create models appear in the
+    Create dropdown, edit models in Edit/Combine.
+    """
     out = []
     if UNET_DIR.is_dir():
         for p in sorted(UNET_DIR.iterdir()):
             if p.is_file() and p.suffix.lower() in UNET_EXTS:
                 out.append({
                     "name": p.name,
-                    "default": p.name == DEFAULT_UNET,
+                    "role": _role_of(p.name),
+                    "default": p.name in DEFAULT_UNETS,
                     "size_gb": round(p.stat().st_size / 1e9, 2),
                 })
     out.sort(key=lambda m: (not m["default"], m["name"].lower()))
     return out
 
 
-def _resolve_unet(model) -> str:
+def _default_for(role: str) -> str:
+    return DEFAULT_KONTEXT_UNET if role == ROLE_EDIT else DEFAULT_CREATE_UNET
+
+
+def _resolve_unet(model, role: str) -> str:
     """Map a requested model name to an installed UNet file, guarding against path
-    traversal. Unknown / empty → the default model."""
+    traversal. Unknown, empty, or wrong-role → that role's default.
+
+    The role check matters: a Kontext graph feeds a ReferenceLatent that a plain dev
+    UNet ignores, and a dev UNet asked to edit would just regenerate from scratch.
+    """
     if not model:
-        return DEFAULT_UNET
+        return _default_for(role)
     safe = os.path.basename(str(model))
-    if safe.lower().endswith(UNET_EXTS) and (UNET_DIR / safe).exists():
+    if (safe.lower().endswith(UNET_EXTS)
+            and (UNET_DIR / safe).exists()
+            and _role_of(safe) == role):
         return safe
-    return DEFAULT_UNET
+    return _default_for(role)
 
 
 def delete_unet(name: str) -> None:
-    """Remove an extra UNet. The bundled default can never be deleted."""
+    """Remove an extra UNet. The bundled defaults can never be deleted."""
     safe = os.path.basename(name or "")
     if not safe.lower().endswith(UNET_EXTS):
         raise ValueError("Not a model file.")
-    if safe == DEFAULT_UNET:
-        raise ValueError("The default FLUX model can't be removed.")
+    if safe in DEFAULT_UNETS:
+        raise ValueError("The default FLUX models can't be removed.")
     p = UNET_DIR / safe
     if not p.exists():
         raise FileNotFoundError(safe)
@@ -422,12 +579,14 @@ try:
             print("ERROR: no .gguf or .safetensors UNet files found in " + repo, flush=True)
             sys.exit(1)
         ggufs = [f for f in files if f.lower().endswith(".gguf")]
-        # Prefer a GGUF (fits this GPU); pick a mid quant. Otherwise fall back to a
-        # top-level safetensors, skipping obvious multi-file shards.
+        # Prefer a GGUF (fits this GPU); pick the highest quant this 24 GB card can
+        # hold. Otherwise fall back to a top-level safetensors, skipping obvious
+        # multi-file shards.
         others = [f for f in files if not f.lower().endswith(".gguf")
                   and "/" not in f and "-of-" not in f.lower()] or \
                  [f for f in files if not f.lower().endswith(".gguf")]
-        filename = (next((f for f in ggufs if "Q4_K_S" in f), None)
+        filename = (next((f for f in ggufs if "Q8_0" in f), None)
+                    or next((f for f in ggufs if "Q6_K" in f), None)
                     or next((f for f in ggufs if "Q4_K" in f), None)
                     or (ggufs[0] if ggufs else None)
                     or others[0])
@@ -464,8 +623,8 @@ except (HTTPError, URLError) as e:
 def pull_unet(repo: str, on_status=None) -> None:
     """Download an extra FLUX UNet from a HuggingFace repo (opt-in, streams status).
 
-    Like sd_client.pull, the fetch runs in a subprocess with the offline flags
-    dropped so the serving process itself never gains network access.
+    The fetch runs in a subprocess with the offline flags dropped so the serving
+    process itself never gains network access.
     """
     import sys  # PLC0415
 
