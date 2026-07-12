@@ -181,12 +181,26 @@ export interface FluxBundle {
   needed_gb: number; // still to download (a part-finished install counts what it has)
 }
 
+export interface FluxInstalling {
+  id: string;
+  label: string;
+  file: string;
+  pct: number;
+  done: number;
+  total: number;
+  index: number; // file N…
+  count: number; // …of M
+}
+
 export interface FluxCatalog {
   runtime_ready: boolean; // engine installed — enough to download a model
   available: boolean; // ...and a model installed, so we can actually generate
   disk_free_gb: number;
   bundles: FluxBundle[];
   hf_token: "saved" | "env" | null;
+  /** A download running on the server right now — it outlives the page that started
+   *  it, so a reload can find it here rather than assuming nothing is happening. */
+  installing: FluxInstalling | null;
 }
 
 export interface FluxProgress {
@@ -242,6 +256,79 @@ export async function deleteFluxBundle(id: string): Promise<void> {
   if (!res.ok) {
     const detail = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(detail.detail ?? `flux bundle delete: ${res.status}`);
+  }
+}
+
+// --------------------------------------------------------------------------- #
+// Text encoders — the conditioning half of a FLUX.2 model. The bundled one is a
+// default, not a fixture: any checkpoint of the same architecture works, and a lighter
+// quant is the usual reason to swap ([dev]'s Mistral is 48 GB in bf16).
+// --------------------------------------------------------------------------- #
+export interface FluxTextEncoder {
+  name: string;
+  size_gb: number;
+  default_for: string[]; // labels of the models that ship with this one
+}
+
+export interface FluxTextEncoders {
+  encoders: FluxTextEncoder[];
+  selected: Record<string, string>; // bundle id -> the encoder it will load
+}
+
+export async function getTextEncoders(): Promise<FluxTextEncoders> {
+  const res = await fetch("/api/flux/text-encoders");
+  if (!res.ok) throw new Error(`text encoders: ${res.status}`);
+  return res.json();
+}
+
+/** Add one from HuggingFace. Needs owner/repo:file — a repo holds several quants and
+ *  guessing wrong costs a multi-GB download. */
+export async function pullTextEncoder(
+  repo: string,
+  onStatus: (message: string) => void
+): Promise<void> {
+  const res = await fetch("/api/flux/text-encoders/pull", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `text encoder pull: ${res.status}`);
+  }
+  let failure: string | null = null;
+  await readLines(res, (line) => {
+    try {
+      const ev = JSON.parse(line);
+      if (ev.type === "status") onStatus(ev.message as string);
+      else if (ev.type === "error") failure = ev.message as string;
+    } catch {
+      /* ignore keepalives */
+    }
+  });
+  if (failure) throw new Error(failure);
+}
+
+/** Point a model at a different encoder. An empty name restores its default. */
+export async function selectTextEncoder(bundleId: string, name: string): Promise<void> {
+  const res = await fetch("/api/flux/text-encoders/select", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bundle_id: bundleId, name }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `select encoder: ${res.status}`);
+  }
+}
+
+export async function deleteTextEncoder(name: string): Promise<void> {
+  const res = await fetch(`/api/flux/text-encoders/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `delete encoder: ${res.status}`);
   }
 }
 

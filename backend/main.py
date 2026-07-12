@@ -217,6 +217,9 @@ def flux_catalog():
         "disk_free_gb": cat.free_gb(),
         "bundles": fx.catalog(),
         "hf_token": settings.hf_token_source(),
+        # A download survives the request that started it, so a reloaded page can find
+        # it again here instead of assuming nothing is happening.
+        "installing": fx.install_state(),
     }
 
 
@@ -276,6 +279,58 @@ def flux_delete(name: str):
         raise HTTPException(status_code=400, detail=str(exc))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Model not found.")
+
+
+# --------------------------------------------------------------------------- #
+# Text encoders — a FLUX.2 model's conditioning half. Swappable: the bundled one is
+# only a default, and a lighter quant of the same encoder is the usual reason to change.
+# --------------------------------------------------------------------------- #
+@app.get("/api/flux/text-encoders")
+def flux_text_encoders():
+    return {"encoders": fx.list_text_encoders(), "selected": fx.selected_text_encoders()}
+
+
+class TextEncoderPullRequest(BaseModel):
+    repo: str
+
+
+@app.post("/api/flux/text-encoders/pull")
+def flux_text_encoder_pull(req: TextEncoderPullRequest):
+    """Add a text encoder from HuggingFace. Needs owner/repo:file — see pull_text_encoder."""
+    if not fx.runtime_ready():
+        raise HTTPException(status_code=503, detail="The image engine isn't installed.")
+
+    def work(emit):
+        fx.pull_text_encoder(req.repo, on_status=lambda m: emit({"type": "status", "message": m}))
+
+    return _ndjson(work)
+
+
+class TextEncoderSelectRequest(BaseModel):
+    bundle_id: str
+    name: str  # "" restores the model's default
+
+
+@app.put("/api/flux/text-encoders/select")
+def flux_text_encoder_select(req: TextEncoderSelectRequest):
+    try:
+        fx.set_text_encoder(req.bundle_id, req.name)
+        return {"ok": True, "selected": fx.selected_text_encoders()}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="That text encoder isn't installed.")
+
+
+@app.delete("/api/flux/text-encoders/{name}")
+def flux_text_encoder_delete(name: str):
+    try:
+        fx.delete_text_encoder(name)
+        return {"ok": True}
+    except ValueError as exc:  # a model is currently using it
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Text encoder not found.")
 
 
 # --------------------------------------------------------------------------- #

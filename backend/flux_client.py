@@ -32,7 +32,10 @@ import json
 import math
 import os
 import re
+import shutil
+import struct
 import subprocess
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -334,7 +337,7 @@ def _loaders(unet: str) -> dict:
         return {
             "unet": _unet_node(unet),
             "clip": {"class_type": "CLIPLoader",
-                     "inputs": {"clip_name": b["clip"], "type": "flux2"}},
+                     "inputs": {"clip_name": clip_for(b), "type": "flux2"}},
             "vae": {"class_type": "VAELoader", "inputs": {"vae_name": b["vae"]}},
         }
     return {
@@ -874,6 +877,12 @@ def probe(repo):
     print(json.dumps([{"name": s.rfilename, "size": s.size or 0} for s in info.siblings
                       if s.rfilename.lower().endswith(EXTS)]), flush=True)
 
+def listing(repo):
+    # Every file, not just the tensors probe() reports — a transformers-layout encoder
+    # keeps its tokenizer in there too, and we need to see it.
+    from huggingface_hub import HfApi
+    print(json.dumps(sorted(HfApi(token=TOKEN or None).list_repo_files(repo))), flush=True)
+
 def inspect(repo, filename):
     url = _url(repo, filename)
     n = struct.unpack("<Q", _ranged(url, 0, 7))[0]
@@ -882,8 +891,10 @@ def inspect(repo, filename):
     header = json.loads(_ranged(url, 8, 8 + n - 1))
     print(json.dumps([k for k in header if k != "__metadata__"]), flush=True)
 
-def fetch(repo, filename, dest_dir):
-    base = os.path.basename(filename)
+def fetch(repo, filename, dest_dir, out_name=""):
+    # out_name renames on the way in. Upstream file names collide across models —
+    # FLUX.2's VAE is `ae.safetensors`, the same name FLUX.1 gives its very different one.
+    base = out_name or os.path.basename(filename)
     out = os.path.join(dest_dir, base)
     if os.path.exists(out):
         raise RuntimeError("a model named %s already exists." % base)
@@ -921,7 +932,7 @@ def fetch(repo, filename, dest_dir):
     print("DONE " + base, flush=True)
 
 try:
-    {"whoami": whoami, "probe": probe, "inspect": inspect,
+    {"whoami": whoami, "probe": probe, "listing": listing, "inspect": inspect,
      "fetch": fetch}[sys.argv[1]](*sys.argv[2:])
 except HTTPError as e:
     # A gated repo (black-forest-labs' own among them) lists its files to anyone but
@@ -1070,56 +1081,365 @@ def catalog() -> list[dict]:
     ]
 
 
+def _st_header(path) -> tuple[dict, int]:
+    """A safetensors header and the absolute offset its data buffer starts at."""
+    with open(path, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        if n > 256 << 20:
+            raise RuntimeError(f"{os.path.basename(path)} isn't a safetensors file.")
+        return json.loads(f.read(n)), 8 + n
+
+
+def _merge_shards(shards: list, out: Path, embed: tuple | None = None,
+                  on_progress=None) -> None:
+    """Stitch a sharded safetensors checkpoint back into the single file ComfyUI loads.
+
+    Copies tensor *bytes* between files instead of materializing them: [dev]'s encoder
+    is 48 GB and loading it into RAM to re-save would need more memory than the machine
+    has. So we rebuild the container — read every shard's header, lay the tensors out
+    back-to-back, and stream each one across.
+
+    `embed` is a (local-file, tensor-name) blob to carry in alongside the weights.
+    Mistral's tokenizer lives outside the checkpoint upstream, but ComfyUI expects to
+    find it *inside*, as a uint8 tensor. It's fetched by the download child like any
+    other file — this runs in the serving process, which has no network access.
+    """
+    plan, offset = [], 0
+    for shard in shards:
+        header, data_start = _st_header(shard)
+        for name, meta in header.items():
+            if name == "__metadata__":
+                continue
+            begin, end = meta["data_offsets"]
+            size = end - begin
+            plan.append((name, meta["dtype"], meta["shape"], shard,
+                         data_start + begin, size, offset))
+            offset += size
+
+    names = [p[0] for p in plan]
+    if len(names) != len(set(names)):
+        raise RuntimeError("These shards overlap — they aren't one checkpoint.")
+
+    blob = b""
+    if embed:
+        path, tensor = embed
+        blob = Path(path).read_bytes()
+        plan.append((tensor, "U8", [len(blob)], None, 0, len(blob), offset))
+        offset += len(blob)
+
+    header = {n: {"dtype": d, "shape": s, "data_offsets": [o, o + sz]}
+              for n, d, s, _f, _st, sz, o in plan}
+    raw = json.dumps(header, separators=(",", ":")).encode()
+    raw += b" " * (-len(raw) % 8)  # keep the data buffer 8-byte aligned
+
+    total = offset
+    done = 0
+    tmp = out.with_name(out.name + ".part")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(tmp, "wb") as w:
+            w.write(struct.pack("<Q", len(raw)))
+            w.write(raw)
+            for name, _d, _s, shard, start, size, _o in plan:
+                if shard is None:  # the embedded blob is already in memory
+                    w.write(blob)
+                    done += size
+                    continue
+                with open(shard, "rb") as r:
+                    r.seek(start)
+                    left = size
+                    while left:
+                        chunk = r.read(min(1 << 22, left))
+                        if not chunk:
+                            raise RuntimeError(f"{os.path.basename(shard)} is truncated.")
+                        w.write(chunk)
+                        left -= len(chunk)
+                        done += len(chunk)
+                        if on_progress:
+                            on_progress({"file": out.name, "done": done, "total": total,
+                                         "pct": 100 * done // max(total, 1)})
+        os.replace(tmp, out)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+# An install outlives the request that started it: these are 50 GB downloads, and the
+# browser *will* reload or wander off. So it runs under a process-wide lock, and its
+# progress is kept here rather than only streamed — otherwise a reload would leave the
+# user staring at a panel that can't see the download still running underneath it, and
+# a second click would start a rival writer appending to the same .part file.
+_install_mu = threading.Lock()
+_install_state: dict | None = None
+
+
+def install_state() -> dict | None:
+    """The install running right now, if any: {id, label, file, pct, done, total}."""
+    return dict(_install_state) if _install_state else None
+
+
 def install_bundle(bundle_id: str, on_status=None, on_progress=None) -> None:
     """Download every file a catalog model needs, skipping the ones already there.
 
     Files are fetched one at a time and land atomically (`.part` → rename), so an
     interrupted install resumes where it stopped rather than starting over.
     """
+    global _install_state
     b = cat.get(bundle_id)
     if not runtime_ready():
         raise RuntimeError("The image engine isn't installed. Re-run ./run.sh.")
-    say = on_status or (lambda _msg: None)
+    if not _install_mu.acquire(blocking=False):
+        running = install_state() or {}
+        raise RuntimeError(f"An install is already running ({running.get('label', '?')}). "
+                           "Wait for it to finish.")
+    try:
+        say = on_status or (lambda _msg: None)
 
-    todo = cat.missing_files(b)
-    if not todo:
-        say(f"{b['label']} is already installed.")
-        return
+        todo = cat.missing_files(b)
+        pending = cat.pending_merges(b)
+        if not todo and not pending:
+            say(f"{b['label']} is already installed.")
+            return
 
-    # Check the disk before spending an hour on a 50 GB download that can't land.
-    need = cat.needed_gb(b)
-    free = cat.free_gb()
-    if free < need + 2:  # a couple of GB of headroom for the .part → rename
-        raise RuntimeError(
-            f"Not enough disk space for {b['label']}: it needs {need:.0f} GB and only "
-            f"{free:.0f} GB is free."
-        )
+        # Check the disk before spending an hour on a download that can't land. A merge
+        # briefly stores its encoder twice (shards + stitched file), so check the peak.
+        need = cat.peak_gb(b)
+        free = cat.free_gb()
+        if free < need + 2:  # a couple of GB of headroom for the .part → rename
+            raise RuntimeError(
+                f"Not enough disk space for {b['label']}: it needs {need:.0f} GB "
+                f"(peak, while the text encoder is being stitched together) and only "
+                f"{free:.0f} GB is free."
+            )
 
-    for i, spec in enumerate(todo, 1):
-        repo, path, key = spec
-        dest = cat.dest_dir(key)
-        dest.mkdir(parents=True, exist_ok=True)
-        say(f"[{i}/{len(todo)}] {os.path.basename(path)}")
-        _run_child(["fetch", repo, path, str(dest)], on_status=say, on_progress=on_progress)
-    say(f"{b['label']} installed.")
+        # Every download, whether it lands in a model dir or in a merge's staging area.
+        # A merge's shards are fetched like anything else and collapsed afterwards; the
+        # tokenizer blob rides along as one more download.
+        steps = [{"repo": f[0], "path": f[1], "dest": cat.dest_dir(f[2]),
+                  "save_as": f[3] if len(f) > 3 else ""} for f in todo]
+        for m in pending:
+            paths = list(m["shards"]) + ([m["embed"][1]] if m["embed"] else [])
+            repos = [m["repo"]] * len(m["shards"]) + ([m["embed"][0]] if m["embed"] else [])
+            steps += [{"repo": r, "path": p, "dest": cat.staging_dir(m), "save_as": ""}
+                      for r, p in zip(repos, paths)]
+
+        token = settings.hf_token()
+        total_steps = len(steps) + len(pending)
+        _install_state = {"id": b["id"], "label": b["label"], "file": "", "pct": 0,
+                          "done": 0, "total": 0, "index": 1, "count": total_steps}
+
+        def progress(p):
+            _install_state.update(p)
+            if on_progress:
+                on_progress(p)
+
+        for i, s in enumerate(steps, 1):
+            s["dest"].mkdir(parents=True, exist_ok=True)
+            name = s["save_as"] or os.path.basename(s["path"])
+            _install_state.update({"index": i, "file": name, "pct": 0})
+            say(f"[{i}/{total_steps}] {name}")
+            _run_child(["fetch", s["repo"], s["path"], str(s["dest"]), s["save_as"]],
+                       on_status=say, on_progress=progress, token=token)
+
+        for j, m in enumerate(pending, len(steps) + 1):
+            out = cat.merge_out(m)
+            _install_state.update({"index": j, "file": out.name, "pct": 0})
+            say(f"[{j}/{total_steps}] stitching {out.name} from {len(m['shards'])} shards…")
+            embed = None
+            if m["embed"]:
+                embed = (cat.shard_path(m, m["embed"][1]), m["embed"][2])
+            _merge_shards([cat.shard_path(m, s) for s in m["shards"]], out,
+                          embed=embed, on_progress=progress)
+            shutil.rmtree(cat.staging_dir(m), ignore_errors=True)  # shards served their purpose
+        say(f"{b['label']} installed.")
+    finally:
+        _install_state = None
+        _install_mu.release()
 
 
 def delete_bundle(bundle_id: str) -> None:
     """Remove a model's files — but not any it shares with another installed bundle
     (FLUX.1's VAE and encoders would otherwise be pulled out from under it)."""
     b = cat.get(bundle_id)
+    running = install_state()
+    if running:
+        raise ValueError(f"Can't remove anything while {running['label']} is downloading.")
     keep = {cat.file_path(f)
             for other in cat.BUNDLES if other["id"] != bundle_id and cat.installed(other)
             for f in other["files"]}
+    keep |= {cat.merge_out(m)
+             for other in cat.BUNDLES if other["id"] != bundle_id and cat.installed(other)
+             for m in cat.merges(other)}
     removed = 0
-    for spec in b["files"]:
-        p = cat.file_path(spec)
+    for p in [cat.file_path(f) for f in b["files"]] + [cat.merge_out(m) for m in cat.merges(b)]:
         if p.exists() and p not in keep:
             p.unlink()
             removed += 1
-        p.with_suffix(p.suffix + ".part").unlink(missing_ok=True)
+        p.with_name(p.name + ".part").unlink(missing_ok=True)
+    for m in cat.merges(b):
+        shutil.rmtree(cat.staging_dir(m), ignore_errors=True)
     if not removed:
         raise FileNotFoundError(bundle_id)
+
+
+# --------------------------------------------------------------------------- #
+# Text encoders
+# --------------------------------------------------------------------------- #
+# A bundle names the encoder it was trained against, but that file is separable: any
+# checkpoint of the same architecture conditions the transformer just as well, and a
+# lighter quant of it is the usual reason to swap (FLUX.2 [dev]'s Mistral is 48 GB in
+# bf16). ComfyUI identifies the architecture from the checkpoint itself, so a wrong one
+# fails at load rather than generating quietly-broken images.
+def clip_for(bundle: dict) -> str:
+    """The text encoder this model will actually load — the user's pick, or its default.
+
+    An override that's been deleted off disk falls back to the default rather than
+    failing the graph.
+    """
+    chosen = settings.text_encoders().get(bundle["id"], "")
+    if chosen and (cat.TE_DIR / os.path.basename(chosen)).exists():
+        return os.path.basename(chosen)
+    return bundle["clip"]
+
+
+def list_text_encoders() -> list[dict]:
+    """Every text encoder on disk, with the models each one is the default for."""
+    defaults: dict[str, list[str]] = {}
+    for b in cat.BUNDLES:
+        if b["family"] == cat.FAMILY_FLUX2:
+            defaults.setdefault(b["clip"], []).append(b["label"])
+    out = []
+    if cat.TE_DIR.is_dir():
+        for p in sorted(cat.TE_DIR.iterdir()):
+            if p.is_file() and p.suffix.lower() in (".safetensors", ".sft", ".gguf"):
+                out.append({
+                    "name": p.name,
+                    "size_gb": round(p.stat().st_size / 1e9, 2),
+                    "default_for": defaults.get(p.name, []),
+                })
+    return out
+
+
+def selected_text_encoders() -> dict[str, str]:
+    """What each FLUX.2 model is currently set to load."""
+    return {b["id"]: clip_for(b) for b in cat.BUNDLES if b["family"] == cat.FAMILY_FLUX2}
+
+
+def set_text_encoder(bundle_id: str, name: str) -> None:
+    b = cat.get(bundle_id)
+    if b["family"] != cat.FAMILY_FLUX2:
+        raise ValueError(f"{b['label']} doesn't take a swappable text encoder.")
+    safe = os.path.basename(name or "")
+    if safe and not (cat.TE_DIR / safe).exists():
+        raise FileNotFoundError(safe)
+    settings.set_text_encoder(bundle_id, safe)
+
+
+_SHARD_RE = re.compile(r"^(?P<stem>.*?)-\d{5}-of-\d{5}\.safetensors$", re.I)
+
+
+def _shard_group(files: list[str]) -> list[str]:
+    """The one sharded checkpoint in a repo, in order — or [] if there isn't exactly one.
+
+    A transformers-layout repo (what `AutoModel.from_pretrained` reads) keeps its weights
+    as `model-00001-of-00004.safetensors` under `text_encoder/`. ComfyUI can't load that,
+    so we pull the set and stitch it back into one file.
+    """
+    groups: dict[str, list[str]] = {}
+    for f in files:
+        m = _SHARD_RE.match(os.path.basename(f))
+        if m:
+            groups.setdefault(f"{os.path.dirname(f)}/{m.group('stem')}", []).append(f)
+    if not groups:
+        return []
+    # A model repo ships the transformer sharded too; the encoder is the one under
+    # text_encoder/. Anything else ambiguous, we'd rather ask than guess.
+    te = [k for k in groups if os.path.dirname(k).endswith("text_encoder")]
+    if len(groups) > 1 and len(te) != 1:
+        return []
+    return sorted(groups[te[0] if te else next(iter(groups))])
+
+
+def pull_text_encoder(repo: str, on_status=None) -> None:
+    """Add a text encoder from any HuggingFace repo, gated ones included.
+
+    Three shapes of repo, because that's what people actually paste:
+      owner/repo:file    — that exact checkpoint
+      owner/repo         — one holding a single-file encoder (a ComfyUI-style release)
+      owner/repo         — transformers layout, sharded: downloaded and stitched into the
+                           single file ComfyUI's CLIPLoader takes. This is the
+                           `AutoModel.from_pretrained` case, which ComfyUI can't read
+                           directly because it builds the encoder itself rather than
+                           handing the job to transformers.
+
+    ComfyUI names the architecture from the checkpoint's own tensors, so the encoder gets
+    hooked to whichever model you point at it — and one it can't use fails at load rather
+    than quietly conditioning on nonsense.
+    """
+    repo_id, filename = _parse_repo(repo)
+    token = settings.hf_token()
+    cat.TE_DIR.mkdir(parents=True, exist_ok=True)
+    say = on_status or (lambda _m: None)
+
+    if filename:
+        _run_child(["fetch", repo_id, filename, str(cat.TE_DIR)], on_status=say, token=token)
+        say("Download complete.")
+        return
+
+    say(f"Resolving {repo_id}…")
+    # Named after the repo, not the file inside it: a transformers repo calls its weights
+    # `model.safetensors`, and every one of them would land on top of the last.
+    out = cat.TE_DIR / f"{repo_id.split('/')[-1].lower().replace('.', '_')}.safetensors"
+    if out.exists():
+        raise ValueError(f"{out.name} is already installed.")
+
+    tensors = _json_line(_run_child(["probe", repo_id], token=token))
+    whole = [f for f in tensors
+             if "-of-" not in f["name"].lower() and not _AUX_RE.search(f["name"])]
+    if len(whole) == 1:
+        _run_child(["fetch", repo_id, whole[0]["name"], str(cat.TE_DIR), out.name],
+                   on_status=say, token=token)
+        say("Download complete.")
+        return
+    if len(whole) > 1:
+        listed = "\n".join(f"  {repo_id}:{f['name']}  ({f['size'] / 1e9:.1f} GB)"
+                           for f in sorted(whole, key=lambda f: -f["size"])[:8])
+        raise ValueError(f"{repo_id} holds several encoders — name the one you want:\n{listed}")
+
+    listing = _json_line(_run_child(["listing", repo_id], token=token))
+    shards = _shard_group(listing)
+    if not shards:
+        raise ValueError(f"No text encoder found in {repo_id}. Use owner/repo:file to name one.")
+    staging = cat.STAGING_DIR / out.stem
+
+    # Mistral keeps its tokenizer outside the checkpoint, but ComfyUI reads it from
+    # *inside*, as a `tekken_model` tensor. If the repo carries one, bring it along —
+    # without it a Mistral encoder loads and then fails at the first prompt.
+    tekken = next((f for f in listing if os.path.basename(f) == "tekken.json"), None)
+    try:
+        for i, s in enumerate(shards, 1):
+            say(f"[{i}/{len(shards)}] {os.path.basename(s)}")
+            _run_child(["fetch", repo_id, s, str(staging)], on_status=say, token=token)
+        if tekken:
+            _run_child(["fetch", repo_id, tekken, str(staging)], on_status=say, token=token)
+        say(f"stitching {out.name} from {len(shards)} shards…")
+        _merge_shards([staging / os.path.basename(s) for s in shards], out,
+                      embed=(staging / "tekken.json", "tekken_model") if tekken else None)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    say("Download complete.")
+
+
+def delete_text_encoder(name: str) -> None:
+    """Remove a text encoder — unless a model is currently set to load it."""
+    safe = os.path.basename(name or "")
+    p = cat.TE_DIR / safe
+    if not p.exists():
+        raise FileNotFoundError(safe)
+    for b in cat.BUNDLES:
+        if b["family"] == cat.FAMILY_FLUX2 and cat.installed(b) and clip_for(b) == safe:
+            raise ValueError(f"{b['label']} is using {safe}. Point it at another encoder first.")
+    p.unlink()
 
 
 def verify_token(token: str) -> str:

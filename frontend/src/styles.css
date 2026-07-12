@@ -158,6 +158,10 @@ textarea {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
+  /* The sidebar is a flex column: without this, an expanded section is squeezed by
+     its siblings and — because of the overflow:hidden above — its lower half is
+     silently clipped instead of scrolling the sidebar. */
+  flex-shrink: 0;
 }
 
 .section-head {
@@ -1312,9 +1316,29 @@ textarea {
   white-space: nowrap;
 }
 
+.bundle-progress {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bundle-progress .progress {
+  margin: 0;
+}
+
 .extra-model {
   align-items: center;
   justify-content: space-between;
+}
+
+/* The model a text-encoder dropdown belongs to. Fixed share of the row so the selects
+   line up under each other rather than stepping in and out with the label length. */
+.te-model {
+  flex: 0 0 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* FLUX model picker (in the generation-settings popover). */

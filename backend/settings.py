@@ -60,3 +60,25 @@ def clear_hf_token() -> None:
     data = _read()
     data.pop("hf_token", None)
     _write(data)
+
+
+def text_encoders() -> dict:
+    """Per-model text-encoder overrides: {bundle_id: filename}.
+
+    A bundle ships with the encoder it was trained against, but the file is separable
+    and interchangeable within an architecture — a smaller quant of the same encoder,
+    say. So the choice is remembered here rather than baked into the catalog.
+    """
+    return _read().get("text_encoders") or {}
+
+
+def set_text_encoder(bundle_id: str, name: str) -> None:
+    """Point a model at a different text encoder. Empty name restores its default."""
+    data = _read()
+    tes = data.get("text_encoders") or {}
+    if name:
+        tes[bundle_id] = name
+    else:
+        tes.pop(bundle_id, None)
+    data["text_encoders"] = tes
+    _write(data)
