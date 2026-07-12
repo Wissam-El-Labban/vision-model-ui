@@ -1332,6 +1332,13 @@ textarea {
   justify-content: space-between;
 }
 
+/* "That repo holds several encoders: …" arrives as a list, one per line. Keep the
+   newlines rather than collapsing the candidates into one unreadable run. */
+.te-status {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* The model a text-encoder dropdown belongs to. Fixed share of the row so the selects
    line up under each other rather than stepping in and out with the label length. */
 .te-model {

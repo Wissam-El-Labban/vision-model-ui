@@ -208,6 +208,8 @@ export interface FluxProgress {
   done: number;
   total: number;
   pct: number;
+  index?: number; // file N…
+  count?: number; // …of M (a sharded encoder arrives in pieces, then gets stitched)
 }
 
 export async function getFluxModels(): Promise<{ available: boolean; models: FluxModel[] }> {
@@ -281,11 +283,12 @@ export async function getTextEncoders(): Promise<FluxTextEncoders> {
   return res.json();
 }
 
-/** Add one from HuggingFace. Needs owner/repo:file — a repo holds several quants and
- *  guessing wrong costs a multi-GB download. */
+/** Add one from HuggingFace. These run to 48 GB and a sharded repo is fetched piece by
+ *  piece and then stitched, so progress streams the same way an install's does. */
 export async function pullTextEncoder(
   repo: string,
-  onStatus: (message: string) => void
+  onStatus: (message: string) => void,
+  onProgress: (p: FluxProgress) => void
 ): Promise<void> {
   const res = await fetch("/api/flux/text-encoders/pull", {
     method: "POST",
@@ -301,6 +304,7 @@ export async function pullTextEncoder(
     try {
       const ev = JSON.parse(line);
       if (ev.type === "status") onStatus(ev.message as string);
+      else if (ev.type === "progress") onProgress(ev as FluxProgress);
       else if (ev.type === "error") failure = ev.message as string;
     } catch {
       /* ignore keepalives */
@@ -365,7 +369,8 @@ export async function clearHfToken(): Promise<void> {
  *  owner/name:file.gguf). Streams coarse progress. */
 export async function pullFluxModel(
   repo: string,
-  onStatus: (message: string) => void
+  onStatus: (message: string) => void,
+  onProgress: (p: FluxProgress) => void
 ): Promise<void> {
   const res = await fetch("/api/flux/pull", {
     method: "POST",
@@ -381,6 +386,7 @@ export async function pullFluxModel(
     try {
       const ev = JSON.parse(line);
       if (ev.type === "status") onStatus(ev.message as string);
+      else if (ev.type === "progress") onProgress(ev as FluxProgress);
       else if (ev.type === "error") failure = ev.message as string;
     } catch {
       /* ignore keepalives */

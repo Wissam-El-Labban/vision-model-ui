@@ -259,8 +259,33 @@ def _post(path: str, data: dict) -> dict:
         data=json.dumps(data).encode(),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req) as r:
-        return json.load(r)
+    try:
+        with urllib.request.urlopen(req) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as exc:
+        # ComfyUI rejects a graph it can't run with a 400 whose *body* says why — which
+        # node, which input, what it expected. Letting urllib raise the bare status threw
+        # that away and left the UI showing "HTTP Error 400: Bad Request".
+        raise RuntimeError(_comfy_error(exc)) from exc
+
+
+def _comfy_error(exc) -> str:
+    """The human-readable complaint out of a ComfyUI error body."""
+    try:
+        body = json.loads(exc.read())
+    except Exception:
+        return f"the image engine rejected the request (HTTP {exc.code})."
+    bits = []
+    for node in (body.get("node_errors") or {}).values():
+        for e in node.get("errors") or []:
+            detail = e.get("details") or ""
+            bits.append(f"{e.get('message', 'error')}{f' ({detail})' if detail else ''}")
+    if not bits:
+        err = body.get("error") or {}
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        detail = err.get("details") if isinstance(err, dict) else ""
+        bits = [f"{msg}{f' ({detail})' if detail else ''}"] if msg else []
+    return "; ".join(bits) or f"the image engine rejected the request (HTTP {exc.code})."
 
 
 def _get(path: str) -> dict:
@@ -328,6 +353,18 @@ def _unet_node(unet: str) -> dict:
     return {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": dtype}}
 
 
+def _clip_node(name: str, kind: str) -> dict:
+    """Pick the loader for a text encoder's format, the way `_unet_node` does.
+
+    ComfyUI's own CLIPLoader can't take a GGUF — `.gguf` isn't in its folder's allowed
+    extensions, so naming one gets the whole graph rejected at validation (a bare 400).
+    The GGUF node registers a parallel `clip_gguf` folder over the same directory and
+    reads the quantized file; both loaders take the same `type`.
+    """
+    cls = "CLIPLoaderGGUF" if name.lower().endswith(".gguf") else "CLIPLoader"
+    return {"class_type": cls, "inputs": {"clip_name": name, "type": kind}}
+
+
 def _loaders(unet: str) -> dict:
     """The transformer + its text encoder + its VAE. All three are family-specific:
     a FLUX.2 transformer decodes 128-channel latents through its own VAE and reads
@@ -336,8 +373,7 @@ def _loaders(unet: str) -> dict:
         b = cat.bundle_of_unet(unet)
         return {
             "unet": _unet_node(unet),
-            "clip": {"class_type": "CLIPLoader",
-                     "inputs": {"clip_name": clip_for(b), "type": "flux2"}},
+            "clip": _clip_node(clip_for(b), "flux2"),
             "vae": {"class_type": "VAELoader", "inputs": {"vae_name": b["vae"]}},
         }
     return {
@@ -1022,7 +1058,7 @@ def _json_line(lines: list[str]) -> list:
     raise RuntimeError("HuggingFace returned nothing usable. Check the repo id.")
 
 
-def pull_unet(repo: str, on_status=None) -> None:
+def pull_unet(repo: str, on_status=None, on_progress=None) -> None:
     """Download an extra FLUX UNet from a HuggingFace repo (opt-in, streams status).
 
     A bare `owner/repo` auto-picks the transformer; `owner/repo:file` names it outright.
@@ -1055,7 +1091,7 @@ def pull_unet(repo: str, on_status=None) -> None:
         if not _looks_like_unet(keys):
             say(f"{os.path.basename(filename)} doesn't look like a FLUX UNet — loading anyway.")
 
-    _run_child(["fetch", repo_id, filename, str(UNET_DIR)], say)
+    _run_child(["fetch", repo_id, filename, str(UNET_DIR)], say, on_progress=on_progress)
     say("Download complete.")
 
 
@@ -1134,6 +1170,7 @@ def _merge_shards(shards: list, out: Path, embed: tuple | None = None,
 
     total = offset
     done = 0
+    last = 0.0  # throttle: chunks land every few ms and the browser doesn't need each one
     tmp = out.with_name(out.name + ".part")
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -1155,9 +1192,12 @@ def _merge_shards(shards: list, out: Path, embed: tuple | None = None,
                         w.write(chunk)
                         left -= len(chunk)
                         done += len(chunk)
-                        if on_progress:
+                        if on_progress and time.time() - last > 0.4:
                             on_progress({"file": out.name, "done": done, "total": total,
                                          "pct": 100 * done // max(total, 1)})
+                            last = time.time()
+        if on_progress:  # the throttle can swallow the last chunk; don't end at 97%
+            on_progress({"file": out.name, "done": total, "total": total, "pct": 100})
         os.replace(tmp, out)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -1337,6 +1377,11 @@ def set_text_encoder(bundle_id: str, name: str) -> None:
 
 _SHARD_RE = re.compile(r"^(?P<stem>.*?)-\d{5}-of-\d{5}\.safetensors$", re.I)
 
+# What is *not* a text encoder. The mirror image of `_AUX_RE`, which lists what isn't a
+# UNet — and which must not be reused here: it rejects anything named `clip`, `t5` or
+# `encoder`, i.e. exactly the files this function exists to find.
+_NOT_TE_RE = re.compile(r"lora|vae|\bae\b|unet|transformer|diffusion_model|controlnet", re.I)
+
 
 def _shard_group(files: list[str]) -> list[str]:
     """The one sharded checkpoint in a repo, in order — or [] if there isn't exactly one.
@@ -1360,7 +1405,7 @@ def _shard_group(files: list[str]) -> list[str]:
     return sorted(groups[te[0] if te else next(iter(groups))])
 
 
-def pull_text_encoder(repo: str, on_status=None) -> None:
+def pull_text_encoder(repo: str, on_status=None, on_progress=None) -> None:
     """Add a text encoder from any HuggingFace repo, gated ones included.
 
     Three shapes of repo, because that's what people actually paste:
@@ -1380,9 +1425,11 @@ def pull_text_encoder(repo: str, on_status=None) -> None:
     token = settings.hf_token()
     cat.TE_DIR.mkdir(parents=True, exist_ok=True)
     say = on_status or (lambda _m: None)
+    tick = on_progress or (lambda _p: None)
 
     if filename:
-        _run_child(["fetch", repo_id, filename, str(cat.TE_DIR)], on_status=say, token=token)
+        _run_child(["fetch", repo_id, filename, str(cat.TE_DIR)],
+                   on_status=say, on_progress=tick, token=token)
         say("Download complete.")
         return
 
@@ -1393,22 +1440,25 @@ def pull_text_encoder(repo: str, on_status=None) -> None:
     if out.exists():
         raise ValueError(f"{out.name} is already installed.")
 
-    tensors = _json_line(_run_child(["probe", repo_id], token=token))
-    whole = [f for f in tensors
-             if "-of-" not in f["name"].lower() and not _AUX_RE.search(f["name"])]
-    if len(whole) == 1:
-        _run_child(["fetch", repo_id, whole[0]["name"], str(cat.TE_DIR), out.name],
-                   on_status=say, token=token)
-        say("Download complete.")
-        return
-    if len(whole) > 1:
-        listed = "\n".join(f"  {repo_id}:{f['name']}  ({f['size'] / 1e9:.1f} GB)"
-                           for f in sorted(whole, key=lambda f: -f["size"])[:8])
-        raise ValueError(f"{repo_id} holds several encoders — name the one you want:\n{listed}")
-
+    # Shards first. A full model repo holds the transformer *and* the encoder, and only
+    # the encoder is sharded under text_encoder/ — checking single files first would pick
+    # FLUX.2 [dev]'s 64 GB transformer and call it a text encoder.
     listing = _json_line(_run_child(["listing", repo_id], token=token))
     shards = _shard_group(listing)
     if not shards:
+        tensors = _json_line(_run_child(["probe", repo_id], token=token))
+        whole = [f for f in tensors
+                 if "-of-" not in f["name"].lower() and not _NOT_TE_RE.search(f["name"])]
+        if len(whole) == 1:
+            _run_child(["fetch", repo_id, whole[0]["name"], str(cat.TE_DIR), out.name],
+                       on_status=say, on_progress=tick, token=token)
+            say("Download complete.")
+            return
+        if len(whole) > 1:
+            listed = "\n".join(f"  {repo_id}:{f['name']}  ({f['size'] / 1e9:.1f} GB)"
+                               for f in sorted(whole, key=lambda f: -f["size"])[:8])
+            raise ValueError(
+                f"{repo_id} holds several encoders — name the one you want:\n{listed}")
         raise ValueError(f"No text encoder found in {repo_id}. Use owner/repo:file to name one.")
     staging = cat.STAGING_DIR / out.stem
 
@@ -1416,15 +1466,26 @@ def pull_text_encoder(repo: str, on_status=None) -> None:
     # *inside*, as a `tekken_model` tensor. If the repo carries one, bring it along —
     # without it a Mistral encoder loads and then fails at the first prompt.
     tekken = next((f for f in listing if os.path.basename(f) == "tekken.json"), None)
+    # The stitch is a step of its own, not a pause at 100%: it moves 16-48 GB of bytes and
+    # takes long enough that a bar frozen on the last shard reads as a hang.
+    total_steps = len(shards) + (1 if tekken else 0) + 1
+
+    def step(i: int):
+        return lambda p: tick({**p, "index": i, "count": total_steps})
+
     try:
         for i, s in enumerate(shards, 1):
-            say(f"[{i}/{len(shards)}] {os.path.basename(s)}")
-            _run_child(["fetch", repo_id, s, str(staging)], on_status=say, token=token)
+            say(f"[{i}/{total_steps}] {os.path.basename(s)}")
+            _run_child(["fetch", repo_id, s, str(staging)],
+                       on_status=say, on_progress=step(i), token=token)
         if tekken:
-            _run_child(["fetch", repo_id, tekken, str(staging)], on_status=say, token=token)
-        say(f"stitching {out.name} from {len(shards)} shards…")
+            say(f"[{len(shards) + 1}/{total_steps}] {os.path.basename(tekken)}")
+            _run_child(["fetch", repo_id, tekken, str(staging)],
+                       on_status=say, on_progress=step(len(shards) + 1), token=token)
+        say(f"[{total_steps}/{total_steps}] stitching {out.name} from {len(shards)} shards…")
         _merge_shards([staging / os.path.basename(s) for s in shards], out,
-                      embed=(staging / "tekken.json", "tekken_model") if tekken else None)
+                      embed=(staging / "tekken.json", "tekken_model") if tekken else None,
+                      on_progress=step(total_steps))
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     say("Download complete.")

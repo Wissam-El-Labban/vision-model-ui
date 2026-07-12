@@ -265,7 +265,11 @@ def flux_pull(req: FluxPullRequest):
         raise HTTPException(status_code=503, detail="The image engine isn't installed.")
 
     def work(emit):
-        fx.pull_unet(req.repo, on_status=lambda m: emit({"type": "status", "message": m}))
+        fx.pull_unet(
+            req.repo,
+            on_status=lambda m: emit({"type": "status", "message": m}),
+            on_progress=lambda p: emit({"type": "progress", **p}),
+        )
 
     return _ndjson(work)
 
@@ -301,7 +305,11 @@ def flux_text_encoder_pull(req: TextEncoderPullRequest):
         raise HTTPException(status_code=503, detail="The image engine isn't installed.")
 
     def work(emit):
-        fx.pull_text_encoder(req.repo, on_status=lambda m: emit({"type": "status", "message": m}))
+        fx.pull_text_encoder(
+            req.repo,
+            on_status=lambda m: emit({"type": "status", "message": m}),
+            on_progress=lambda p: emit({"type": "progress", **p}),
+        )
 
     return _ndjson(work)
 

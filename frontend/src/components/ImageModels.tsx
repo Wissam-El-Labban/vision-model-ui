@@ -35,6 +35,9 @@ export default function ImageModels({ models, onChanged }: Props) {
   const [repo, setRepo] = useState("");
   const [tes, setTes] = useState<FluxTextEncoders | null>(null);
   const [teRepo, setTeRepo] = useState("");
+  // Kept apart from `status`: that renders up beside the bundle list, which on a long
+  // panel is off-screen from the encoder form — an error there reads as nothing at all.
+  const [teStatus, setTeStatus] = useState<string | null>(null);
 
   async function refresh() {
     try {
@@ -135,13 +138,23 @@ export default function ImageModels({ models, onChanged }: Props) {
     if (!repo.trim()) return;
     setBusy("repo");
     setStatus("starting…");
+    setPct(null);
     try {
-      await pullFluxModel(repo.trim(), (m) => setStatus(m));
+      await pullFluxModel(
+        repo.trim(),
+        (m) => setStatus(m),
+        (p) => {
+          setStatus(`${p.file} — ${(p.done / 1e9).toFixed(1)}/${(p.total / 1e9).toFixed(1)} GB`);
+          setPct(p.pct);
+        }
+      );
       setStatus("✓ added");
+      setPct(null);
       setRepo("");
       onChanged();
     } catch (e) {
       setStatus(`✗ ${(e as Error).message}`);
+      setPct(null);
     } finally {
       setBusy(null);
     }
@@ -159,14 +172,27 @@ export default function ImageModels({ models, onChanged }: Props) {
   async function addTextEncoder() {
     if (!teRepo.trim()) return;
     setBusy("te");
-    setStatus("starting…");
+    setTeStatus("starting…");
+    setPct(null);
     try {
-      await pullTextEncoder(teRepo.trim(), (m) => setStatus(m));
-      setStatus("✓ text encoder added");
+      await pullTextEncoder(
+        teRepo.trim(),
+        (m) => setTeStatus(m),
+        (p) => {
+          const step = p.count ? `[${p.index}/${p.count}] ` : "";
+          setTeStatus(
+            `${step}${p.file} — ${(p.done / 1e9).toFixed(1)}/${(p.total / 1e9).toFixed(1)} GB`
+          );
+          setPct(p.pct);
+        }
+      );
+      setTeStatus("✓ text encoder added");
+      setPct(null);
       setTeRepo("");
       await refresh();
     } catch (e) {
-      setStatus(`✗ ${(e as Error).message}`);
+      setTeStatus(`✗ ${(e as Error).message}`);
+      setPct(null);
     } finally {
       setBusy(null);
     }
@@ -177,7 +203,7 @@ export default function ImageModels({ models, onChanged }: Props) {
       await selectTextEncoder(bundleId, name);
       await refresh();
     } catch (e) {
-      setStatus(`✗ ${(e as Error).message}`);
+      setTeStatus(`✗ ${(e as Error).message}`);
     }
   }
 
@@ -186,7 +212,7 @@ export default function ImageModels({ models, onChanged }: Props) {
       await deleteTextEncoder(name);
       await refresh();
     } catch (e) {
-      setStatus(`✗ ${(e as Error).message}`);
+      setTeStatus(`✗ ${(e as Error).message}`);
     }
   }
 
@@ -297,9 +323,17 @@ export default function ImageModels({ models, onChanged }: Props) {
                   placeholder="owner/model (HuggingFace)"
                 />
                 <button className="btn" onClick={addRepo} disabled={busy !== null}>
-                  ⬇ Add
+                  {busy === "repo" ? "Adding…" : "⬇ Add"}
                 </button>
               </div>
+              {busy === "repo" && (
+                <div className="bundle-progress">
+                  <div className="progress">
+                    <div className="progress-bar" style={{ width: `${pct ?? 0}%` }} />
+                  </div>
+                  <div className="muted small">{status ?? "starting…"}</div>
+                </div>
+              )}
               <div className="muted small">
                 Extras run on FLUX.1's text encoder, so they need the FLUX.1 model installed.
               </div>
@@ -367,9 +401,25 @@ export default function ImageModels({ models, onChanged }: Props) {
                       placeholder="owner/repo (HuggingFace)"
                     />
                     <button className="btn" onClick={addTextEncoder} disabled={busy !== null}>
-                      ⬇ Add
+                      {busy === "te" ? "Adding…" : "⬇ Add"}
                     </button>
                   </div>
+                  {/* Same byte counter the bundles get — these run to 48 GB, and the
+                      stitch at the end is its own step, so a spinner would say nothing. */}
+                  {busy === "te" && (
+                    <div className="bundle-progress">
+                      <div className="progress">
+                        <div className="progress-bar" style={{ width: `${pct ?? 0}%` }} />
+                      </div>
+                      <div className="muted small">{teStatus ?? "starting…"}</div>
+                    </div>
+                  )}
+                  {/* Reported here, not up by the bundles: a repo holding several encoders
+                      answers with the list to choose from, and that has to land where the
+                      person who typed the repo is actually looking. */}
+                  {busy !== "te" && teStatus && (
+                    <div className="muted small note te-status">{teStatus}</div>
+                  )}
                   <div className="muted small">
                     A bare repo works even in the sharded transformers layout — the shards
                     are stitched into the single file ComfyUI loads. Add{" "}
