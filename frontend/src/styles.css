@@ -1272,7 +1272,52 @@ textarea {
   margin-bottom: 0;
 }
 
-/* FLUX model management (in the generation-settings popover). */
+/* Image model installs (sidebar → Image Models). */
+.bundle-list {
+  list-style: none;
+  margin: 6px 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bundle-list li {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.bundle-list li.installed {
+  border-color: rgba(47, 129, 247, 0.5);
+  background: rgba(47, 129, 247, 0.08);
+}
+
+.bundle-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.bundle-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.btn.small {
+  padding: 2px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.extra-model {
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* FLUX model picker (in the generation-settings popover). */
 .flux-models {
   border-top: 1px solid var(--border);
   margin-top: 10px;

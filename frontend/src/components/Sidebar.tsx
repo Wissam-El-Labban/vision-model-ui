@@ -1,14 +1,18 @@
 import { useState } from "react";
+import ImageModels from "./ImageModels";
 import ModelManager from "./ModelManager";
 import UpdateBanner from "./UpdateBanner";
 import ChatList from "./ChatList";
 import type { ChatSummary } from "../types";
+import type { FluxModel } from "../api";
 
 interface Props {
   ollamaUrl: string;
   setOllamaUrl: (v: string) => void;
   models: { vision: string[]; all: string[] };
   refreshModels: () => void;
+  fluxModels: FluxModel[];
+  refreshFlux: () => void;
   chats: ChatSummary[];
   currentChatId: string;
   onNewChat: () => void;
@@ -22,6 +26,8 @@ export default function Sidebar(props: Props) {
     setOllamaUrl,
     models,
     refreshModels,
+    fluxModels,
+    refreshFlux,
     chats,
     currentChatId,
     onNewChat,
@@ -62,6 +68,8 @@ export default function Sidebar(props: Props) {
         allModels={models.all}
         onChanged={refreshModels}
       />
+
+      <ImageModels models={fluxModels} onChanged={refreshFlux} />
 
       <div className="spacer" />
       <p className="footer-note muted small">

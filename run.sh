@@ -30,7 +30,7 @@ if ! command -v "$PYTHON" &> /dev/null; then
     exit 1
 fi
 
-# git + curl are required to fetch ComfyUI and download weights/Ollama. Vanilla
+# git + curl are required to fetch ComfyUI and install Ollama. Vanilla
 # Debian/Ubuntu images often ship without them, so install them up front (before
 # the FLUX section, which may be skipped, and Ollama, which also needs curl).
 for _tool in git curl; do
@@ -117,19 +117,17 @@ npm run build
 popd > /dev/null
 echo -e "${GREEN}✓ Frontend built${NC}"
 
-# --- Image generation: FLUX (ComfyUI sidecar) ------------------------------- #
+# --- Image generation: the FLUX engine (ComfyUI sidecar) -------------------- #
 # ALL image generation runs here — the backend venv above holds no torch at all.
-# "Create" (txt2img/img2img) runs on FLUX.1-dev; "Edit" and "Combine" run on
-# FLUX.1 Kontext, which additionally conditions on the source image. Both are 12B
-# models needing torch >= 2.4, so they live in a separate venv with GGUF weights
-# (~30 GB). Everything below is idempotent and stays local. Chat-only users can
-# skip the heavy download: SKIP_FLUX=1 ./run.sh
+# This installs the *engine* only. No weights: which model to run is the user's
+# choice (a 48 GB card wants FLUX.2, a 24 GB one wants quantized FLUX.1), and it's
+# 30-50 GB either way, so models are installed from the app's Models panel instead
+# of behind a startup script. See backend/flux_catalog.py.
 #
-# Q8_0 is the quality tier for a 24 GB card. To reclaim the ~9 GB of superseded
-# Q4 weights from an older install: PRUNE_OLD=1 ./run.sh
+# Idempotent and local. Chat-only users can skip the engine too: SKIP_FLUX=1 ./run.sh
 echo ""
 echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}Setting up FLUX (image generation)...${NC}"
+echo -e "${BLUE}Setting up the image engine...${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
 
@@ -140,50 +138,30 @@ CVENV="$FLUX_DIR/cvenv"
 COMFY_COMMIT="51bf508a0b1bde9416a0c221b0f33f8325305229"
 GGUF_COMMIT="6ea2651e7df66d7585f6ffee804b20e92fb38b8a"
 
-# repo|file|models-subdir — all non-gated HuggingFace weights (no token needed).
-# FLUX itself is gated upstream; these community mirrors aren't.
-FLUX_MODELS=(
-    "city96/FLUX.1-dev-gguf|flux1-dev-Q8_0.gguf|unet"
-    "QuantStack/FLUX.1-Kontext-dev-GGUF|flux1-kontext-dev-Q8_0.gguf|unet"
-    "city96/t5-v1_1-xxl-encoder-gguf|t5-v1_1-xxl-encoder-Q8_0.gguf|clip"
-    "comfyanonymous/flux_text_encoders|clip_l.safetensors|clip"
-    "ffxvs/vae-flux|ae.safetensors|vae"
-)
-
-# Weights from the pre-Q8 (Tesla T4) layout. Superseded, never loaded — but they
-# are ~9 GB, so offer to reclaim rather than deleting behind the user's back.
-FLUX_OLD_MODELS=(
-    "unet/flux1-kontext-dev-Q4_K_S.gguf"
-    "clip/t5-v1_1-xxl-encoder-Q4_K_M.gguf"
-)
-
-# Mirror flux_client.available(): installed only if the venv, ComfyUI, and every
-# weight are present.
+# Mirror flux_client.runtime_ready(): the venv and ComfyUI, not the weights.
 flux_installed() {
     [ -x "$CVENV/bin/python" ] || return 1
     [ -f "$COMFY_DIR/main.py" ] || return 1
-    local spec file sub
-    for spec in "${FLUX_MODELS[@]}"; do
-        IFS='|' read -r _ file sub <<< "$spec"
-        [ -f "$COMFY_DIR/models/$sub/$file" ] || return 1
-    done
     return 0
 }
 
-# Reclaim the superseded Q4 weights (opt-in — this deletes files).
-if [ "${PRUNE_OLD:-0}" = "1" ]; then
-    for rel in "${FLUX_OLD_MODELS[@]}"; do
-        if [ -f "$COMFY_DIR/models/$rel" ]; then
-            echo -e "${YELLOW}Removing superseded weight: $rel${NC}"
-            rm -f "$COMFY_DIR/models/$rel"
-        fi
-    done
-fi
+# Report what's installed, and tell a fresh machine where to get a model.
+models_hint() {
+    local unets
+    unets="$(ls "$COMFY_DIR/models/unet"/*.gguf "$COMFY_DIR/models/unet"/*.safetensors 2>/dev/null | wc -l)"
+    if [ "$unets" -gt 0 ]; then
+        echo -e "${GREEN}✓ $unets image model file(s) installed${NC}"
+    else
+        echo -e "${YELLOW}No image model installed yet — open the app and install one in the${NC}"
+        echo -e "${YELLOW}Models panel (FLUX.2 [dev] recommended; needs ~50 GB and a 48 GB GPU).${NC}"
+    fi
+}
 
 if [ "${SKIP_FLUX:-0}" = "1" ]; then
-    echo -e "${YELLOW}SKIP_FLUX=1 — skipping FLUX setup (image generation will be unavailable).${NC}"
+    echo -e "${YELLOW}SKIP_FLUX=1 — skipping the image engine (image generation will be unavailable).${NC}"
 elif flux_installed; then
-    echo -e "${GREEN}✓ FLUX already installed${NC}"
+    echo -e "${GREEN}✓ Image engine already installed${NC}"
+    models_hint
 else
     # 1. ComfyUI + the GGUF loader node, pinned to known-good commits.
     if [ ! -f "$COMFY_DIR/main.py" ]; then
@@ -210,31 +188,11 @@ else
         -r "$COMFY_DIR/requirements.txt"
     "$CVENV/bin/pip" install --quiet -r "$COMFY_DIR/custom_nodes/ComfyUI-GGUF/requirements.txt"
 
-    # 3. The four weight files (~10 GB). Downloaded atomically (.part → rename),
-    #    resumable across re-runs, and skipped once present.
-    for spec in "${FLUX_MODELS[@]}"; do
-        IFS='|' read -r repo file sub <<< "$spec"
-        dest_dir="$COMFY_DIR/models/$sub"
-        dest="$dest_dir/$file"
-        mkdir -p "$dest_dir"
-        if [ -f "$dest" ] && [ "$(stat -c%s "$dest")" -gt 1000000 ]; then
-            echo -e "${GREEN}✓ $file already present${NC}"
-            continue
-        fi
-        echo -e "${YELLOW}Downloading $file (this can take a while)...${NC}"
-        if ! curl -fL -C - --retry 3 -o "$dest.part" \
-             "https://huggingface.co/$repo/resolve/main/$file?download=true"; then
-            echo -e "${RED}✗ Failed to download $file. Re-run ./run.sh to resume.${NC}"
-            rm -f "$dest.part"
-            exit 1
-        fi
-        mv "$dest.part" "$dest"
-    done
-
     if flux_installed; then
-        echo -e "${GREEN}✓ FLUX Kontext ready (edit + combine enabled)${NC}"
+        echo -e "${GREEN}✓ Image engine ready${NC}"
+        models_hint
     else
-        echo -e "${RED}✗ FLUX Kontext setup incomplete — edit/combine unavailable.${NC}"
+        echo -e "${RED}✗ Image engine setup incomplete — image generation unavailable.${NC}"
     fi
 fi
 

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fileToResizedDataUrl } from "../fileUtils";
 import type { GenSettings, GenOp } from "../types";
-import { pullFluxModel, deleteFluxModel, type FluxModel } from "../api";
+import type { FluxModel } from "../api";
 
 interface Props {
   text: string;
@@ -28,9 +28,10 @@ interface Props {
   /** Which generate workflow (create / edit / compose). */
   genOp: GenOp;
   setGenOp: (v: GenOp) => void;
-  /** FLUX sidecar + weights installed on the backend. */
+  /** Engine + at least one model installed on the backend. */
   fluxAvailable: boolean;
-  /** Installed FLUX UNets, defaults first. Filtered by role per mode. */
+  /** Installed image models. Filtered by role per mode; installing and removing
+   *  them lives in the sidebar's Image Models panel. */
   fluxModels: FluxModel[];
   gen: GenSettings;
   setGen: (v: GenSettings) => void;
@@ -39,8 +40,6 @@ interface Props {
   /** First pinned-panel image, used as the img2img source when nothing is
    *  attached to the message. `null` when the panel is empty. */
   pinnedInit: string | null;
-  /** Refresh the FLUX model list after an add/remove. */
-  onFluxModelsChanged: () => void;
 }
 
 export default function Composer({
@@ -71,65 +70,29 @@ export default function Composer({
   setGen,
   pinnedCount,
   pinnedInit,
-  onFluxModelsChanged,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const sysRef = useRef<HTMLDivElement>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
   const [sysOpen, setSysOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [fluxRepo, setFluxRepo] = useState("");
-  const [fluxStatus, setFluxStatus] = useState<string | null>(null);
-  const [fluxBusy, setFluxBusy] = useState(false);
 
   const hasSystem = systemPrompt.trim().length > 0 || !!systemImage;
   const patchGen = (p: Partial<typeof gen>) => setGen({ ...gen, ...p });
 
   const isEdit = genOp === "edit";
   const isCompose = genOp === "compose";
-  // create runs on a plain FLUX dev UNet; edit/compose need a Kontext UNet, which
-  // additionally conditions on the source image. The two sets are disjoint.
+  // A FLUX.2 model serves both roles; on FLUX.1 the sets are disjoint, because
+  // edit/compose need a Kontext transformer that conditions on the source image.
   const role = isEdit || isCompose ? "edit" : "create";
-  const roleModels = fluxModels.filter((m) => m.role === role);
+  const roleModels = fluxModels.filter((m) => m.roles.includes(role));
 
-  // "" in gen.fluxModel means "this mode's default", so the active selection
-  // resolves to the default model's filename within the current role.
-  const defaultFluxName = roleModels.find((m) => m.default)?.name ?? "";
-  const activeFlux = gen.fluxModel || defaultFluxName;
+  // "" in gen.fluxModel means "let the backend pick this mode's default", which is
+  // the first installed model that can serve the role — so mirror that here.
+  const activeFlux = gen.fluxModel || roleModels[0]?.name || "";
   const prettyFlux = (name: string) => name.replace(/\.(gguf|safetensors|sft)$/i, "");
-  const pickFlux = (m: FluxModel) => patchGen({ fluxModel: m.default ? "" : m.name });
+  const pickFlux = (m: FluxModel) => patchGen({ fluxModel: m.name });
 
-  async function addFluxModel() {
-    const repo = fluxRepo.trim();
-    if (!repo || fluxBusy) return;
-    setFluxBusy(true);
-    setFluxStatus("Starting…");
-    try {
-      await pullFluxModel(repo, setFluxStatus);
-      setFluxRepo("");
-      setFluxStatus(null);
-      onFluxModelsChanged();
-    } catch (e) {
-      setFluxStatus(`⚠️ ${(e as Error).message}`);
-    } finally {
-      setFluxBusy(false);
-    }
-  }
-
-  async function removeFluxModel(name: string) {
-    if (fluxBusy) return;
-    setFluxBusy(true);
-    setFluxStatus(null);
-    try {
-      await deleteFluxModel(name);
-      if (gen.fluxModel === name) patchGen({ fluxModel: "" }); // fell back to default
-      onFluxModelsChanged();
-    } catch (e) {
-      setFluxStatus(`⚠️ ${(e as Error).message}`);
-    } finally {
-      setFluxBusy(false);
-    }
-  }
   // In create/edit the source is the attached image, else the first pinned-panel
   // image. create infers txt2img vs img2img from whether one is present.
   const initSource = images.length > 0 ? "attached" : pinnedInit ? "pinned" : null;
@@ -356,19 +319,15 @@ export default function Composer({
                 {!fluxAvailable && (
                   <div className="dl-box">
                     <p className="hint muted">
-                      ⚠️ FLUX isn't installed on this machine, so image generation is
-                      unavailable. Run <code>./run.sh</code> to fetch the weights.
+                      ⚠️ No image model is installed, so image generation is unavailable.
+                      Install one under <strong>🖼️ Image Models</strong> in the sidebar.
                     </p>
                   </div>
                 )}
-                <p className="hint muted" style={{ marginTop: 0 }}>
-                  ✨ Powered by <strong>{role === "edit" ? "FLUX Kontext" : "FLUX.1-dev"}</strong>{" "}
-                  (local). High quality — expect about a minute per image.
-                </p>
                 {fluxAvailable && (
                   <div className="flux-models">
                     <label className="lbl">
-                      {role === "edit" ? "FLUX Kontext models" : "FLUX create models"}
+                      Model ({role === "edit" ? "edit / combine" : "create"})
                     </label>
                     <ul className="flux-model-list">
                       {roleModels.map((m) => (
@@ -383,57 +342,13 @@ export default function Composer({
                             {prettyFlux(m.name)}
                           </button>
                           <span className="flux-model-size">{m.size_gb} GB</span>
-                          {m.default ? (
-                            <span className="flux-model-tag">default</span>
-                          ) : (
-                            <button
-                              type="button"
-                              className="flux-model-del"
-                              title="Remove this model"
-                              disabled={fluxBusy}
-                              onClick={() => removeFluxModel(m.name)}
-                            >
-                              🗑
-                            </button>
-                          )}
                         </li>
                       ))}
                     </ul>
-                    <div className="flux-add">
-                      <input
-                        type="text"
-                        value={fluxRepo}
-                        placeholder="owner/model (HuggingFace repo)"
-                        disabled={fluxBusy}
-                        onChange={(e) => setFluxRepo(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault();
-                            addFluxModel();
-                          }
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={fluxBusy || !fluxRepo.trim()}
-                        onClick={addFluxModel}
-                      >
-                        ⬇ Add
-                      </button>
-                    </div>
-                    {fluxStatus && <div className="dl-status">{fluxStatus}</div>}
                     <p className="hint muted">
-                      Paste a HuggingFace FLUX repo (e.g.{" "}
-                      <code>{role === "edit"
-                        ? "QuantStack/FLUX.1-Kontext-dev-GGUF"
-                        : "city96/FLUX.1-dev-gguf"}</code>), or{" "}
-                      <code>owner/repo:file</code> for a specific <code>.gguf</code>/
-                      <code>.safetensors</code>. A bare repo picks the highest quant
-                      (Q8_0), or the largest checkpoint if the repo ships no GGUF;
-                      unquantized models load in fp8 to fit this GPU. Models with{" "}
-                      <code>kontext</code> in the name serve Edit/Combine; the rest serve
-                      Create. Downloaded once, then fully offline.
+                      Local, and fully offline once downloaded — expect about a minute per
+                      image. Add or remove models under <strong>🖼️ Image Models</strong> in
+                      the sidebar.
                     </p>
                   </div>
                 )}
@@ -547,28 +462,21 @@ export default function Composer({
         )}
 
         {genMode ? (
-          <div className="model-control" title="FLUX model">
+          <div className="model-control" title="Image model">
             <span aria-hidden>✨</span>
             {roleModels.length > 0 ? (
               <select
                 value={activeFlux}
-                onChange={(e) =>
-                  patchGen({
-                    fluxModel: e.target.value === defaultFluxName ? "" : e.target.value,
-                  })
-                }
+                onChange={(e) => patchGen({ fluxModel: e.target.value })}
               >
                 {roleModels.map((m) => (
                   <option key={m.name} value={m.name}>
                     {prettyFlux(m.name)}
-                    {m.default ? " (default)" : ""}
                   </option>
                 ))}
               </select>
             ) : (
-              <span className="flux-engine">
-                {role === "edit" ? "FLUX Kontext" : "FLUX.1-dev"}
-              </span>
+              <span className="flux-engine">no model</span>
             )}
           </div>
         ) : (

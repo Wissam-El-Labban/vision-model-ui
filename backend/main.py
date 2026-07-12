@@ -17,8 +17,10 @@ from pydantic import BaseModel
 
 from . import images  # noqa: F401  (imported first: pins HF offline env)
 from . import db
+from . import flux_catalog as cat
 from . import flux_client as fx
 from . import ollama_client as oc
+from . import settings
 
 app = FastAPI(title="Vision Model Chat")
 
@@ -170,30 +172,20 @@ def generate_unload():
 
 
 # --------------------------------------------------------------------------- #
-# FLUX UNet management (list / add from a HF repo / remove extras)
+# Image models: install a catalog bundle, add a UNet from any HF repo, remove either
 # --------------------------------------------------------------------------- #
-@app.get("/api/flux/models")
-def flux_models():
-    """Installed UNets, each tagged with the role (create | edit) it can serve."""
-    return {"available": fx.available(), "models": fx.list_unets()}
+def _ndjson(work) -> StreamingResponse:
+    """Run `work(emit)` on a thread and stream whatever it emits as NDJSON.
 
-
-class FluxPullRequest(BaseModel):
-    repo: str
-
-
-@app.post("/api/flux/pull")
-def flux_pull(req: FluxPullRequest):
-    """Download an extra FLUX UNet from a HuggingFace repo (opt-in, streams status)."""
-    if not fx.available():
-        raise HTTPException(status_code=503, detail="FLUX isn't installed on this machine.")
-
+    Downloads are tens of GB, so the browser gets progress as it happens rather than
+    one response an hour later.
+    """
     def gen():
         events: queue.Queue = queue.Queue()
 
         def worker():
             try:
-                fx.pull_unet(req.repo, on_status=lambda m: events.put({"type": "status", "message": m}))
+                work(events.put)
                 events.put({"type": "done"})
             except Exception as exc:
                 events.put({"type": "error", "message": str(exc)})
@@ -210,15 +202,111 @@ def flux_pull(req: FluxPullRequest):
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
+@app.get("/api/flux/models")
+def flux_models():
+    """Installed transformers, each tagged with the roles (create / edit) it can serve."""
+    return {"available": fx.available(), "models": fx.list_unets()}
+
+
+@app.get("/api/flux/catalog")
+def flux_catalog():
+    """The installable models and what it would take to install them."""
+    return {
+        "runtime_ready": fx.runtime_ready(),
+        "available": fx.available(),
+        "disk_free_gb": cat.free_gb(),
+        "bundles": fx.catalog(),
+        "hf_token": settings.hf_token_source(),
+    }
+
+
+class FluxInstallRequest(BaseModel):
+    id: str
+
+
+@app.post("/api/flux/install")
+def flux_install(req: FluxInstallRequest):
+    """Download a catalog model — weights, text encoder and VAE together."""
+    if not fx.runtime_ready():
+        raise HTTPException(status_code=503, detail="The image engine isn't installed.")
+
+    def work(emit):
+        fx.install_bundle(
+            req.id,
+            on_status=lambda m: emit({"type": "status", "message": m}),
+            on_progress=lambda p: emit({"type": "progress", **p}),
+        )
+
+    return _ndjson(work)
+
+
+@app.delete("/api/flux/bundles/{bundle_id}")
+def flux_bundle_delete(bundle_id: str):
+    try:
+        fx.delete_bundle(bundle_id)
+        return {"ok": True}
+    except ValueError as exc:  # unknown id
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="That model isn't installed.")
+
+
+class FluxPullRequest(BaseModel):
+    repo: str
+
+
+@app.post("/api/flux/pull")
+def flux_pull(req: FluxPullRequest):
+    """Download an extra FLUX.1 UNet from any HuggingFace repo (opt-in, streams status)."""
+    if not fx.runtime_ready():
+        raise HTTPException(status_code=503, detail="The image engine isn't installed.")
+
+    def work(emit):
+        fx.pull_unet(req.repo, on_status=lambda m: emit({"type": "status", "message": m}))
+
+    return _ndjson(work)
+
+
 @app.delete("/api/flux/models/{name}")
 def flux_delete(name: str):
     try:
         fx.delete_unet(name)
         return {"ok": True}
-    except ValueError as exc:  # default model or non-model file
+    except ValueError as exc:  # part of a bundle, or not a model file
         raise HTTPException(status_code=400, detail=str(exc))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Model not found.")
+
+
+# --------------------------------------------------------------------------- #
+# HuggingFace token — needed only for gated repos. Stored server-side, 0600, and
+# never sent back to the browser: the UI only ever learns whether one is set.
+# --------------------------------------------------------------------------- #
+class HfTokenRequest(BaseModel):
+    token: str
+
+
+@app.get("/api/settings/hf-token")
+def hf_token_get():
+    return {"source": settings.hf_token_source()}
+
+
+@app.put("/api/settings/hf-token")
+def hf_token_put(req: HfTokenRequest):
+    try:
+        user = fx.verify_token(req.token)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    settings.set_hf_token(req.token)
+    return {"source": "saved", "user": user}
+
+
+@app.delete("/api/settings/hf-token")
+def hf_token_delete():
+    settings.clear_hf_token()
+    return {"source": settings.hf_token_source()}
 
 
 @app.post("/api/generate")

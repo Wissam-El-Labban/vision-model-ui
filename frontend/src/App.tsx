@@ -31,6 +31,18 @@ function hashFromUrl(url: string): string {
   return (url.split("/").pop() || "").replace(/\.jpg$/, "");
 }
 
+/** The guidance a mode starts at, which depends on the model that will run it.
+ *
+ * FLUX.2 uses one value for every job. FLUX.1 is mode-scaled: dev needs ~3.5 to bind
+ * a text-only prompt, while Kontext wants ~2.5 — at 3.5 it clings to the reference
+ * image and ignores the instruction. Mirrors the backend's `_default_guidance`. */
+function guidanceFor(op: GenOp, models: FluxModel[]): number {
+  const role = op === "create" ? "create" : "edit";
+  const model = models.find((m) => m.roles.includes(role));
+  if (model?.family === "flux2") return 4.0;
+  return op === "create" ? 3.5 : 2.5;
+}
+
 export default function App() {
   const [ollamaUrl, setOllamaUrl] = useState(
     () => localStorage.getItem("ollamaUrl") || DEFAULT_URL
@@ -43,8 +55,8 @@ export default function App() {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [systemImage, setSystemImage] = useState<string | null>(null);
 
-  // Image generation (FLUX). `genMode` flips the composer from analyze to
-  // generate; `fluxAvailable` reports whether the sidecar + weights are present;
+  // Image generation. `genMode` flips the composer from analyze to generate;
+  // `fluxAvailable` reports whether the engine *and* a model are installed;
   // `gen` holds the tunable settings.
   const [genMode, setGenMode] = useState(false);
   // Which generate workflow: create (txt2img/img2img), edit (instruction), or
@@ -52,37 +64,46 @@ export default function App() {
   const [genOp, setGenOp] = useState<GenOp>("create");
   const [fluxAvailable, setFluxAvailable] = useState(false);
   const [gen, setGen] = useState<GenSettings>({
-    fluxModel: "", // "" = the current mode's default FLUX model
+    fluxModel: "", // "" = let the backend pick this mode's default
     steps: 20,
-    guidance: 3.5, // create (FLUX dev); edit/compose retune to 2.5
+    guidance: 3.5, // retuned to the installed model — see `guidanceFor`
     strength: 0.6,
     enhance: true,
     width: 1024, // FLUX is trained at ~1 megapixel
     height: 1024,
     seed: "",
   });
-  // Installed FLUX UNets (defaults + any the user added). Refreshed after a
-  // download/removal so the composer's model picker stays in sync.
+  // Installed image models. Refreshed after an install/removal so the composer's
+  // picker stays in sync with the sidebar's Image Models panel.
   const [fluxModels, setFluxModels] = useState<FluxModel[]>([]);
+  const guidanceReady = useRef(false);
   const refreshFlux = useCallback(() => {
     getFluxModels()
       .then((r) => {
         setFluxAvailable(r.available);
         setFluxModels(r.models);
+        // Guidance defaults depend on which model is installed, which we only learn
+        // here. Set it once, on the first list we see, so a value the user has since
+        // tuned by hand doesn't get reset by a later install.
+        if (!guidanceReady.current && r.models.length) {
+          guidanceReady.current = true;
+          setGen((g) => ({ ...g, guidance: guidanceFor(genOp, r.models) }));
+        }
       })
       .catch(() => {
-        /* backend older / weights missing — generation stays hidden */
+        /* backend older / no model installed — generation stays hidden */
       });
-  }, []);
+  }, [genOp]);
 
-  // Switching workflow retunes guidance, which is mode-scaled: create runs FLUX
-  // dev (~3.5 to bind a text-only prompt), edit/compose run Kontext (~2.5 to
-  // follow an instruction). It also clears `fluxModel`, since the two modes draw
-  // from disjoint sets of UNets.
-  const changeOp = useCallback((op: GenOp) => {
-    setGenOp(op);
-    setGen((g) => ({ ...g, fluxModel: "", steps: 20, guidance: op === "create" ? 3.5 : 2.5 }));
-  }, []);
+  // Switching workflow retunes guidance and clears the model pick, since on FLUX.1
+  // the two modes draw from disjoint sets of transformers.
+  const changeOp = useCallback(
+    (op: GenOp) => {
+      setGenOp(op);
+      setGen((g) => ({ ...g, fluxModel: "", steps: 20, guidance: guidanceFor(op, fluxModels) }));
+    },
+    [fluxModels]
+  );
 
   const [pinnedImages, setPinnedImages] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -732,6 +753,8 @@ export default function App() {
         setOllamaUrl={setOllamaUrl}
         models={models}
         refreshModels={refreshModels}
+        fluxModels={fluxModels}
+        refreshFlux={refreshFlux}
         chats={chats}
         currentChatId={currentChatId}
         onNewChat={newChat}
@@ -796,7 +819,6 @@ export default function App() {
             setGen={setGen}
             pinnedCount={pinnedImages.length}
             pinnedInit={pinnedImages[0] ?? null}
-            onFluxModelsChanged={refreshFlux}
           />
         </div>
       </main>

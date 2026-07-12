@@ -153,22 +153,125 @@ export async function pullModel(
 }
 
 // --------------------------------------------------------------------------- #
-// FLUX UNet management. Every mode runs on FLUX: `create` models serve
-// txt2img/img2img, `edit` models (Kontext) serve edit/compose.
+// Image models. A FLUX.2 model serves every mode; a FLUX.1 one serves exactly one
+// (dev creates, Kontext edits) — hence `roles`, not `role`.
 // --------------------------------------------------------------------------- #
 export type FluxRole = "create" | "edit";
 
 export interface FluxModel {
-  name: string;
-  role: FluxRole; // which modes this UNet can serve
-  default: boolean; // a bundled model — can't be removed
+  name: string; // the weight file, which is what /api/generate takes
+  label: string;
+  roles: FluxRole[];
+  bundle: string | null; // catalog id, or null for a user-added model
+  family: string;
   size_gb: number;
+}
+
+/** An installable model: its weights, text encoder and VAE, downloaded together. */
+export interface FluxBundle {
+  id: string;
+  label: string;
+  blurb: string;
+  family: string;
+  roles: FluxRole[];
+  size_gb: number;
+  vram_gb: number;
+  gated: boolean;
+  installed: boolean;
+  needed_gb: number; // still to download (a part-finished install counts what it has)
+}
+
+export interface FluxCatalog {
+  runtime_ready: boolean; // engine installed — enough to download a model
+  available: boolean; // ...and a model installed, so we can actually generate
+  disk_free_gb: number;
+  bundles: FluxBundle[];
+  hf_token: "saved" | "env" | null;
+}
+
+export interface FluxProgress {
+  file: string;
+  done: number;
+  total: number;
+  pct: number;
 }
 
 export async function getFluxModels(): Promise<{ available: boolean; models: FluxModel[] }> {
   const res = await fetch("/api/flux/models");
   if (!res.ok) throw new Error(`flux models: ${res.status}`);
   return res.json();
+}
+
+export async function getFluxCatalog(): Promise<FluxCatalog> {
+  const res = await fetch("/api/flux/catalog");
+  if (!res.ok) throw new Error(`flux catalog: ${res.status}`);
+  return res.json();
+}
+
+/** Install a catalog model. Tens of GB, so progress streams file by file. */
+export async function installFluxBundle(
+  id: string,
+  onStatus: (message: string) => void,
+  onProgress: (p: FluxProgress) => void
+): Promise<void> {
+  const res = await fetch("/api/flux/install", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `flux install: ${res.status}`);
+  }
+  let failure: string | null = null;
+  await readLines(res, (line) => {
+    try {
+      const ev = JSON.parse(line);
+      if (ev.type === "status") onStatus(ev.message as string);
+      else if (ev.type === "progress") onProgress(ev as FluxProgress);
+      else if (ev.type === "error") failure = ev.message as string;
+    } catch {
+      /* ignore keepalives */
+    }
+  });
+  if (failure) throw new Error(failure);
+}
+
+export async function deleteFluxBundle(id: string): Promise<void> {
+  const res = await fetch(`/api/flux/bundles/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `flux bundle delete: ${res.status}`);
+  }
+}
+
+// --------------------------------------------------------------------------- #
+// HuggingFace token — only needed for gated repos. It lives on the server; the
+// browser can set or clear it but never reads it back.
+// --------------------------------------------------------------------------- #
+export type HfTokenSource = "saved" | "env" | null;
+
+export async function getHfToken(): Promise<HfTokenSource> {
+  const res = await fetch("/api/settings/hf-token");
+  if (!res.ok) throw new Error(`hf token: ${res.status}`);
+  return (await res.json()).source;
+}
+
+/** Validated against HuggingFace before it's saved, so a bad paste fails here. */
+export async function setHfToken(token: string): Promise<string> {
+  const res = await fetch("/api/settings/hf-token", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  const body = await res.json().catch(() => ({ detail: res.statusText }));
+  if (!res.ok) throw new Error(body.detail ?? `hf token: ${res.status}`);
+  return body.user as string;
+}
+
+export async function clearHfToken(): Promise<void> {
+  const res = await fetch("/api/settings/hf-token", { method: "DELETE" });
+  if (!res.ok) throw new Error(`hf token: ${res.status}`);
 }
 
 /** Download an extra FLUX UNet from a HuggingFace repo (owner/name or
