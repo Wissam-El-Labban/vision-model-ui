@@ -882,6 +882,14 @@ EXTS = (".gguf", ".safetensors", ".sft")
 MAX_HEADER = 64 << 20  # a safetensors header is KBs; larger means it isn't one
 TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or ""
 
+def _api():
+    # `token=False` (not None) so huggingface_hub uses the token the parent handed us
+    # and nothing else. With None it silently falls back to a token cached in
+    # ~/.cache/huggingface/token — a credential this app never wrote and can't replace,
+    # which is exactly the stale-token trap we're avoiding.
+    from huggingface_hub import HfApi
+    return HfApi(token=TOKEN or False)
+
 def _url(repo, filename):
     return "https://huggingface.co/%s/resolve/main/%s?download=true" % (repo, filename)
 
@@ -906,18 +914,16 @@ def whoami():
     print(json.dumps([info.get("name") or "?"]), flush=True)
 
 def probe(repo):
-    from huggingface_hub import HfApi
     # files_metadata gives sizes; list_repo_files doesn't. The token matters here too:
     # a gated repo won't even list its files to an anonymous caller.
-    info = HfApi(token=TOKEN or None).model_info(repo, files_metadata=True)
+    info = _api().model_info(repo, files_metadata=True)
     print(json.dumps([{"name": s.rfilename, "size": s.size or 0} for s in info.siblings
                       if s.rfilename.lower().endswith(EXTS)]), flush=True)
 
 def listing(repo):
     # Every file, not just the tensors probe() reports — a transformers-layout encoder
     # keeps its tokenizer in there too, and we need to see it.
-    from huggingface_hub import HfApi
-    print(json.dumps(sorted(HfApi(token=TOKEN or None).list_repo_files(repo))), flush=True)
+    print(json.dumps(sorted(_api().list_repo_files(repo))), flush=True)
 
 def inspect(repo, filename):
     url = _url(repo, filename)
@@ -1002,12 +1008,22 @@ def _run_child(args: list[str], on_status=None, on_progress=None, token=None) ->
     """
     import sys  # PLC0415
 
+    # `token` is an unsaved one being validated; otherwise use whatever is configured
+    # (the saved token, else one from the environment). Resolved before the scrub below,
+    # which only touches the child's copy of the environment.
+    tok = (token or settings.hf_token()).strip()
+
     env = {**os.environ}
     env.pop("HF_HUB_OFFLINE", None)
     env.pop("TRANSFORMERS_OFFLINE", None)
     env["HF_HUB_DISABLE_TELEMETRY"] = "1"
-    # `token` is an unsaved one being validated; otherwise use whatever is configured.
-    tok = token or settings.hf_token()
+    # Exactly one token reaches the child. The child inherits the server's environment,
+    # so a token exported there (a stale HUGGING_FACE_HUB_TOKEN, say) would otherwise
+    # travel alongside the configured one — and still be used after the saved token was
+    # replaced or cleared. Drop every token variable first, then set only the one we
+    # resolved above.
+    for var in settings.ENV_VARS:
+        env.pop(var, None)
     if tok:
         env["HF_TOKEN"] = tok
 

@@ -51,8 +51,20 @@ def hf_token_source() -> str | None:
 
 
 def set_hf_token(token: str) -> None:
+    """Save a token, replacing any previous one.
+
+    Exactly one token is ever stored: the settings file is rewritten from scratch on
+    every save (O_TRUNC in `_write`), so the old value is gone from disk rather than
+    kept beside the new one. Nothing caches it in memory either — `hf_token()` re-reads
+    the file on every call, so a replacement takes effect on the very next download.
+    An empty token clears the setting instead of storing a blank one.
+    """
     data = _read()
-    data["hf_token"] = token.strip()
+    tok = (token or "").strip()
+    if tok:
+        data["hf_token"] = tok
+    else:
+        data.pop("hf_token", None)
     _write(data)
 
 

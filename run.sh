@@ -83,10 +83,30 @@ if [ ! -f "$VENV_DIR/bin/activate" ]; then
     echo -e "${GREEN}✓ Virtual environment created${NC}"
 fi
 source "$VENV_DIR/bin/activate"
-echo -e "${BLUE}Installing backend dependencies...${NC}"
-pip install --upgrade pip --quiet
-pip install -r "$REQUIREMENTS_FILE" --quiet
-echo -e "${GREEN}✓ Backend dependencies ready${NC}"
+
+# Reinstalling on every launch costs a PyPI round-trip, which makes an offline start
+# impossible even when the venv is already complete — and this app is built to run
+# without a network once its models are down. So ask pip, offline (--no-index never
+# opens a socket), whether the venv already satisfies requirements.txt, and only reach
+# for the network when it genuinely doesn't. Takes well under a second.
+deps_satisfied() {
+    pip install -r "$REQUIREMENTS_FILE" \
+        --no-index --quiet --disable-pip-version-check --no-input > /dev/null 2>&1
+}
+
+if deps_satisfied; then
+    echo -e "${GREEN}✓ Backend dependencies already installed${NC}"
+else
+    echo -e "${BLUE}Installing backend dependencies...${NC}"
+    pip install --upgrade pip --quiet || true  # nice to have; not worth failing the run
+    if ! pip install -r "$REQUIREMENTS_FILE" --quiet; then
+        echo -e "${RED}✗ Could not install the backend dependencies.${NC}"
+        echo -e "${RED}  If you're offline: connect once so they can be fetched. After that${NC}"
+        echo -e "${RED}  this step is skipped entirely and the app starts with no network.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Backend dependencies ready${NC}"
+fi
 
 # --- Frontend build --------------------------------------------------------- #
 echo ""
