@@ -125,6 +125,106 @@ def generate_title(url, model, first_user, first_assistant):
 
 
 # --------------------------------------------------------------------------- #
+# Prompt enhancement
+# --------------------------------------------------------------------------- #
+# FLUX.2 is conditioned by a large LLM text encoder (Mistral-3 for [dev], Qwen3 for
+# [klein]) and follows long natural prose — see the note above `PHOTOREAL_TEMPLATE`
+# in flux_client.py for why tag salad hurts it. These prompts are written for that,
+# and are split by mode because an edit is not a description: rewriting "make the
+# jacket red" into a scene paragraph turns an edit into a regeneration, which is the
+# one way an enhancer can make things actively worse.
+_ENHANCE_SYSTEM = {
+    "create": (
+        "You are a prompt engineer for the FLUX.2 image model. It is conditioned by a "
+        "large language model and follows long, natural prose. Never write "
+        "comma-separated tag lists — they degrade this model.\n"
+        "Rewrite the user's idea as a single vivid paragraph describing the finished "
+        "photograph: the subject, what they are doing, the setting, camera and lens, "
+        "lighting, composition, mood and style.\n"
+        "If reference images are attached, describe their subjects accurately — "
+        "appearance, clothing, distinguishing features — so the model reproduces them "
+        "rather than inventing new ones.\n"
+        "Keep every concrete detail the user specified. Invent only what they left "
+        "open.\n"
+        "Return the prompt only: no preamble, no quotes, no commentary."
+    ),
+    "edit": (
+        "You are a prompt engineer for the FLUX.2 image editing model.\n"
+        "The user gives an INSTRUCTION describing a change to the attached image. "
+        "Rewrite it as a clearer, more specific instruction. It must REMAIN an "
+        "instruction in the imperative. Never turn it into a description of a scene.\n"
+        "Use the attached image to name exactly what to change and where it is.\n"
+        "State explicitly what must stay unchanged: background, other subjects, pose, "
+        "lighting, framing.\n"
+        "Do not add camera, lens or style language unless the user asked to change "
+        "those.\n"
+        "Return the instruction only: no preamble, no quotes, no commentary."
+    ),
+    "compose": (
+        "You are a prompt engineer for the FLUX.2 image model. It is conditioned by a "
+        "large language model and follows long, natural prose. Never write "
+        "comma-separated tag lists — they degrade this model.\n"
+        "Several reference images are attached. The user wants a new image that "
+        "combines them. Describe the finished image as a single vivid paragraph.\n"
+        "Identify each reference's subject explicitly and say what it contributes, so "
+        "the model knows which is which and reproduces each faithfully rather than "
+        "blending them into someone new.\n"
+        "Keep every concrete detail the user specified. Invent only what they left "
+        "open.\n"
+        "Return the prompt only: no preamble, no quotes, no commentary."
+    ),
+}
+
+# Which system prompt a generate mode gets. img2img is a partial denoise toward a
+# described scene, so it reads as a description, not an instruction.
+_ENHANCE_MODE = {"txt2img": "create", "img2img": "create", "edit": "edit", "compose": "compose"}
+
+_PREAMBLE = re.compile(r"^\s*(here'?s|here is|sure[,!]?|prompt:)[^\n]*:\s*", re.I)
+
+
+def _clean_prompt(text: str) -> str:
+    """Strip the wrapping a chat model adds despite being told not to."""
+    t = (text or "").strip()
+    t = _PREAMBLE.sub("", t).strip()
+    if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
+        t = t[1:-1].strip()
+    return t
+
+
+def enhance_prompt(url, model, prompt, mode, images_b64=()):
+    """Rewrite a FLUX prompt with a vision model that can see the references.
+
+    The identity-preserving work is done by the reference latents, not by this text
+    — no description reproduces a face. What this buys is prompt adherence,
+    composition and phrasing the text encoder actually responds to, so the user
+    isn't rewriting the same prompt five times by hand.
+
+    Fails soft (returns "") exactly like `generate_title`; the caller falls back to
+    the static template.
+    """
+    system = _ENHANCE_SYSTEM[_ENHANCE_MODE.get(mode, "create")]
+    user = {"role": "user", "content": prompt}
+    if images_b64:
+        user["images"] = list(images_b64)
+    messages = [{"role": "system", "content": system}, user]
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "think": False,
+        "options": {"num_ctx": context_size_for(messages)},
+    }
+    try:
+        response = requests.post(f"{url}/api/chat", json=payload, timeout=CHAT_TIMEOUT)
+        if response.status_code != 200:
+            return ""
+        text = (response.json().get("message") or {}).get("content", "")
+    except (requests.RequestException, ValueError):
+        return ""
+    return _clean_prompt(text)
+
+
+# --------------------------------------------------------------------------- #
 # Models
 # --------------------------------------------------------------------------- #
 def is_vision_model(url, model_name):

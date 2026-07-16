@@ -405,8 +405,32 @@ export async function deleteFluxModel(name: string): Promise<void> {
   }
 }
 
+export type GenMode = "txt2img" | "img2img" | "edit" | "compose";
+
+/** Rewrite a prompt with a local vision model that can see the attached images.
+ *  Always resolves: if Ollama is unreachable the backend falls back to its static
+ *  template and says so via `source`. */
+export async function enhancePrompt(params: {
+  prompt: string;
+  mode: GenMode;
+  model: string;
+  image_hashes?: string[];
+  ollama_url: string;
+}): Promise<{ prompt: string; source: "vlm" | "template" }> {
+  const res = await fetch("/api/flux/enhance", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `enhance: ${res.status}`);
+  }
+  return res.json();
+}
+
 export interface GenerateParams {
-  mode: "txt2img" | "img2img" | "edit" | "compose";
+  mode: GenMode;
   flux_model?: string | null; // which FLUX UNet ("" / null = that mode's default)
   prompt: string;
   init_image_hash?: string | null; // img2img / edit: the source image
@@ -421,10 +445,23 @@ export interface GenerateParams {
   ollama_url: string;
 }
 
+/** The final `image` event. `url` and `model_label` are what the backend actually
+ *  did — the store's URL carries the real extension, and `model` names the
+ *  transformer that ran, which is not necessarily the one that was requested. */
+export interface GeneratedImage {
+  hash: string;
+  seed: number;
+  width: number;
+  height: number;
+  url?: string;
+  model?: string;
+  model_label?: string;
+}
+
 interface GenerateHandlers {
   onStatus?: (message: string) => void;
   onProgress?: (step: number, total: number) => void;
-  onImage: (r: { hash: string; seed: number; width: number; height: number }) => void;
+  onImage: (r: GeneratedImage) => void;
   onError?: (message: string) => void;
 }
 
@@ -454,8 +491,7 @@ export async function generate(
     if (ev.type === "status") handlers.onStatus?.(ev.message as string);
     else if (ev.type === "progress")
       handlers.onProgress?.(ev.step as number, ev.total as number);
-    else if (ev.type === "image")
-      handlers.onImage(ev as unknown as { hash: string; seed: number; width: number; height: number });
+    else if (ev.type === "image") handlers.onImage(ev as unknown as GeneratedImage);
     else if (ev.type === "error") handlers.onError?.(ev.message as string);
   });
 }

@@ -4,6 +4,7 @@ Serves the built React frontend and proxies all Ollama interaction so the
 browser never talks to Ollama directly.
 """
 import json
+import os
 import queue
 import random
 import threading
@@ -84,6 +85,19 @@ class MessageAppend(BaseModel):
 
 class TitleRequest(BaseModel):
     model: str
+    ollama_url: str = oc.DEFAULT_URL
+
+
+# More than a handful of references costs vision tokens without telling the model
+# much more about what the user wants.
+MAX_ENHANCE_IMAGES = 4
+
+
+class EnhanceRequest(BaseModel):
+    prompt: str
+    mode: str = "txt2img"  # txt2img | img2img | edit | compose
+    model: str  # the Ollama vision model to rewrite with
+    image_hashes: list[str] = []
     ollama_url: str = oc.DEFAULT_URL
 
 
@@ -206,6 +220,31 @@ def _ndjson(work) -> StreamingResponse:
 def flux_models():
     """Installed transformers, each tagged with the roles (create / edit) it can serve."""
     return {"available": fx.available(), "models": fx.list_unets()}
+
+
+@app.post("/api/flux/enhance")
+def flux_enhance(req: EnhanceRequest):
+    """Rewrite a prompt with a local vision model that can see the attached images.
+
+    Separate from /api/generate on purpose. Generate unloads Ollama to free VRAM, so
+    enhancing inside it would reload the vision model for every run; and the whole
+    point is that the user sees the rewrite and can edit it before sampling. Ordering
+    then works out: enhance loads the VLM, the user reviews, generate frees it.
+
+    Never fails: a rewrite the user can't get is a rewrite they type themselves, so
+    an unreachable Ollama falls back to the static template rather than 500ing.
+    """
+    if req.model:
+        imgs = []
+        for h in req.image_hashes[:MAX_ENHANCE_IMAGES]:
+            p = db.image_path(h)
+            if p:
+                imgs.append(images.image_to_b64(p))
+        text = oc.enhance_prompt(req.ollama_url, req.model, req.prompt, req.mode, imgs)
+        if text:
+            return {"prompt": text, "source": "vlm"}
+    # No vision model installed, or Ollama couldn't answer.
+    return {"prompt": fx.static_enhance(req.prompt, req.mode), "source": "template"}
 
 
 @app.get("/api/flux/catalog")
@@ -389,13 +428,18 @@ def generate(req: GenerateRequest):
 
     # Resolve stored image hashes to PIL objects (init image for img2img/edit,
     # reference images for compose).
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     def _resolve(h: str):
-        path = db.IMAGES_DIR / f"{h}.jpg"
-        if not path.exists():
+        path = db.image_path(h)
+        if path is None:
             raise HTTPException(status_code=404, detail=f"image {h} not found")
-        return Image.open(path).convert("RGB")
+        # Orientation is applied here, not at write time — the store keeps a phone
+        # photo's original bytes and its EXIF Orientation tag with them, rather than
+        # paying a lossy re-encode to bake the rotation in. Uploads used to be
+        # laundered through a browser canvas, which applied it silently; without
+        # this, that removal would land every phone photo in FLUX sideways.
+        return ImageOps.exif_transpose(Image.open(path)).convert("RGB")
 
     init_image = _resolve(req.init_image_hash) if req.init_image_hash else None
     ref_images = [_resolve(h) for h in req.ref_image_hashes]
@@ -414,9 +458,21 @@ def generate(req: GenerateRequest):
                 status_cb = lambda m: events.put({"type": "status", "message": m})
                 step_cb = lambda s, t: events.put({"type": "progress", "step": s, "total": t})
 
+                # Resolve the transformer once, here, and pass the resolved name down
+                # (resolving is idempotent). A request naming a model that can't serve
+                # this mode still falls back rather than failing — a stale model list
+                # is a legitimate reason to arrive here — but it says so instead of
+                # quietly running something else.
+                role = fx.role_for_mode(req.mode)
+                unet = fx.resolve_unet(req.flux_model, role)
+                if req.flux_model and unet != os.path.basename(str(req.flux_model)):
+                    events.put({"type": "status", "message":
+                                f"{os.path.basename(str(req.flux_model))} can't {req.mode} "
+                                f"here — using {fx.label(unet)} instead"})
+
                 seed = req.seed if req.seed is not None else random.randint(0, 2**31 - 1)
                 common = dict(steps=req.steps, guidance=req.guidance, seed=seed,
-                              model=req.flux_model, on_step=step_cb, on_status=status_cb)
+                              model=unet, on_step=step_cb, on_status=status_cb)
 
                 if req.mode == "edit":
                     if init_image is None:
@@ -437,16 +493,23 @@ def generate(req: GenerateRequest):
                     image = fx.create(req.prompt, width=req.width, height=req.height,
                                       enhance=req.enhance, **common)
 
+                # PNG: a generated image is often the input to the next edit, and a
+                # JPEG round-trip per generation compounds. Thumbs stay JPEG — 64px
+                # of sidebar icon has nothing to preserve.
                 full = images.pil_to_data_url(image)
-                thumb = images.pil_to_data_url(image, max_size=64)
+                thumb = images.pil_to_data_url(image, max_size=64, fmt="JPEG")
                 h = db.save_image(full, thumb)
                 events.put(
                     {
                         "type": "image",
                         "hash": h,
+                        "url": db.image_url(h),
                         "seed": seed,
                         "width": image.size[0],
                         "height": image.size[1],
+                        # What actually ran, so the UI never has to guess.
+                        "model": unet,
+                        "model_label": fx.label(unet),
                     }
                 )
             except Exception as exc:

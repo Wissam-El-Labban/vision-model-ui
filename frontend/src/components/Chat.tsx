@@ -17,7 +17,7 @@ const ORDINALS: Record<string, number> = {
 };
 
 /** Save an image to disk. Works for both data URLs and same-origin
- *  /api/images/<hash>.jpg URLs; the filename extension follows the source. */
+ *  /api/images/<hash>.<ext> URLs; the filename extension follows the source. */
 function downloadImage(src: string): void {
   let name = "generated-image.png";
   const mime = src.match(/^data:image\/(\w+)/);

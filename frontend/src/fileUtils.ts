@@ -12,7 +12,13 @@ export function fileToDataUrl(file: File): Promise<string> {
  *  side is <= maxDim. Always re-encodes via canvas (even when already small) so
  *  any browser-displayable source becomes a clean JPEG Ollama can decode — this
  *  avoids "Failed to load image" errors from unusual source encodings. Vision
- *  models also tokenize by resolution, so the downscale keeps context cheap. */
+ *  models also tokenize by resolution, so the downscale keeps context cheap.
+ *
+ *  This is lossy and irreversible, so it belongs on the path to a *consumer* that
+ *  wants a small image — a vision model, or a thumbnail — and nowhere near what
+ *  gets uploaded. It was once applied to every upload, which meant FLUX only ever
+ *  saw a 1280px JPEG of a reference photo: two resamples and a lossy codec before
+ *  the VAE, taking the fine detail that carries a face's identity with them. */
 export function resizeDataUrl(dataUrl: string, maxDim = 1280): Promise<string> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -30,11 +36,6 @@ export function resizeDataUrl(dataUrl: string, maxDim = 1280): Promise<string> {
     img.onerror = reject;
     img.src = dataUrl;
   });
-}
-
-/** Read a File and downscale it in one step. */
-export async function fileToResizedDataUrl(file: File, maxDim = 1280): Promise<string> {
-  return resizeDataUrl(await fileToDataUrl(file), maxDim);
 }
 
 /** Rotate a data-URL image by `deg` (90 increments) via canvas. */

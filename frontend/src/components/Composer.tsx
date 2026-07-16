@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { fileToResizedDataUrl } from "../fileUtils";
+import { fileToDataUrl } from "../fileUtils";
+import { resolveFlux, roleFor } from "../flux";
 import type { GenSettings, GenOp } from "../types";
 import type { FluxModel } from "../api";
 
@@ -35,6 +36,15 @@ interface Props {
   fluxModels: FluxModel[];
   gen: GenSettings;
   setGen: (v: GenSettings) => void;
+  /** Rewrite the prompt with a local vision model that can see the attached
+   *  images. Replaces the composer text in place — what's shown is what's sent. */
+  onEnhance: () => void;
+  /** Restore the pre-enhance prompt. `canUndoEnhance` gates the button. */
+  onUndoEnhance: () => void;
+  enhancing: boolean;
+  canUndoEnhance: boolean;
+  /** "" when no vision model is installed — the rewrite falls back to a template. */
+  enhanceModel: string;
   /** How many images are pinned in the panel (compose reference count). */
   pinnedCount: number;
   /** First pinned-panel image, used as the img2img source when nothing is
@@ -68,6 +78,11 @@ export default function Composer({
   fluxModels,
   gen,
   setGen,
+  onEnhance,
+  onUndoEnhance,
+  enhancing,
+  canUndoEnhance,
+  enhanceModel,
   pinnedCount,
   pinnedInit,
 }: Props) {
@@ -84,12 +99,15 @@ export default function Composer({
   const isCompose = genOp === "compose";
   // A FLUX.2 model serves both roles; on FLUX.1 the sets are disjoint, because
   // edit/compose need a Kontext transformer that conditions on the source image.
-  const role = isEdit || isCompose ? "edit" : "create";
+  const role = roleFor(genOp);
   const roleModels = fluxModels.filter((m) => m.roles.includes(role));
 
-  // "" in gen.fluxModel means "let the backend pick this mode's default", which is
-  // the first installed model that can serve the role — so mirror that here.
-  const activeFlux = gen.fluxModel || roleModels[0]?.name || "";
+  // What this mode will actually run on. `resolveFlux` is the one place that
+  // decides that — App sends the same value, so the picker can't show one model
+  // while another does the work.
+  const activeFlux = resolveFlux(gen.fluxModel, fluxModels, role);
+  // Bundled models carry a real label ("FLUX.2 [klein] 9B — …"); for a user-added
+  // one the label *is* the filename, so keep stripping the extension.
   const prettyFlux = (name: string) => name.replace(/\.(gguf|safetensors|sft)$/i, "");
   const pickFlux = (m: FluxModel) => patchGen({ fluxModel: m.name });
 
@@ -295,8 +313,10 @@ export default function Composer({
                   type="file"
                   accept="image/*"
                   onChange={async (e) => {
+                    // Store the original: the backend caps and downscales once,
+                    // with a better filter, and hands each consumer its own copy.
                     const f = e.target.files?.[0];
-                    if (f) setSystemImage(await fileToResizedDataUrl(f));
+                    if (f) setSystemImage(await fileToDataUrl(f));
                   }}
                 />
               )}
@@ -339,7 +359,7 @@ export default function Composer({
                             onClick={() => pickFlux(m)}
                           >
                             <span className="flux-radio">{activeFlux === m.name ? "●" : "○"}</span>
-                            {prettyFlux(m.name)}
+                            {prettyFlux(m.label)}
                           </button>
                           <span className="flux-model-size">{m.size_gb} GB</span>
                         </li>
@@ -385,6 +405,10 @@ export default function Composer({
                       onChange={(e) => patchGen({ seed: e.target.value.replace(/[^0-9]/g, "") })} />
                   </label>
                 </div>
+                {/* The static template only fits a create prompt — it describes a
+                    photograph, which is the wrong shape for an edit instruction. The
+                    ✨ rewrite below works in every mode, so edit/combine get their
+                    prompt help from there. */}
                 {genOp === "create" && (
                   <label className="enhance-row">
                     <input type="checkbox" checked={gen.enhance}
@@ -392,6 +416,36 @@ export default function Composer({
                     Enhance photoreal prompt (adds camera + lighting detail)
                   </label>
                 )}
+                <div className="enhance-row">
+                  <button
+                    type="button"
+                    className="btn small"
+                    disabled={enhancing || !text.trim()}
+                    onClick={onEnhance}
+                    title={
+                      enhanceModel
+                        ? `Rewrite the prompt with ${enhanceModel}, which can see the attached images`
+                        : "No vision model installed — falls back to a text template"
+                    }
+                  >
+                    {enhancing ? "✨ Rewriting…" : "✨ Improve prompt"}
+                  </button>
+                  {canUndoEnhance && (
+                    <button
+                      type="button"
+                      className="btn small ghost"
+                      onClick={onUndoEnhance}
+                      title="Restore the prompt you wrote"
+                    >
+                      ↩ Undo
+                    </button>
+                  )}
+                </div>
+                <p className="hint muted">
+                  {enhanceModel
+                    ? "✨ rewrites your prompt in place, reading the attached images. Edit the result before generating."
+                    : "✨ uses a text template — install a vision model in Ollama for a rewrite that reads your images."}
+                </p>
                 <p className="hint muted">
                   {role === "edit"
                     ? "Guidance ~2.5 follows the instruction closely; raise it if the subject isn't changing enough."
@@ -471,7 +525,7 @@ export default function Composer({
               >
                 {roleModels.map((m) => (
                   <option key={m.name} value={m.name}>
-                    {prettyFlux(m.name)}
+                    {prettyFlux(m.label)}
                   </option>
                 ))}
               </select>

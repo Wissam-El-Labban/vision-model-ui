@@ -610,9 +610,23 @@ def _prompt_for(prompt: str, enhance: bool) -> str:
     return PHOTOREAL_TEMPLATE.format(prompt=p.rstrip(".")) if enhance and p else p
 
 
+def static_enhance(prompt: str, mode: str) -> str:
+    """The template fallback for when no vision model is available to rewrite.
+
+    Create-only, deliberately. PHOTOREAL_TEMPLATE describes a photograph; wrapping an
+    edit instruction in it ("A photorealistic photograph. Make the jacket red. Shot on
+    a full-frame DSLR…") reads as a scene to describe rather than a change to make,
+    and the edit becomes a regeneration. Edit and compose get their prompt back
+    unchanged — which is what the graphs have always sent them.
+    """
+    return _prompt_for(prompt, mode in ("txt2img", "img2img"))
+
+
 def _label(unet: str) -> str:
+    """A bundle's label, or the filename for a user-added model — the same rule
+    `list_unets` labels by, so the UI and the status line agree on a model's name."""
     b = cat.bundle_of_unet(unet)
-    return b["label"] if b else "FLUX"
+    return b["label"] if b else (os.path.basename(unet or "") or "FLUX")
 
 
 def create(prompt, width=None, height=None, steps=None, guidance=None, seed=0,
@@ -691,7 +705,12 @@ def list_unets() -> list[dict]:
     """Installed transformers. Each: name, roles, bundle id (None if user-added), size_gb.
 
     `roles` tells the UI which modes a model can serve: a FLUX.2 transformer serves
-    both, a FLUX.1 one serves exactly one. Catalog models sort first.
+    both, a FLUX.1 one serves exactly one.
+
+    Sorted in catalog order (quality order), which is the order `_default_for` picks
+    in — so the head of this list is that role's default. Sorting alphabetically
+    instead put klein at the head while dev was the default, and the UI believed the
+    list.
     """
     out = []
     if UNET_DIR.is_dir():
@@ -706,7 +725,7 @@ def list_unets() -> list[dict]:
                     "family": cat.family_of(p.name),
                     "size_gb": round(p.stat().st_size / 1e9, 2),
                 })
-    out.sort(key=lambda m: (m["bundle"] is None, m["name"].lower()))
+    out.sort(key=lambda m: (cat.bundle_rank(m["name"]), m["name"].lower()))
     return out
 
 
@@ -745,6 +764,24 @@ def _resolve_unet(model, role: str) -> str:
             and role in cat.roles_of(safe)):
         return safe
     return _default_for(role)
+
+
+# `_resolve_unet` is idempotent — a name it returns resolves to itself — so the API
+# layer can resolve once, up front, report what it picked, and pass the result down
+# to a graph builder that will resolve it again to the same thing.
+def resolve_unet(model, role: str) -> str:
+    """The transformer a request will actually run on. See `_resolve_unet`."""
+    return _resolve_unet(model, role)
+
+
+def role_for_mode(mode: str) -> str:
+    """The role a generate mode draws its transformer from."""
+    return ROLE_EDIT if mode in ("edit", "compose") else ROLE_CREATE
+
+
+def label(unet: str) -> str:
+    """A human name for a transformer, for status lines and the chat's model tag."""
+    return _label(unet)
 
 
 def delete_unet(name: str) -> None:

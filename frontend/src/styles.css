@@ -143,6 +143,13 @@ textarea {
   background: transparent;
 }
 
+/* For buttons sitting inside the settings popovers, where 14px reads as loud. */
+.btn.small {
+  padding: 5px 9px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
 .btn.block {
   width: 100%;
   justify-content: center;

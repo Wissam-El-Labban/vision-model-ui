@@ -242,6 +242,20 @@ def bundle_of_unet(name: str) -> dict | None:
     return None
 
 
+def bundle_rank(unet: str) -> int:
+    """Where a UNet's bundle sits in BUNDLES, for sorting. User-added models sort
+    last.
+
+    BUNDLES is written in quality order, which is the order `flux_client._default_for`
+    picks a default in. Sorting the model list by it too keeps "first in the list" and
+    "what runs by default" the same model — they used to disagree (the list sorted
+    alphabetically, so klein led it while dev was the default), which is how the UI
+    ended up showing one model while another did the work.
+    """
+    b = bundle_of_unet(unet)
+    return BUNDLES.index(b) if b else len(BUNDLES)
+
+
 def unets() -> dict[str, dict]:
     """Every UNet filename the catalog knows about -> its bundle."""
     out = {}

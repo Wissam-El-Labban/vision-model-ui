@@ -7,6 +7,7 @@ import ContextMeter from "./components/ContextMeter";
 import {
   appendMessage,
   deleteChat,
+  enhancePrompt,
   generate,
   generateTitle,
   getChat,
@@ -20,27 +21,17 @@ import {
   type FluxModel,
   type Usage,
 } from "./api";
-import { fileToResizedDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
+import { fileToDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
+import { guidanceFor, imagesFor, modeFor, resolveFlux, roleFor } from "./flux";
 import { trimHistory } from "./context";
 import type { ChatMessage, ChatSummary, GenSettings, GenOp } from "./types";
 
 const DEFAULT_URL = "http://localhost:11434";
 
-/** Extract the sha256 hash from an image/thumb URL like /api/images/<hash>.jpg */
+/** Extract the sha256 hash from an image/thumb URL like /api/images/<hash>.png.
+ *  The store keeps each image in its own format, so match any extension. */
 function hashFromUrl(url: string): string {
-  return (url.split("/").pop() || "").replace(/\.jpg$/, "");
-}
-
-/** The guidance a mode starts at, which depends on the model that will run it.
- *
- * FLUX.2 uses one value for every job. FLUX.1 is mode-scaled: dev needs ~3.5 to bind
- * a text-only prompt, while Kontext wants ~2.5 — at 3.5 it clings to the reference
- * image and ignores the instruction. Mirrors the backend's `_default_guidance`. */
-function guidanceFor(op: GenOp, models: FluxModel[]): number {
-  const role = op === "create" ? "create" : "edit";
-  const model = models.find((m) => m.roles.includes(role));
-  if (model?.family === "flux2") return 4.0;
-  return op === "create" ? 3.5 : 2.5;
+  return (url.split("/").pop() || "").replace(/\.[a-z0-9]+$/i, "");
 }
 
 export default function App() {
@@ -63,6 +54,13 @@ export default function App() {
   // compose (blend multiple reference images).
   const [genOp, setGenOp] = useState<GenOp>("create");
   const [fluxAvailable, setFluxAvailable] = useState(false);
+  // Prompt enhancement. The rewrite replaces the composer text in place, so what
+  // the user reads is what gets sent — there is no second copy to drift from it.
+  // `originalPrompt` backs Undo; `promptEnhanced` stops the static template being
+  // wrapped around an already-rewritten prompt.
+  const [enhancing, setEnhancing] = useState(false);
+  const [originalPrompt, setOriginalPrompt] = useState<string | null>(null);
+  const [promptEnhanced, setPromptEnhanced] = useState(false);
   const [gen, setGen] = useState<GenSettings>({
     fluxModel: "", // "" = let the backend pick this mode's default
     steps: 20,
@@ -95,12 +93,23 @@ export default function App() {
       });
   }, [genOp]);
 
-  // Switching workflow retunes guidance and clears the model pick, since on FLUX.1
-  // the two modes draw from disjoint sets of transformers.
+  // Switching workflow retunes guidance, and drops the model pick only when that
+  // model can't serve the new role — which on FLUX.2 is never, since one model
+  // does every job. (On FLUX.1 the two modes draw from disjoint sets, so a create
+  // pick genuinely can't edit.) Clearing it unconditionally used to silently swap
+  // the model out from under an explicit choice while the picker still showed it.
+  // Steps are left alone: they aren't role-dependent, so a hand-tuned value should
+  // survive a tab switch.
   const changeOp = useCallback(
     (op: GenOp) => {
       setGenOp(op);
-      setGen((g) => ({ ...g, fluxModel: "", steps: 20, guidance: guidanceFor(op, fluxModels) }));
+      setGen((g) => {
+        const keep = fluxModels.some(
+          (m) => m.name === g.fluxModel && m.roles.includes(roleFor(op))
+        );
+        const fluxModel = keep ? g.fluxModel : "";
+        return { ...g, fluxModel, guidance: guidanceFor(op, fluxModels, fluxModel) };
+      });
     },
     [fluxModels]
   );
@@ -143,6 +152,24 @@ export default function App() {
     );
   }, []);
 
+  // data-URL -> its downscaled copy for the vision model. Chat sends images from
+  // component state, which now holds originals, and a vision model tokenizes by
+  // resolution — so a 12 MP photo would blow `context_size_for`'s ceiling. The
+  // downscale belongs here, at the point of sending to the consumer that wants it,
+  // rather than on the upload that everything else reads from.
+  const ollamaCache = useRef<Map<string, string>>(new Map());
+  const forOllama = useCallback(async (urls: string[]): Promise<string[]> => {
+    return Promise.all(
+      urls.map(async (url) => {
+        const cached = ollamaCache.current.get(url);
+        if (cached) return cached;
+        const small = await resizeDataUrl(url, 1280);
+        ollamaCache.current.set(url, small);
+        return small;
+      })
+    );
+  }, []);
+
   const refreshChats = useCallback(async () => {
     try {
       setChats(await listChats());
@@ -153,7 +180,10 @@ export default function App() {
 
   async function addPinned(files: FileList | File[]) {
     const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
-    const urls = await Promise.all(list.map((f) => fileToResizedDataUrl(f)));
+    // Keep the original bytes. The backend caps and resamples once, with a better
+    // filter, and hands each consumer the size it wants (`forOllama` below for the
+    // vision model, full-res for FLUX) — so nothing degrades what we store.
+    const urls = await Promise.all(list.map((f) => fileToDataUrl(f)));
     setPinnedImages((prev) => [...prev, ...urls]);
   }
   function removePinned(i: number) {
@@ -239,6 +269,8 @@ export default function App() {
     setError(null);
     setComposerText("");
     setComposerImages([]);
+    setOriginalPrompt(null);
+    setPromptEnhanced(false);
   }, []);
 
   const openChat = useCallback(async (id: string) => {
@@ -295,6 +327,8 @@ export default function App() {
       setError(null);
       setComposerText("");
       setComposerImages([]);
+      setOriginalPrompt(null);
+      setPromptEnhanced(false);
     } catch {
       setError("Could not open that chat.");
     }
@@ -387,6 +421,9 @@ export default function App() {
         }
         return next;
       });
+      // What actually goes on the wire: downscaled copies. `outImages` stays as the
+      // originals, since the UI resolves "Image N" back to those for display.
+      const wireImages = await forOllama(outImages);
       const merged = sent.map((m, i) => {
         if (i !== lastIdx) {
           return { role: m.role, content: m.content }; // strip history images (Ollama ignores them)
@@ -410,7 +447,7 @@ export default function App() {
             `[The ${outImages.length} images below are numbered 1-${outImages.length} in the ` +
             `order shown; refer to each by its number.\n\n${sections.join("\n\n")}]\n\n`;
         }
-        return { role: m.role, content: note + m.content, images: outImages };
+        return { role: m.role, content: note + m.content, images: wireImages };
       });
 
       // Build the request: optional system message (with persistent image) + history.
@@ -419,7 +456,7 @@ export default function App() {
         payload.push({
           role: "system",
           content: systemPrompt.trim(),
-          images: systemImage ? [systemImage] : undefined,
+          images: systemImage ? await forOllama([systemImage]) : undefined,
         });
       }
       payload.push(...merged);
@@ -514,15 +551,20 @@ export default function App() {
       usage,
       currentChatId,
       ensureHashes,
+      forOllama,
       refreshChats,
     ]
   );
 
   const generateImage = useCallback(
     async (prompt: string, op: GenOp, images: string[]) => {
-      // Every mode runs on FLUX: create on FLUX dev, edit/compose on Kontext.
-      const isKontext = op === "edit" || op === "compose";
-      const modelId = isKontext ? "FLUX Kontext" : "FLUX dev";
+      // Which transformer this run will use. Resolved once, here: it names the
+      // placeholder turn, and it's what goes on the wire — so what the composer
+      // shows, what the chat says, and what the backend loads are all one value.
+      // (The backend echoes back the model it actually used; that wins on arrival.)
+      const fluxModel = resolveFlux(gen.fluxModel, fluxModels, roleFor(op));
+      const modelId =
+        fluxModels.find((m) => m.name === fluxModel)?.label || fluxModel || "FLUX";
       if (!fluxAvailable) {
         setError("FLUX isn't installed on this machine. Run ./run.sh to fetch the weights.");
         return;
@@ -537,14 +579,8 @@ export default function App() {
       const isCompose = op === "compose";
       const initUrl = isCompose ? null : images[0] ?? null;
       const refUrls = isCompose ? images : op === "edit" ? images.slice(1) : [];
-      const mode =
-        op === "edit"
-          ? "edit"
-          : isCompose
-            ? "compose"
-            : initUrl
-              ? "img2img"
-              : "txt2img";
+      // Shared with the prompt enhancer, so both brief the model on the same job.
+      const mode = modeFor(op, images);
       const shownImages = isCompose ? refUrls : initUrl ? [initUrl] : undefined;
 
       // Show the prompt as a user turn, then an assistant placeholder we fill
@@ -573,20 +609,25 @@ export default function App() {
       abortRef.current = controller;
       let resultHash: string | null = null;
       let resultDataUrl: string | null = null;
+      // Starts as this client's prediction; the backend's echo replaces it.
+      let resultLabel = modelId;
       try {
         const initHash = initUrl ? (await ensureHashes([initUrl]))[0] : null;
         const refHashes = refUrls.length ? await ensureHashes(refUrls) : [];
         await generate(
           {
             mode,
-            flux_model: gen.fluxModel || null,
+            flux_model: fluxModel || null,
             prompt,
             init_image_hash: initHash,
             ref_image_hashes: refHashes,
             steps: gen.steps,
             guidance: gen.guidance,
             strength: gen.strength,
-            enhance: gen.enhance,
+            // The static template is a fallback for an un-enhanced create prompt.
+            // Wrapping it around a prompt the VLM already rewrote would bury the
+            // rewrite's own framing inside a second, blunter one.
+            enhance: gen.enhance && !promptEnhanced,
             width: gen.width,
             height: gen.height,
             seed: gen.seed ? parseInt(gen.seed, 10) : null,
@@ -598,18 +639,34 @@ export default function App() {
               setAssistant({ content: `🎨 Generating… step ${step}/${total}` }),
             onImage: async (r) => {
               resultHash = r.hash;
+              // The store keeps each image in its own format, so take the URL the
+              // backend built rather than assuming an extension here.
+              const url = r.url || `/api/images/${r.hash}.png`;
+              // The model the backend actually ran, which is the authoritative
+              // answer — `modelId` above is only this client's prediction of it.
+              if (r.model_label) resultLabel = r.model_label;
               // Load the stored image back as a data-URL for display + pin/reuse
               // parity, and seed the hash cache so it isn't re-uploaded.
               try {
-                resultDataUrl = await urlToDataUrl(`/api/images/${r.hash}.jpg`);
+                resultDataUrl = await urlToDataUrl(url);
                 hashCache.current.set(resultDataUrl, r.hash);
               } catch {
                 /* fall back to the URL below */
               }
               setAssistant({
                 content: "",
-                images: [resultDataUrl ?? `/api/images/${r.hash}.jpg`],
+                images: [resultDataUrl ?? url],
+                model: resultLabel,
               });
+              // Relabel the user turn too, so the pair matches what gets persisted
+              // — otherwise a fallback shows one model now and another on reload.
+              setMessages((prev) =>
+                prev.map((m, i) =>
+                  i === prev.length - 2 && m.role === "user"
+                    ? { ...m, model: resultLabel }
+                    : m
+                )
+              );
             },
             onError: (msg) => setAssistant({ content: `⚠️ ${msg}` }),
           },
@@ -638,7 +695,7 @@ export default function App() {
             await appendMessage(chatId, {
               role: "user",
               content: prompt,
-              model: modelId,
+              model: resultLabel,
               image_hashes: isCompose
                 ? await ensureHashes(refUrls)
                 : initUrl
@@ -648,7 +705,7 @@ export default function App() {
             await appendMessage(chatId, {
               role: "assistant",
               content: "",
-              model: modelId,
+              model: resultLabel,
               image_hashes: [resultHash],
             });
             if (isFirstExchange && model) {
@@ -663,7 +720,9 @@ export default function App() {
     },
     [
       gen,
+      promptEnhanced,
       fluxAvailable,
+      fluxModels,
       model,
       ollamaUrl,
       systemPrompt,
@@ -685,7 +744,8 @@ export default function App() {
   async function addComposerFiles(files: FileList | File[]) {
     const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
     if (list.length === 0) return;
-    const urls = await Promise.all(list.map((f) => fileToResizedDataUrl(f)));
+    // Original bytes — these are FLUX's reference images. See `addPinned`.
+    const urls = await Promise.all(list.map((f) => fileToDataUrl(f)));
     setComposerImages((prev) => [...prev, ...urls]);
   }
   function removeComposerImage(i: number) {
@@ -713,6 +773,52 @@ export default function App() {
     const rotated = await rotateDataUrl(composerImages[i], 90);
     setComposerImages((prev) => prev.map((img, idx) => (idx === i ? rotated : img)));
   }
+  /** The Ollama model that will do the rewriting: the one in use if it can see,
+   *  else any vision model. "" means none is installed — skip the call entirely. */
+  const enhanceModel = models.vision.includes(model) ? model : models.vision[0] || "";
+
+  async function enhanceComposerPrompt() {
+    const trimmed = composerText.trim();
+    if (!trimmed || enhancing) return;
+    const attached = composerImages.length ? composerImages : pinnedImages;
+    // The rewriter is briefed on the same mode, and shown the same images, that
+    // the generate will actually run with — both derived by the shared helpers, so
+    // an edit can't be briefed as a create.
+    const seen = imagesFor(genOp, attached);
+    const mode = modeFor(genOp, seen);
+    setEnhancing(true);
+    setError(null);
+    try {
+      const { prompt } = await enhancePrompt({
+        prompt: trimmed,
+        mode,
+        model: enhanceModel,
+        // No vision model → the backend skips straight to its template.
+        image_hashes: enhanceModel ? await ensureHashes(seen) : [],
+        ollama_url: ollamaUrl,
+      });
+      if (prompt && prompt !== trimmed) {
+        // Only the first rewrite captures the undo point. Enhancing twice would
+        // otherwise record the first rewrite as "the original", and Undo would
+        // restore text the user never wrote — losing their prompt for good.
+        setOriginalPrompt((prev) => (prev === null ? trimmed : prev));
+        setComposerText(prompt);
+        setPromptEnhanced(true);
+      }
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setEnhancing(false);
+    }
+  }
+
+  function undoEnhance() {
+    if (originalPrompt === null) return;
+    setComposerText(originalPrompt);
+    setOriginalPrompt(null);
+    setPromptEnhanced(false);
+  }
+
   function submitComposer() {
     const trimmed = composerText.trim();
     if (genMode) {
@@ -736,7 +842,7 @@ export default function App() {
         generateImage(trimmed, "edit", attached);
       } else {
         // create: txt2img, or img2img from a single source image.
-        generateImage(trimmed, "create", attached.slice(0, 1));
+        generateImage(trimmed, "create", imagesFor("create", attached));
       }
     } else {
       if (!trimmed && composerImages.length === 0) return;
@@ -744,6 +850,10 @@ export default function App() {
     }
     setComposerText("");
     setComposerImages([]);
+    // The prompt is gone, so its rewrite history goes with it — the next prompt is
+    // un-enhanced and the static template is armed again.
+    setOriginalPrompt(null);
+    setPromptEnhanced(false);
   }
 
   return (
@@ -817,6 +927,11 @@ export default function App() {
             fluxModels={fluxModels}
             gen={gen}
             setGen={setGen}
+            onEnhance={enhanceComposerPrompt}
+            onUndoEnhance={undoEnhance}
+            enhancing={enhancing}
+            canUndoEnhance={originalPrompt !== null}
+            enhanceModel={enhanceModel}
             pinnedCount={pinnedImages.length}
             pinnedInit={pinnedImages[0] ?? null}
           />
