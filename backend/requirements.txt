@@ -9,5 +9,10 @@ pydantic>=2.0.0
 # only reads and encodes image bytes, and drives ComfyUI over HTTP + websocket.
 pillow>=10.0.0
 websocket-client==1.8.0
-# Used only by the model-download subprocess, to list a HF repo's files.
-huggingface_hub==0.25.2
+# Used only by the model-download subprocess, to list a HF repo's files and pull
+# its weights. Must be >=0.32 with hf_xet installed: Black Forest Labs' repos (klein,
+# [dev]) now store weights in HuggingFace's Xet content-addressed backend, which only
+# the Xet protocol can reconstruct — a plain ranged GET on the resolve URL 403s. Pinned
+# <1.0 to stay within the range transformers/tokenizers require in this venv.
+huggingface_hub==0.34.4
+hf_xet>=1.0.0

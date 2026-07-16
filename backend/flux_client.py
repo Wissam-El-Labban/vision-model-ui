@@ -872,8 +872,8 @@ def _reject_reason(keys: list[str]) -> str | None:
 
 # Runs in a child process (network allowed) so the serving process stays offline. The
 # child only does I/O — probe (list files + sizes), inspect (read a safetensors header),
-# fetch (stream into the UNet dir, no HF-cache copy) — so the rules for picking and
-# validating a UNet stay in the parent, offline and testable. Progress goes to stdout.
+# fetch (download a file into a model dir) — so the rules for picking and validating a
+# UNet stay in the parent, offline and testable. Progress goes to stdout.
 _HF_CHILD = r'''
 import json, os, struct, sys, time, urllib.request
 from urllib.error import HTTPError, URLError
@@ -942,35 +942,52 @@ def fetch(repo, filename, dest_dir, out_name=""):
         raise RuntimeError("a model named %s already exists." % base)
     if not os.path.isdir(dest_dir):
         os.makedirs(dest_dir)
-    tmp = out + ".part"
-    # Resume a part-file from an interrupted run. These are tens of GB — restarting a
-    # 33 GB download because the connection dropped at 90% is not an option.
-    have = os.path.getsize(tmp) if os.path.exists(tmp) else 0
-    r = _open(_url(repo, filename), {"Range": "bytes=%d-" % have} if have else None)
-    if have and r.status != 206:  # server ignored the range; start clean
-        r.close()
-        have = 0
-        r = _open(_url(repo, filename))
-    print("Downloading %s from %s%s…"
-          % (base, repo, (" (resuming at %.2f GB)" % (have/1e9)) if have else ""), flush=True)
-    total = int(r.headers.get("Content-Length", 0)) + have
-    done, last = have, 0
-    with r, open(tmp, "ab" if have else "wb") as f:
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            f.write(chunk); done += len(chunk)
-            if time.time() - last > 0.5:
-                print("PROGRESS " + json.dumps({"file": base, "done": done, "total": total,
-                      "pct": (100 * done // total) if total else 0}), flush=True)
-                last = time.time()
-    if total and done < total:
-        raise RuntimeError("%s: connection dropped at %d%% — retry to resume."
-                           % (base, 100 * done // total))
-    os.replace(tmp, out)
-    print("PROGRESS " + json.dumps({"file": base, "done": done, "total": total or done,
-                                    "pct": 100}), flush=True)
+
+    # huggingface_hub owns the transfer so Xet-backed repos work. Black Forest Labs'
+    # weights (klein, [dev]) live in HuggingFace's Xet content-addressed store, which
+    # only the Xet protocol (hf_xet) can reconstruct — a plain ranged GET on the resolve
+    # URL 403s, no matter the token. The library also resumes an interrupted download
+    # (via a .cache marker in the staging dir) — these are tens of GB, and restarting a
+    # 33 GB pull because the connection dropped at 90% is not an option.
+    #
+    # It builds a tqdm in one place for both the classic and Xet paths; subclassing that
+    # class turns each update into a PROGRESS line. The bar is disabled in this non-tty
+    # child, so its own counter never moves — we sum the byte increments passed to
+    # update() ourselves.
+    import importlib, shutil  # PLC0415
+    tqdm_mod = importlib.import_module("huggingface_hub.utils.tqdm")
+    _Base = tqdm_mod.tqdm
+    st = {"done": 0, "total": 0, "last": 0.0}
+
+    def emit(done, total):
+        print("PROGRESS " + json.dumps({"file": base, "done": done, "total": total,
+              "pct": (100 * done // total) if total else 0}), flush=True)
+
+    class _Progress(_Base):
+        def update(self, n=1):
+            if n:
+                st["done"] += int(n)
+            if self.total:
+                st["total"] = int(self.total)
+            if time.time() - st["last"] > 0.5:
+                emit(st["done"], st["total"])
+                st["last"] = time.time()
+            return super().update(n)
+
+    from huggingface_hub import hf_hub_download
+    print("Downloading %s from %s…" % (base, repo), flush=True)
+    # Stage under dest_dir so the finished file is a rename away — same filesystem, no
+    # second full-size copy (the weights are the largest files on the disk).
+    staging = os.path.join(dest_dir, ".hf-download")
+    tqdm_mod.tqdm = _Progress
+    try:
+        got = hf_hub_download(repo, filename, local_dir=staging, token=TOKEN or False)
+    finally:
+        tqdm_mod.tqdm = _Base
+    os.replace(got, out)
+    shutil.rmtree(staging, ignore_errors=True)
+    size = os.path.getsize(out)
+    emit(size, size)
     print("DONE " + base, flush=True)
 
 try:
@@ -992,7 +1009,16 @@ except HTTPError as e:
 except URLError as e:
     print("ERROR: could not reach huggingface.co (%s)" % e, flush=True); sys.exit(1)
 except Exception as e:
-    print("ERROR: %s" % e, flush=True); sys.exit(1)
+    # huggingface_hub raises its own requests-based errors (GatedRepoError and the like),
+    # not urllib's, so the gated case reaches this branch on the fetch path. Read the
+    # HTTP status off the attached response and give the same license hint.
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    if status in (401, 403):
+        print("ERROR: %s is gated — accept its license on huggingface.co, then paste "
+              "a HuggingFace token in the Models panel." % sys.argv[2], flush=True)
+    else:
+        print("ERROR: %s" % e, flush=True)
+    sys.exit(1)
 '''
 
 
@@ -1061,8 +1087,16 @@ def _run_child(args: list[str], on_status=None, on_progress=None, token=None) ->
                     on_status(line)
         else:
             buf += ch
-    if proc.wait() != 0 or err:
-        raise RuntimeError(err or "Download failed. Check the repo id and your connection.")
+    code = proc.wait()
+    if err:
+        raise RuntimeError(err)
+    if code != 0:
+        # A child that dies without printing an ERROR line was killed rather than failing:
+        # a negative code is the signal that did it (-9 is the OOM killer, the likely one
+        # on a box this size — these downloads are the biggest thing running). Say which,
+        # so the next reader isn't left guessing at "check your connection".
+        how = f"killed by signal {-code}" if code < 0 else f"exited {code}"
+        raise RuntimeError(f"Download failed — the download process {how}.")
     return lines
 
 
@@ -1095,9 +1129,7 @@ def pull_unet(repo: str, on_status=None, on_progress=None) -> None:
         filename = _pick_unet(_json_line(_run_child(["probe", repo_id])), repo_id)
         say(f"Selected {os.path.basename(filename)}.")
 
-    if filename.lower().endswith((".safetensors", ".sft")):
-        say(f"Checking {os.path.basename(filename)}…")
-        keys = _json_line(_run_child(["inspect", repo_id, filename]))
+    def _vet(keys):
         reason = _reject_reason(keys)
         if reason:
             raise RuntimeError(
@@ -1107,7 +1139,30 @@ def pull_unet(repo: str, on_status=None, on_progress=None) -> None:
         if not _looks_like_unet(keys):
             say(f"{os.path.basename(filename)} doesn't look like a FLUX UNet — loading anyway.")
 
+    is_st = filename.lower().endswith((".safetensors", ".sft"))
+    checked = False
+    if is_st:
+        say(f"Checking {os.path.basename(filename)}…")
+        try:
+            _vet(_json_line(_run_child(["inspect", repo_id, filename])))
+            checked = True
+        except RuntimeError as e:
+            # A Xet-backed repo can't serve a header-only ranged read (it 403s), so the
+            # pre-download check is impossible there — vet the file once it's on disk
+            # instead. Any other failure is a real problem: surface it.
+            if "gated" not in str(e).lower() and "403" not in str(e):
+                raise
+
     _run_child(["fetch", repo_id, filename, str(UNET_DIR)], say, on_progress=on_progress)
+
+    if is_st and not checked:
+        dest = UNET_DIR / os.path.basename(filename)
+        try:
+            header, _ = _st_header(dest)
+            _vet([k for k in header if k != "__metadata__"])
+        except RuntimeError:
+            dest.unlink(missing_ok=True)  # don't leave a rejected file behind to load
+            raise
     say("Download complete.")
 
 
@@ -1278,6 +1333,13 @@ def install_bundle(bundle_id: str, on_status=None, on_progress=None) -> None:
             repos = [m["repo"]] * len(m["shards"]) + ([m["embed"][0]] if m["embed"] else [])
             steps += [{"repo": r, "path": p, "dest": cat.staging_dir(m), "save_as": ""}
                       for r, p in zip(repos, paths)]
+
+        # A shard already sitting in the staging area is one an interrupted install
+        # finished. Skip it: `fetch` refuses to overwrite, so without this a resume trips
+        # over its own completed downloads instead of picking up where it stopped.
+        # (`missing_files` already does this for the files that land in a model dir.)
+        steps = [s for s in steps
+                 if not (s["dest"] / (s["save_as"] or os.path.basename(s["path"]))).exists()]
 
         token = settings.hf_token()
         total_steps = len(steps) + len(pending)
@@ -1489,21 +1551,29 @@ def pull_text_encoder(repo: str, on_status=None, on_progress=None) -> None:
     def step(i: int):
         return lambda p: tick({**p, "index": i, "count": total_steps})
 
-    try:
-        for i, s in enumerate(shards, 1):
-            say(f"[{i}/{total_steps}] {os.path.basename(s)}")
-            _run_child(["fetch", repo_id, s, str(staging)],
-                       on_status=say, on_progress=step(i), token=token)
-        if tekken:
-            say(f"[{len(shards) + 1}/{total_steps}] {os.path.basename(tekken)}")
-            _run_child(["fetch", repo_id, tekken, str(staging)],
-                       on_status=say, on_progress=step(len(shards) + 1), token=token)
-        say(f"[{total_steps}/{total_steps}] stitching {out.name} from {len(shards)} shards…")
-        _merge_shards([staging / os.path.basename(s) for s in shards], out,
-                      embed=(staging / "tekken.json", "tekken_model") if tekken else None,
-                      on_progress=step(total_steps))
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
+    # A file already in the staging area is one an earlier attempt finished: skip it
+    # rather than trip `fetch`'s refusal to overwrite. These encoders run to 48 GB, so a
+    # second attempt has to pick up where the first stopped instead of starting over —
+    # and the staging area therefore survives a failure, and is swept only once the
+    # stitched file has landed.
+    def done_already(path) -> bool:
+        return (staging / os.path.basename(path)).exists()
+
+    for i, s in enumerate(shards, 1):
+        if done_already(s):
+            continue
+        say(f"[{i}/{total_steps}] {os.path.basename(s)}")
+        _run_child(["fetch", repo_id, s, str(staging)],
+                   on_status=say, on_progress=step(i), token=token)
+    if tekken and not done_already(tekken):
+        say(f"[{len(shards) + 1}/{total_steps}] {os.path.basename(tekken)}")
+        _run_child(["fetch", repo_id, tekken, str(staging)],
+                   on_status=say, on_progress=step(len(shards) + 1), token=token)
+    say(f"[{total_steps}/{total_steps}] stitching {out.name} from {len(shards)} shards…")
+    _merge_shards([staging / os.path.basename(s) for s in shards], out,
+                  embed=(staging / "tekken.json", "tekken_model") if tekken else None,
+                  on_progress=step(total_steps))
+    shutil.rmtree(staging, ignore_errors=True)  # the shards have served their purpose
     say("Download complete.")
 
 
