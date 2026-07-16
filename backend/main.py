@@ -3,6 +3,7 @@
 Serves the built React frontend and proxies all Ollama interaction so the
 browser never talks to Ollama directly.
 """
+import base64
 import json
 import os
 import queue
@@ -102,19 +103,23 @@ class EnhanceRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    # Every mode runs on FLUX. There is no negative prompt: FLUX samples at cfg=1.0,
-    # where the negative branch has no effect.
-    mode: str = "txt2img"  # txt2img | img2img | edit | compose
+    # No negative prompt is exposed. On FLUX that's because there's nothing to expose:
+    # FLUX.1 samples at cfg=1.0 (the negative branch has no effect) and FLUX.2 has no
+    # negative branch at all. `animate` runs on Wan, which does use a real negative at
+    # cfg~3.5 — but it's a fixed quality string the model was tuned against, not a knob
+    # (see flux_client.WAN_NEGATIVE), so it stays out of the API.
+    mode: str = "txt2img"  # txt2img | img2img | edit | compose | animate
     prompt: str = ""
-    init_image_hash: str | None = None  # img2img / edit: the source image
+    init_image_hash: str | None = None  # img2img / edit / animate: the source image
     ref_image_hashes: list[str] = []  # compose: reference images to fuse
-    flux_model: str | None = None  # which FLUX UNet (None = that mode's default)
+    flux_model: str | None = None  # which UNet (None = that mode's default)
     steps: int | None = None
     guidance: float | None = None
     strength: float | None = None  # img2img: how far to drift from the source
     enhance: bool = True  # wrap create prompts in a photoreal template
     width: int = 1024  # FLUX is trained at ~1 megapixel
     height: int = 1024
+    seconds: float | None = None  # animate: clip length (capped at 5s)
     seed: int | None = None
     ollama_url: str = oc.DEFAULT_URL
 
@@ -238,8 +243,15 @@ def flux_enhance(req: EnhanceRequest):
         imgs = []
         for h in req.image_hashes[:MAX_ENHANCE_IMAGES]:
             p = db.image_path(h)
-            if p:
+            if not p:
+                continue
+            try:
                 imgs.append(images.image_to_b64(p))
+            except Exception:
+                # Not decodable as an image — a stored video, most likely. This
+                # endpoint's contract is that it never fails, so drop it and let the
+                # model rewrite from whatever else it was given.
+                pass
         text = oc.enhance_prompt(req.ollama_url, req.model, req.prompt, req.mode, imgs)
         if text:
             return {"prompt": text, "source": "vlm"}
@@ -439,7 +451,18 @@ def generate(req: GenerateRequest):
         # paying a lossy re-encode to bake the rotation in. Uploads used to be
         # laundered through a browser canvas, which applied it silently; without
         # this, that removal would land every phone photo in FLUX sideways.
-        return ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+        try:
+            return ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+        except Exception:
+            # The store holds video too now, and this runs in the request body —
+            # outside `gen()`'s try — so an unreadable file here is a bare 500 rather
+            # than an error in the stream. A generated video is a plausible thing to
+            # drag back in, so say what's wrong instead of failing opaquely.
+            raise HTTPException(
+                status_code=400,
+                detail=f"{path.suffix.lstrip('.') or 'that file'} isn't an image "
+                       "that can be used as a source.",
+            )
 
     init_image = _resolve(req.init_image_hash) if req.init_image_hash else None
     ref_images = [_resolve(h) for h in req.ref_image_hashes]
@@ -474,6 +497,26 @@ def generate(req: GenerateRequest):
                 common = dict(steps=req.steps, guidance=req.guidance, seed=seed,
                               model=unet, on_step=step_cb, on_status=status_cb)
 
+                if req.mode == "animate":
+                    if init_image is None:
+                        raise ValueError("Animate needs a source image.")
+                    # Returns bytes + a first frame, not a PIL image, so it doesn't
+                    # join the shared tail below.
+                    data, frame = fx.animate(init_image, req.prompt, seconds=req.seconds,
+                                             **common)
+                    h = db.save_image(
+                        "data:video/webm;base64," + base64.b64encode(data).decode(),
+                        images.pil_to_data_url(frame, max_size=64, fmt="JPEG") if frame else None,
+                    )
+                    events.put({
+                        "type": "image", "kind": "video",
+                        "hash": h, "url": db.image_url(h), "seed": seed,
+                        "width": frame.size[0] if frame else 0,
+                        "height": frame.size[1] if frame else 0,
+                        "model": unet, "model_label": fx.label(unet),
+                    })
+                    return
+
                 if req.mode == "edit":
                     if init_image is None:
                         raise ValueError("Edit needs a source image.")
@@ -502,6 +545,10 @@ def generate(req: GenerateRequest):
                 events.put(
                     {
                         "type": "image",
+                        # Stated rather than left to default, so the client never has to
+                        # read an absent field as "image" — `animate` sends "video" here
+                        # and both go down the same terminal path.
+                        "kind": "image",
                         "hash": h,
                         "url": db.image_url(h),
                         "seed": seed,

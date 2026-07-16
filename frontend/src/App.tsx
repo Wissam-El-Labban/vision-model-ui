@@ -293,6 +293,11 @@ export default function App() {
       };
       const present = (arr: (string | null)[]) =>
         arr.filter((x): x is string => x !== null);
+      // The store holds video under the same `images` list a still uses — it's one
+      // content-addressed blob store and the hash doesn't say what it is. The URL's
+      // extension does, and it's the only signal here. Split on it so `images`
+      // stays "data-URLs of decodable images" on reload, exactly as it is live.
+      const isVideoUrl = (url: string) => url.toLowerCase().endsWith(".webm");
 
       // Dropping missing pinned images here also self-heals the DB: the next
       // send re-persists the pinned set without them.
@@ -300,7 +305,11 @@ export default function App() {
       const sysImg = d.system_image ? await loadImg(d.system_image) : null;
       const msgs: ChatMessage[] = await Promise.all(
         d.messages.map(async (m) => {
-          const images = present(await Promise.all(m.images.map(loadImg)));
+          const videos = m.images.filter(isVideoUrl);
+          videos.forEach((url) => hashCache.current.set(url, hashFromUrl(url)));
+          const images = present(
+            await Promise.all(m.images.filter((u) => !isVideoUrl(u)).map(loadImg))
+          );
           // Keep context-image positions stable (missing -> "") so the model's
           // "image N" references still line up; "" simply renders no thumbnail.
           const contextImages = (
@@ -311,6 +320,7 @@ export default function App() {
             content: m.content,
             model: m.model ?? undefined,
             images: images.length ? images : undefined,
+            videos: videos.length ? videos : undefined,
             contextImages: contextImages.length ? contextImages : undefined,
           };
         })
@@ -576,12 +586,14 @@ export default function App() {
       // compose blends every reference image. edit takes the first image as the
       // scene being changed and the rest as subject references. create uses one
       // source image, and infers txt2img vs img2img from its presence.
+      // animate takes one source image, like create's img2img, and no references.
       const isCompose = op === "compose";
       const initUrl = isCompose ? null : images[0] ?? null;
       const refUrls = isCompose ? images : op === "edit" ? images.slice(1) : [];
       // Shared with the prompt enhancer, so both brief the model on the same job.
       const mode = modeFor(op, images);
       const shownImages = isCompose ? refUrls : initUrl ? [initUrl] : undefined;
+      const icon = op === "animate" ? "🎬" : "🎨";
 
       // Show the prompt as a user turn, then an assistant placeholder we fill
       // with progress text and finally the generated image.
@@ -594,7 +606,7 @@ export default function App() {
       setMessages((prev) => [
         ...prev,
         userMsg,
-        { role: "assistant", content: "🎨 Preparing…", model: modelId },
+        { role: "assistant", content: `${icon} Preparing…`, model: modelId },
       ]);
       setStreaming(true);
 
@@ -634,30 +646,42 @@ export default function App() {
             ollama_url: ollamaUrl,
           },
           {
-            onStatus: (m) => setAssistant({ content: `🎨 ${m}` }),
+            onStatus: (m) => setAssistant({ content: `${icon} ${m}` }),
             onProgress: (step, total) =>
-              setAssistant({ content: `🎨 Generating… step ${step}/${total}` }),
+              setAssistant({ content: `${icon} Generating… step ${step}/${total}` }),
             onImage: async (r) => {
               resultHash = r.hash;
-              // The store keeps each image in its own format, so take the URL the
+              // The store keeps each result in its own format, so take the URL the
               // backend built rather than assuming an extension here.
               const url = r.url || `/api/images/${r.hash}.png`;
               // The model the backend actually ran, which is the authoritative
               // answer — `modelId` above is only this client's prediction of it.
               if (r.model_label) resultLabel = r.model_label;
-              // Load the stored image back as a data-URL for display + pin/reuse
-              // parity, and seed the hash cache so it isn't re-uploaded.
-              try {
-                resultDataUrl = await urlToDataUrl(url);
-                hashCache.current.set(resultDataUrl, r.hash);
-              } catch {
-                /* fall back to the URL below */
+
+              if (r.kind === "video") {
+                // Deliberately *not* urlToDataUrl'd. A 5s 720p clip is megabytes,
+                // which is a lot to hold base64'd in state for every turn — and
+                // `images` is data-URLs by convention, feeding a canvas resize
+                // (`ensureHashes`), the pin panel and the vision model, none of
+                // which can read a webm. Keeping video in its own field is what
+                // stops it reaching them.
+                hashCache.current.set(url, r.hash);
+                setAssistant({ content: "", videos: [url], model: resultLabel });
+              } else {
+                // Load the stored image back as a data-URL for display + pin/reuse
+                // parity, and seed the hash cache so it isn't re-uploaded.
+                try {
+                  resultDataUrl = await urlToDataUrl(url);
+                  hashCache.current.set(resultDataUrl, r.hash);
+                } catch {
+                  /* fall back to the URL below */
+                }
+                setAssistant({
+                  content: "",
+                  images: [resultDataUrl ?? url],
+                  model: resultLabel,
+                });
               }
-              setAssistant({
-                content: "",
-                images: [resultDataUrl ?? url],
-                model: resultLabel,
-              });
               // Relabel the user turn too, so the pair matches what gets persisted
               // — otherwise a fallback shows one model now and another on reload.
               setMessages((prev) =>
@@ -825,7 +849,15 @@ export default function App() {
       if (!trimmed) return; // a prompt is required to generate
       // Source images come from the message attachments, else the pinned panel.
       const attached = composerImages.length ? composerImages : pinnedImages;
-      if (genOp === "compose") {
+      if (genOp === "animate") {
+        // The one image becomes the video's first frame. `imagesFor` caps it at one:
+        // Wan I2V has a single start frame, so a second would be dropped in silence.
+        if (attached.length === 0) {
+          setError("Animate needs a source image to bring to life (attach or pin one).");
+          return;
+        }
+        generateImage(trimmed, "animate", imagesFor("animate", attached));
+      } else if (genOp === "compose") {
         // Blend every available reference image (needs at least one).
         if (attached.length === 0) {
           setError("Combine needs at least one reference image (attach or pin some).");

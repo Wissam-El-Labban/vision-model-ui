@@ -173,11 +173,30 @@ _ENHANCE_SYSTEM = {
         "open.\n"
         "Return the prompt only: no preamble, no quotes, no commentary."
     ),
+    "animate": (
+        "You are a prompt engineer for the Wan 2.2 image-to-video model.\n"
+        "The attached image is the video's FIRST FRAME. It already fixes the subject, "
+        "the setting, the lighting and the framing — do not describe them. Describing "
+        "the scene again wastes the prompt and fights the frame the model is starting "
+        "from.\n"
+        "Describe only what HAPPENS over the next few seconds: how the subject moves, "
+        "and how the camera moves (a slow push in, a pan left, a locked-off static "
+        "shot). Name the camera move explicitly — it is the strongest control there "
+        "is.\n"
+        "It is one continuous shot. Never describe a cut, a new angle, or a second "
+        "scene.\n"
+        "Keep it to what five seconds can hold: one action, not a sequence of them.\n"
+        "Write a short paragraph of plain prose in the present tense.\n"
+        "Return the prompt only: no preamble, no quotes, no commentary."
+    ),
 }
 
 # Which system prompt a generate mode gets. img2img is a partial denoise toward a
-# described scene, so it reads as a description, not an instruction.
-_ENHANCE_MODE = {"txt2img": "create", "img2img": "create", "edit": "edit", "compose": "compose"}
+# described scene, so it reads as a description, not an instruction. animate is the
+# odd one out: its image isn't a reference to describe, it's the frame the video
+# starts from, so the brief is about motion rather than about the picture.
+_ENHANCE_MODE = {"txt2img": "create", "img2img": "create", "edit": "edit",
+                 "compose": "compose", "animate": "animate"}
 
 _PREAMBLE = re.compile(r"^\s*(here'?s|here is|sure[,!]?|prompt:)[^\n]*:\s*", re.I)
 

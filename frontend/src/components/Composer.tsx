@@ -101,6 +101,7 @@ export default function Composer({
 
   const isEdit = genOp === "edit";
   const isCompose = genOp === "compose";
+  const isAnimate = genOp === "animate";
   // A FLUX.2 model serves both roles; on FLUX.1 the sets are disjoint, because
   // edit/compose need a Kontext transformer that conditions on the source image.
   const role = roleFor(genOp);
@@ -118,7 +119,11 @@ export default function Composer({
   // In create/edit the source is the attached image, else the first pinned-panel
   // image. create infers txt2img vs img2img from whether one is present.
   const initSource = images.length > 0 ? "attached" : pinnedInit ? "pinned" : null;
-  const genSubmode = genMode && !isEdit && !isCompose && initSource ? "img2img" : "txt2img";
+  // Only `create` has a submode. animate is excluded because it always takes a
+  // source image: left in, it would read as img2img and offer the strength slider,
+  // which Wan has no equivalent of.
+  const genSubmode =
+    genMode && !isEdit && !isCompose && !isAnimate && initSource ? "img2img" : "txt2img";
   const initPreview = images.length > 0 ? images[0] : pinnedInit;
   // compose blends every attached image, else every pinned one.
   const composeCount = images.length > 0 ? images.length : pinnedCount;
@@ -244,6 +249,15 @@ export default function Composer({
             title="Blend several reference images into one new image"
           >
             🧩 Combine
+          </button>
+          <button
+            role="tab"
+            aria-selected={genOp === "animate"}
+            className={`mode-tab ${genOp === "animate" ? "active" : ""}`}
+            onClick={() => setGenOp("animate")}
+            title="Bring one image to life — a 5-second video. Describe the motion, not the scene."
+          >
+            🎬 Animate
           </button>
         </div>
       )}
@@ -488,11 +502,13 @@ export default function Composer({
                     : "✨ uses a text template — install a vision model in Ollama for a rewrite that reads your images."}
                 </p>
                 <p className="hint muted">
-                  {role === "edit"
-                    ? "Guidance ~2.5 follows the instruction closely; raise it if the subject isn't changing enough."
-                    : genSubmode === "img2img"
-                      ? "Image-to-image: strength controls how far from the attached image."
-                      : "Text-to-image: guidance ~3.5. Attach an image above to switch to image-to-image."}
+                  {isAnimate
+                    ? "Attach one image — it becomes the first frame. Describe the motion, not the scene; the frame already fixes that. Takes a few minutes."
+                    : role === "edit"
+                      ? "Guidance ~2.5 follows the instruction closely; raise it if the subject isn't changing enough."
+                      : genSubmode === "img2img"
+                        ? "Image-to-image: strength controls how far from the attached image."
+                        : "Text-to-image: guidance ~3.5. Attach an image above to switch to image-to-image."}
                 </p>
               </div>
             )}
@@ -524,7 +540,9 @@ export default function Composer({
           onKeyDown={onKeyDown}
           placeholder={
             genMode
-              ? isEdit
+              ? isAnimate
+                ? "Describe the motion… e.g. “she turns to look at the camera, slow push in”"
+                : isEdit
                 ? "Instruction to apply… e.g. “make the cat eat the broccoli”"
                 : isCompose
                   ? "Describe the combined image to create from the references…"

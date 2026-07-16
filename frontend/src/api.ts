@@ -156,7 +156,7 @@ export async function pullModel(
 // Image models. A FLUX.2 model serves every mode; a FLUX.1 one serves exactly one
 // (dev creates, Kontext edits) — hence `roles`, not `role`.
 // --------------------------------------------------------------------------- #
-export type FluxRole = "create" | "edit";
+export type FluxRole = "create" | "edit" | "animate";
 
 export interface FluxModel {
   name: string; // the weight file, which is what /api/generate takes
@@ -405,7 +405,7 @@ export async function deleteFluxModel(name: string): Promise<void> {
   }
 }
 
-export type GenMode = "txt2img" | "img2img" | "edit" | "compose";
+export type GenMode = "txt2img" | "img2img" | "edit" | "compose" | "animate";
 
 /** Rewrite a prompt with a local vision model that can see the attached images.
  *  Always resolves: if Ollama is unreachable the backend falls back to its static
@@ -441,14 +441,19 @@ export interface GenerateParams {
   enhance?: boolean; // wrap create prompts in a photoreal template
   width: number;
   height: number;
+  seconds?: number | null; // animate: clip length (capped at 5s)
   seed?: number | null;
   ollama_url: string;
 }
 
 /** The final `image` event. `url` and `model_label` are what the backend actually
  *  did — the store's URL carries the real extension, and `model` names the
- *  transformer that ran, which is not necessarily the one that was requested. */
+ *  transformer that ran, which is not necessarily the one that was requested.
+ *
+ *  `kind` discriminates a still from a video. Both arrive as this one event so the
+ *  stream has a single terminal path; only what the client does with `url` differs. */
 export interface GeneratedImage {
+  kind?: "image" | "video";
   hash: string;
   seed: number;
   width: number;

@@ -27,7 +27,12 @@ _FMT_TO_MIME_EXT = {
     "JPEG": ("image/jpeg", "jpg"),
     "WEBP": ("image/webp", "webp"),
 }
-MIME_TO_EXT = {mime: ext for mime, ext in _FMT_TO_MIME_EXT.values()}
+
+# Video the store keeps verbatim. Pillow can't read these, so they're identified by
+# magic bytes rather than by `Image.open` — see `sniff`.
+_VIDEO_MIME_EXT = {"video/webm": "webm"}
+
+MIME_TO_EXT = {**{mime: ext for mime, ext in _FMT_TO_MIME_EXT.values()}, **_VIDEO_MIME_EXT}
 
 # The longest edge the store will keep. FLUX samples at ~1 MP (see
 # `flux_client._flux2_resolution`), so 2048 leaves better than 2x linear headroom
@@ -37,15 +42,33 @@ MIME_TO_EXT = {mime: ext for mime, ext in _FMT_TO_MIME_EXT.values()}
 MAX_STORE_DIM = 2048
 
 
+def is_webm(raw: bytes) -> bool:
+    """Whether these bytes are a WebM video, by magic.
+
+    EBML's magic is shared with Matroska, which is the same container with a different
+    DocType and which browsers won't play — so the DocType has to be checked too. It
+    sits in the EBML header, well inside the first 64 bytes.
+    """
+    return raw[:4] == b"\x1a\x45\xdf\xa3" and b"webm" in raw[:64]
+
+
 def sniff(raw: bytes) -> tuple[str, str]:
     """(mime, ext) read from the bytes themselves.
 
     Authoritative on purpose: a client's `data:` prefix is a claim, not evidence.
     `Image.open` only reads the header — pixels load lazily — so this costs a few
     bytes, not a decode.
+
+    Video is checked first, because the fallback here is an *image* mime: Pillow can't
+    open a webm, so without this a generated video would fall through to the except
+    below, be stored as `.jpg`, and be served as image/jpeg to a browser that would
+    show a broken image. The store is format-agnostic; only this function knows what
+    the bytes are.
     """
     from PIL import Image  # PLC0415
 
+    if is_webm(raw):
+        return ("video/webm", "webm")
     try:
         fmt = Image.open(io.BytesIO(raw)).format
     except Exception:
@@ -56,12 +79,15 @@ def sniff(raw: bytes) -> tuple[str, str]:
 def normalize_for_store(raw: bytes) -> bytes:
     """The bytes the store will actually hold.
 
-    The rule, in one place: **bytes are stored verbatim if they are already a
-    format the store names (PNG/JPEG/WEBP) and no larger than MAX_STORE_DIM.
-    Otherwise exactly one re-encode to PNG — LANCZOS-downscaled if oversized.**
-    Every consumer resamples down from this, so this is the last copy that still
-    has the original's detail — for a face, that detail (pores, eyelashes, edges)
-    is what survives into the VAE.
+    The rule, in one place: **a video is stored verbatim. An image is stored verbatim
+    if it is already a format the store names (PNG/JPEG/WEBP) and no larger than
+    MAX_STORE_DIM. Otherwise exactly one re-encode to PNG — LANCZOS-downscaled if
+    oversized.** Every consumer resamples down from this, so this is the last copy
+    that still has the original's detail — for a face, that detail (pores, eyelashes,
+    edges) is what survives into the VAE.
+
+    Video passes through untouched: there is nothing here that can decode it, and
+    nothing that should — it arrives already encoded at the size it was sampled at.
 
     The format check is what keeps `sniff` honest: without it a GIF would sail
     through verbatim, sniff would fail to name it, and the file would be stored as
@@ -76,6 +102,11 @@ def normalize_for_store(raw: bytes) -> bytes:
     """
     from PIL import Image  # PLC0415
 
+    # Explicit, though the `except` below would return `raw` anyway: that path is the
+    # last resort for bytes nothing can identify, and a first-class format shouldn't
+    # depend on it. Without this the rule above is not what the code does.
+    if is_webm(raw):
+        return raw
     try:
         img = Image.open(io.BytesIO(raw))
         if img.format in _FMT_TO_MIME_EXT and max(img.size) <= MAX_STORE_DIM:

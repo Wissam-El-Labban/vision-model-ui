@@ -836,6 +836,51 @@ textarea {
   transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
 
+/* A generated video. Bigger than the 180px image thumbs on purpose: a still is a
+   thumbnail you click to zoom, but there is no zoom view for a video — it plays
+   where it lands, so this is the only size it's ever seen at. */
+.msg-video {
+  position: relative;
+  line-height: 0;
+}
+
+.msg-video video {
+  max-width: 360px;
+  max-height: 360px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #000;
+}
+
+/* Always visible, not hover-only: it's the one way to get the file out, and a
+   hover-only control doesn't exist on a touch screen. */
+.video-dl {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+  text-decoration: none;
+  opacity: 0.65;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+
+.msg-video:hover .video-dl {
+  opacity: 1;
+}
+
+.video-dl:hover {
+  background: rgba(0, 0, 0, 0.85);
+}
+
 .cursor {
   animation: blink 1s steps(2) infinite;
   color: var(--muted);

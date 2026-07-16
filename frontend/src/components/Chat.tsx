@@ -124,6 +124,27 @@ export default function Chat({ messages, streaming, disabled, onDropFiles }: Pro
               <div className={`msg ${m.role}`}>
                 <div className="avatar">{m.role === "user" ? "🧑" : "🤖"}</div>
                 <div className="bubble" style={{ ["--mc" as string]: color }}>
+                  {m.videos && m.videos.length > 0 && (
+                    <div className="msg-images">
+                      {m.videos.map((src, j) => (
+                        // Not zoomable like an image: <video> owns its own click
+                        // (play/pause), and the zoom overlay renders an <img>.
+                        <div key={j} className="msg-video">
+                          {/* muted is required or Chrome refuses to autoplay;
+                              playsInline or iOS takes it fullscreen. */}
+                          <video src={src} autoPlay loop muted playsInline controls />
+                          <a
+                            className="video-dl"
+                            href={src}
+                            download={`animate-${src.slice(-11, -5)}.webm`}
+                            title="Download video"
+                          >
+                            ⬇
+                          </a>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {m.images && m.images.length > 0 && (
                     <div className="msg-images">
                       {m.images.map((src, j) => (

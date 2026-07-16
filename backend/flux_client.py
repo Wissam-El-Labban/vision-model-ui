@@ -65,6 +65,7 @@ FLUX1_VAE = "ae.safetensors"
 
 ROLE_CREATE = cat.ROLE_CREATE
 ROLE_EDIT = cat.ROLE_EDIT
+ROLE_ANIMATE = cat.ROLE_ANIMATE
 
 
 # Quality-first defaults: 20 steps at Q8 is the sweet spot on this GPU; fewer
@@ -97,6 +98,59 @@ REF_METHOD = "offset"
 PHOTOREAL_TEMPLATE = (
     "A photorealistic, high-resolution photograph. {prompt}. Shot on a full-frame "
     "DSLR, realistic skin texture and pores, fine detail, sharp focus."
+)
+
+# --------------------------------------------------------------------------- #
+# Wan 2.2 I2V
+# --------------------------------------------------------------------------- #
+# These are lifted from ComfyUI's own template for this exact model
+# (comfyui_workflow_templates_json/templates/video_wan2_2_14B_i2v.json), not from
+# folklore. That workflow ships *two* sampling paths behind a switch: a 4-step, cfg-1
+# one for the Lightning distillation LoRAs, and a 20-step, cfg-3.5 one for the base
+# weights. The bundle doesn't include the LoRAs, so these are the base path's values.
+WAN_STEPS = 20
+# The step where the high-noise expert hands over to the low-noise one. This is the
+# whole point of the MoE: the first expert lays down motion and composition out of
+# noise, the second refines detail. It is a position in one shared 20-step schedule,
+# not two separate jobs — see `_wan_i2v_graph`.
+WAN_BOUNDARY = 10
+# Wan has a real negative branch, unlike FLUX (cfg=1.0 + FluxGuidance), so this is a
+# true CFG scale rather than a distilled guidance embedding.
+WAN_CFG = 3.5
+# Sigma shift. The template's value; the number most often quoted online is 8.0, which
+# is Wan *2.1*'s and visibly over-smooths motion here.
+WAN_SHIFT = 5.0
+WAN_FPS = 16
+WAN_SECONDS = 5.0
+
+# Wan 2.2 I2V A14B was trained at 480p and 720p; this is the 720p budget. `vram_gb` on
+# the bundle assumes it — raising it raises VRAM by roughly the square, times 81 frames.
+WAN_PIXELS = 1280 * 720
+WAN_MAX_EDGE = 1280
+
+# SaveWEBM's own default is 32, which is visibly blocky on faces. 26 roughly doubles
+# the file (~4 MB for 5s at 720p) and is worth it: the point of a 28 GB transformer is
+# detail, and throwing it away in the encoder is the cheapest possible mistake.
+WAN_CRF = 26.0
+
+# A video job's timeouts are not an image job's. `_await`'s 600s recv default assumes a
+# step every few seconds; the risk here is `sampler_lo`, which starts, then evicts the
+# 28 GB high-noise expert and loads the 28 GB low-noise one *inside* the node while
+# emitting nothing. The poll fallback needs to outlast the whole job, not one silence.
+WAN_RECV_TIMEOUT = 1800
+WAN_POLL_TIMEOUT = 5400
+
+# Verbatim from the template's negative CLIPTextEncode. It's Chinese because Wan's
+# umt5 conditioning was trained that way and this exact string is what the model was
+# tuned against — a translation or a retyping is a different prompt, and measurably
+# worse. Roughly: garish colour, overexposure, static, blurred detail, subtitles,
+# worst/low quality, JPEG artifacts, malformed limbs, fused fingers, cluttered
+# background, three legs, walking backwards.
+WAN_NEGATIVE = (
+    "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，"
+    "整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，"
+    "画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，"
+    "静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
 )
 
 
@@ -154,25 +208,58 @@ def _kontext_resolution(pil) -> tuple[int, int]:
     return bw, bh
 
 
-def _flux2_resolution(pil) -> tuple[int, int]:
-    """The shape ImageScaleToTotalPixels(area, 1 MP, steps=16) will produce. Mirrored
-    here because Flux2Scheduler needs the sampled resolution up front: its sigma
-    schedule is shifted by sequence length, so feeding it the *unscaled* size would
-    shift the whole schedule wrong."""
+def _area_resolution(pil, pixels: int) -> tuple[int, int]:
+    """Fit an image's aspect ratio into a fixed pixel budget, on a multiple of 16.
+
+    The shape ImageScaleToTotalPixels(area, pixels, steps=16) will produce. Mirrored
+    here because the caller generally needs the sampled resolution up front — for
+    FLUX.2, Flux2Scheduler shifts its sigma schedule by sequence length, so feeding it
+    the *unscaled* size would shift the whole schedule wrong.
+    """
     w, h = pil.size
-    scale = math.sqrt((1024 * 1024) / float(w * h or 1))
+    scale = math.sqrt(pixels / float(w * h or 1))
     return max(round(w * scale / 16) * 16, 16), max(round(h * scale / 16) * 16, 16)
+
+
+def _flux2_resolution(pil) -> tuple[int, int]:
+    return _area_resolution(pil, 1024 * 1024)
+
+
+def _wan_resolution(pil) -> tuple[int, int]:
+    """The 720p-budget shape a Wan I2V start frame is sampled at.
+
+    An area fit rather than a nearest-aspect table like Kontext's, because Wan's
+    published buckets straddle two tiers — 1280x720 and 832x480 — whose areas differ by
+    2.4x. Nearest-by-aspect across both would let a 4:3 photo pick its *pixel budget* by
+    accident, and on a video that budget is multiplied by 81 frames: the difference
+    between fitting the card and not. Fixing the area and fitting the aspect into it
+    keeps the token count, and the VRAM, the same whatever shape comes in.
+
+    The clamp is for panoramas: a 3:1 image area-fits to ~1470x490, wider than anything
+    Wan was trained on, so scale the long edge back to 1280 and let the area fall.
+    """
+    w, h = _area_resolution(pil, WAN_PIXELS)
+    if max(w, h) > WAN_MAX_EDGE:
+        s = WAN_MAX_EDGE / max(w, h)
+        w, h = max(round(w * s / 16) * 16, 16), max(round(h * s / 16) * 16, 16)
+    return w, h
 
 
 def _source_resolution(unet, pil) -> tuple[int, int]:
     """The resolution an input image will be sampled at, per family."""
-    if cat.family_of(unet) == cat.FAMILY_FLUX2:
+    fam = cat.family_of(unet)
+    if fam == cat.FAMILY_WAN:
+        return _wan_resolution(pil)
+    if fam == cat.FAMILY_FLUX2:
         return _flux2_resolution(pil)
     return _kontext_resolution(pil)
 
 
 def _default_guidance(unet, role: str) -> float:
-    if cat.family_of(unet) == cat.FAMILY_FLUX2:
+    fam = cat.family_of(unet)
+    if fam == cat.FAMILY_WAN:
+        return WAN_CFG
+    if fam == cat.FAMILY_FLUX2:
         return FLUX2_GUIDANCE
     return KONTEXT_GUIDANCE if role == ROLE_EDIT else CREATE_GUIDANCE
 
@@ -322,12 +409,18 @@ def _multipart(filename: str, content: bytes):
     return pre + content + post, boundary
 
 
+def _fetch_bytes(filename: str, subfolder: str) -> bytes:
+    """An output file off the sidecar, as bytes. ComfyUI serves every output through
+    /view regardless of what it is — a PNG and a WebM come back the same way."""
+    q = urllib.parse.urlencode({"filename": filename, "subfolder": subfolder, "type": "output"})
+    with urllib.request.urlopen(COMFY_URL + "/view?" + q) as r:
+        return r.read()
+
+
 def _fetch_output(filename: str, subfolder: str):
     from PIL import Image  # local import; Pillow is a backend dep
 
-    q = urllib.parse.urlencode({"filename": filename, "subfolder": subfolder, "type": "output"})
-    with urllib.request.urlopen(COMFY_URL + "/view?" + q) as r:
-        return Image.open(io.BytesIO(r.read())).convert("RGB")
+    return Image.open(io.BytesIO(_fetch_bytes(filename, subfolder))).convert("RGB")
 
 
 # --------------------------------------------------------------------------- #
@@ -559,11 +652,153 @@ def _compose_graph(image_names, prompt, width, height, steps, guidance, seed, pr
     return g
 
 
+def _wan_length(seconds, fps: int = WAN_FPS) -> int:
+    """Frames to sample for a clip of `seconds`, on the lattice Wan requires.
+
+    Wan's VAE packs 4 frames into each latent step, plus the start frame, so the frame
+    count must be 4n+1 — `WanImageToVideo` builds a latent of ((length-1)//4)+1 and
+    anything off the lattice is silently truncated rather than rejected. ComfyUI's own
+    template computes `floor(seconds * fps + 1)`, which lands on it exactly for whole
+    seconds; this rounds explicitly so a fractional request can't drift off.
+
+    Capped at 5s: past that Wan loses the thread — the motion stops matching the prompt
+    and the subject drifts — and the attention cost is quadratic in frames.
+    """
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        s = WAN_SECONDS
+    if not 0 < s <= WAN_SECONDS:
+        s = WAN_SECONDS
+    frames = int(s * fps) + 1
+    return max(((frames - 1) // 4) * 4 + 1, 5)
+
+
+def _wan_boundary(steps: int) -> int:
+    """The step the high-noise expert hands over on, for a schedule of `steps`.
+
+    Half, which is what both of the template's presets are (20→10 and 4→2). Derived
+    rather than pinned at WAN_BOUNDARY because the step count is user-settable down to
+    8: a fixed 10 would sit past the end of a short schedule, so the high-noise expert
+    would run the whole thing and the low-noise one — the expert that puts the detail
+    in — would silently never run at all.
+    """
+    return max(1, min(steps - 1, steps // 2))
+
+
+def _wan_i2v_graph(image_name, prompt, width, height, length, steps, boundary, cfg,
+                   seed, prefix, b):
+    """Wan 2.2 image-to-video: one start frame plus a prompt, out to a webm.
+
+    Built here rather than through `_loaders`/`_sampler`/`_conditioning` because it
+    shares no structure with them, only vocabulary. Three things differ in kind:
+
+    * Two transformers, not one. Wan 2.2 A14B is a mixture of experts that splits by
+      *noise level*, not by role — both run in this one graph, the high-noise one over
+      the first half of the schedule and the low-noise one over the rest. Every FLUX
+      builder hard-codes a single `["unet", 0]` as the model.
+    * The samplers can't read the text encoders. `WanImageToVideo` rewrites both
+      conditionings (it attaches the encoded start frame as `concat_latent_image` plus a
+      mask), so the sampler must read *its* outputs — the conditioning is data flowing
+      through a node, not a chain assembled around one.
+    * Real CFG with a real negative branch, where FLUX.1 runs cfg=1.0 and FLUX.2 has no
+      negative branch at all.
+
+    Node ids are load-bearing: `_run_video` reads outputs by id and `_wan_progress`
+    tells the two samplers apart by id.
+    """
+    g = {
+        "unet_hi": _unet_node(b["unet"]),
+        "unet_lo": _unet_node(b["unet_low"]),
+        "clip": _clip_node(b["clip"], "wan"),
+        "vae": {"class_type": "VAELoader", "inputs": {"vae_name": b["vae"]}},
+    }
+
+    # Shift the sigma schedule toward high noise. Wan is trained with it; without this
+    # node the motion comes out mushy and the first frames barely move.
+    for tag in ("hi", "lo"):
+        g[f"shift_{tag}"] = {"class_type": "ModelSamplingSD3",
+                             "inputs": {"model": [f"unet_{tag}", 0], "shift": WAN_SHIFT}}
+
+    g["pos"] = {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}}
+    g["neg"] = {"class_type": "CLIPTextEncode",
+                "inputs": {"text": WAN_NEGATIVE, "clip": ["clip", 0]}}
+
+    g["img"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
+    # WanImageToVideo will resize to width/height itself, but with a bilinear filter,
+    # which aliases badly coming down from a 2048px stored original. Prescaling by area
+    # to the same budget hands it something it only has to nudge — the same reasoning
+    # `_scale_node` applies for FLUX.2. Not `_scale_node` itself: that falls through to
+    # FluxKontextImageScale, whose resolution table is meaningless here.
+    g["scale"] = {"class_type": "ImageScaleToTotalPixels",
+                  "inputs": {"image": ["img", 0], "upscale_method": "area",
+                             "megapixels": round(width * height / 1e6, 4),
+                             "resolution_steps": 16}}
+
+    # Encodes the start frame into both conditionings and sizes the empty latent.
+    # `clip_vision_output` is left off deliberately: it's optional, and Wan 2.2 I2V
+    # doesn't use it (Wan 2.1 I2V did).
+    g["i2v"] = {"class_type": "WanImageToVideo",
+                "inputs": {"positive": ["pos", 0], "negative": ["neg", 0], "vae": ["vae", 0],
+                           "width": width, "height": height, "length": length,
+                           "batch_size": 1, "start_image": ["scale", 0]}}
+
+    # One 20-step schedule run by two models. `steps` is the *shared* total in both
+    # nodes — that's what makes start/end_at_step slice one schedule rather than
+    # describe two. The first keeps its leftover noise for the second to finish, and
+    # the second must not re-noise what it's handed.
+    g["sampler_hi"] = {
+        "class_type": "KSamplerAdvanced",
+        "inputs": {"model": ["shift_hi", 0], "add_noise": "enable", "noise_seed": seed,
+                   "steps": steps, "cfg": cfg, "sampler_name": "euler", "scheduler": "simple",
+                   "positive": ["i2v", 0], "negative": ["i2v", 1], "latent_image": ["i2v", 2],
+                   "start_at_step": 0, "end_at_step": boundary,
+                   "return_with_leftover_noise": "enable"},
+    }
+    g["sampler_lo"] = {
+        "class_type": "KSamplerAdvanced",
+        "inputs": {"model": ["shift_lo", 0], "add_noise": "disable", "noise_seed": seed,
+                   "steps": steps, "cfg": cfg, "sampler_name": "euler", "scheduler": "simple",
+                   "positive": ["i2v", 0], "negative": ["i2v", 1],
+                   "latent_image": ["sampler_hi", 0],
+                   "start_at_step": boundary, "end_at_step": 10000,
+                   "return_with_leftover_noise": "disable"},
+    }
+
+    g["dec"] = {"class_type": "VAEDecode", "inputs": {"samples": ["sampler_lo", 0],
+                                                      "vae": ["vae", 0]}}
+    g["video"] = {"class_type": "SaveWEBM",
+                  "inputs": {"images": ["dec", 0], "filename_prefix": prefix,
+                             "codec": "vp9", "fps": float(WAN_FPS), "crf": WAN_CRF}}
+    # The sidebar wants a JPEG thumbnail and there's no PIL image in a video. Pull the
+    # first frame out here, where it's already decoded in VRAM — the alternative is
+    # decoding webm in the backend, which has no media stack and shouldn't grow one.
+    g["first"] = {"class_type": "ImageFromBatch",
+                  "inputs": {"image": ["dec", 0], "batch_index": 0, "length": 1}}
+    g["thumb"] = {"class_type": "SaveImage",
+                  "inputs": {"images": ["first", 0], "filename_prefix": prefix + "_thumb"}}
+    return g
+
+
 # --------------------------------------------------------------------------- #
 # Run
 # --------------------------------------------------------------------------- #
-def _run(graph, on_step=None, on_status=None):
-    """Submit a graph, relay step progress via the ComfyUI websocket, return PIL."""
+def _await(graph, on_step=None, on_status=None, on_progress=None,
+           recv_timeout=600, poll_timeout=900) -> dict:
+    """Submit a graph, relay progress, and return its history entry once it finishes.
+
+    `on_step(value, max)` is the simple view every image op wants. `on_progress(data)`
+    gets the raw payload instead — which carries `node`, the id of the node reporting it
+    (main.py's stream relies on the same field) — for callers that must tell one sampler
+    from another. Pass one or the other, not both.
+
+    The timeouts are parameters because they describe the *job*, not this function.
+    `recv_timeout` is how long the websocket sits in silence before giving up: ample at
+    600s for a FLUX step every few seconds, but a Wan graph goes quiet for minutes while
+    ComfyUI swaps a 28 GB expert *inside* a node, emitting nothing. `poll_timeout` is
+    the fallback path's hard wall, and too short is worse than useless there — it stops
+    waiting and lets the caller report "no output" for a job still running fine.
+    """
     client_id = uuid.uuid4().hex
     pid = _post("/prompt", {"prompt": graph, "client_id": client_id})["prompt_id"]
 
@@ -574,7 +809,7 @@ def _run(graph, on_step=None, on_status=None):
         ws = websocket.create_connection(
             COMFY_URL.replace("http", "ws") + "/ws?clientId=" + client_id, timeout=5
         )
-        ws.settimeout(600)
+        ws.settimeout(recv_timeout)
         while True:
             msg = ws.recv()
             if not isinstance(msg, str):
@@ -582,7 +817,9 @@ def _run(graph, on_step=None, on_status=None):
             ev = json.loads(msg)
             if ev.get("type") == "progress":
                 d = ev["data"]
-                if on_step:
+                if on_progress:
+                    on_progress(d)
+                elif on_step:
                     on_step(d.get("value", 0), d.get("max", DEFAULT_STEPS))
             elif ev.get("type") == "executing" and ev["data"].get("node") is None \
                     and ev["data"].get("prompt_id") == pid:
@@ -591,18 +828,80 @@ def _run(graph, on_step=None, on_status=None):
     except Exception:
         # No websocket lib / connection: poll history until the prompt completes.
         t0 = time.time()
-        while time.time() - t0 < 900:
+        while time.time() - t0 < poll_timeout:
             h = _get("/history/" + pid)
             if h.get(pid, {}).get("outputs"):
                 break
             time.sleep(2)
 
-    hist = _get("/history/" + pid).get(pid, {})
+    return _get("/history/" + pid).get(pid, {})
+
+
+def _run(graph, on_step=None, on_status=None):
+    """Submit a graph, relay step progress via the ComfyUI websocket, return PIL."""
+    hist = _await(graph, on_step=on_step, on_status=on_status)
     for node in hist.get("outputs", {}).values():
         for im in node.get("images", []):
             return _fetch_output(im["filename"], im.get("subfolder", ""))
     status = hist.get("status", {})
     raise RuntimeError(f"FLUX generation produced no image ({status.get('status_str', 'unknown')}).")
+
+
+def _run_video(graph, on_step=None, on_status=None, steps=None, boundary=None):
+    """Run a Wan graph and return (webm bytes, PIL first frame | None).
+
+    Separate from `_run` rather than a flag on it, because the two disagree about what
+    an output *is*. ComfyUI files a saved video under the same `images` key a saved
+    image uses (PreviewVideo.as_dict → {"images": [...], "animated": (True,)}), so
+    `_run` would happily find the webm, hand it to Pillow, and raise. Keeping them apart
+    means the four image ops never touch this path and `_run`'s contract — "the first
+    output anywhere, as PIL" — stays true, because only a Wan graph emits a video.
+
+    Outputs are read by node id, not by scanning for `animated`: this module builds the
+    graph and names the nodes, so "the video is at `video`" is a fact about our own
+    code, while `animated` is an inference about someone else's UI payload.
+    """
+    hist = _await(graph, on_status=on_status,
+                  on_progress=_wan_progress(on_step, on_status, steps or WAN_STEPS,
+                                            boundary if boundary is not None else WAN_BOUNDARY),
+                  recv_timeout=WAN_RECV_TIMEOUT, poll_timeout=WAN_POLL_TIMEOUT)
+    outs = hist.get("outputs", {})
+    vid = (outs.get("video") or {}).get("images") or []
+    if not vid:
+        status = hist.get("status", {})
+        raise RuntimeError(f"Video generation produced no video "
+                           f"({status.get('status_str', 'unknown')}).")
+    data = _fetch_bytes(vid[0]["filename"], vid[0].get("subfolder", ""))
+
+    # The first frame, for the sidebar thumbnail. Best-effort: a missing thumb is a
+    # placeholder icon, which is not worth failing a five-minute generation over.
+    thumb = (outs.get("thumb") or {}).get("images") or []
+    frame = _fetch_output(thumb[0]["filename"], thumb[0].get("subfolder", "")) if thumb else None
+    return data, frame
+
+
+def _wan_progress(on_step, on_status, steps: int, boundary: int):
+    """Fold two samplers' progress into one monotonic bar over `steps`.
+
+    Each KSamplerAdvanced restarts its count at 0: ComfyUI reports the steps *that node*
+    runs, and the two experts each run half the schedule (their sigmas are sliced by
+    start/end_at_step). Reported raw, the bar would climb to 10, snap back to 0, and
+    climb again. Offsetting the second pass by the first's length is what makes it read
+    as one 20-step job — which is what it is.
+
+    VAEDecode reports progress too, over frames rather than steps; it's the slow tail of
+    a video job (81 frames through the VAE), so it says so rather than silently pinning
+    the bar at 100%.
+    """
+    def on_progress(d):
+        node, value = d.get("node"), d.get("value", 0)
+        if node == "sampler_hi" and on_step:
+            on_step(min(value, boundary), steps)
+        elif node == "sampler_lo" and on_step:
+            on_step(min(boundary + value, steps), steps)
+        elif node == "dec" and on_status:
+            on_status("Decoding video…")
+    return on_progress
 
 
 def _prompt_for(prompt: str, enhance: bool) -> str:
@@ -698,6 +997,42 @@ def compose(pils, prompt, steps=None, guidance=None, seed=0, model=None, on_step
     return _run(g, on_step=on_step, on_status=on_status)
 
 
+def animate(pil, prompt, seconds=None, steps=None, guidance=None, seed=0, model=None,
+            on_step=None, on_status=None):
+    """Animate an image into a short video ('she turns to look at the camera').
+
+    Returns `(webm bytes, PIL first frame | None)` — not a PIL image like every other
+    op here, which is why it goes through `_run_video`.
+
+    `prompt` should describe *motion*, not the scene: the start frame already fixes
+    subject, setting and lighting, and re-describing them fights it. See
+    `ollama_client`'s animate enhance mode.
+    """
+    ensure_server(on_status=on_status)
+    unet = _resolve_unet(model, ROLE_ANIMATE)
+    b = cat.bundle_of_unet(unet)
+    # `roles_of` gives an uncatalogued file [ROLE_CREATE], so _resolve_unet can't hand
+    # one back for this role — but assert rather than trust that, because the failure
+    # mode is a graph naming b["unet_low"] on a bundle that hasn't got one.
+    if not b or b["family"] != cat.FAMILY_WAN:
+        raise RuntimeError(f"{_label(unet)} can't make video. Install a video model "
+                           "in the Models panel.")
+
+    name = _upload_image(pil, f"animate_{uuid.uuid4().hex}.png")
+    w, h = _source_resolution(unet, pil)
+    n_steps = _steps(steps)
+    boundary = _wan_boundary(n_steps)
+    length = _wan_length(seconds)
+    g = _wan_i2v_graph(name, prompt or "", w, h, length, n_steps, boundary,
+                       _guidance(guidance, _default_guidance(unet, ROLE_ANIMATE)),
+                       int(seed), "wan_animate", b)
+    if on_status:
+        on_status(f"animating with {_label(unet)} — {length} frames "
+                  f"({length / WAN_FPS:.0f}s at {w}x{h}). This takes a few minutes.")
+    return _run_video(g, on_step=on_step, on_status=on_status,
+                      steps=n_steps, boundary=boundary)
+
+
 # --------------------------------------------------------------------------- #
 # Model management: list / add (from any HF repo) / remove extra UNets
 # --------------------------------------------------------------------------- #
@@ -717,6 +1052,11 @@ def list_unets() -> list[dict]:
         for p in sorted(UNET_DIR.iterdir()):
             if p.is_file() and p.suffix.lower() in UNET_EXTS:
                 b = cat.bundle_of_unet(p.name)
+                # Half of a model is not a model. Wan's two experts both live here, but
+                # they run together in one graph off the bundle — so listing the second
+                # would offer the user a pick that means nothing.
+                if not cat.is_primary(p.name, b):
+                    continue
                 out.append({
                     "name": p.name,
                     "label": (b["label"] if b else p.name),
@@ -745,6 +1085,12 @@ def _default_for(role: str) -> str:
     for m in list_unets():
         if role in m["roles"]:
             return m["name"]
+    # Say what's actually missing. Roles are no longer all served by the same kind of
+    # model: someone with FLUX installed who clicks Animate has plenty of image models
+    # and none that can animate, and telling them "no image model is installed" sends
+    # them looking for a problem that isn't there.
+    if role == ROLE_ANIMATE:
+        raise RuntimeError("No video model is installed — install one in the Models panel.")
     raise RuntimeError("No image model is installed — install one in the Models panel.")
 
 
@@ -776,6 +1122,8 @@ def resolve_unet(model, role: str) -> str:
 
 def role_for_mode(mode: str) -> str:
     """The role a generate mode draws its transformer from."""
+    if mode == "animate":
+        return ROLE_ANIMATE
     return ROLE_EDIT if mode in ("edit", "compose") else ROLE_CREATE
 
 
@@ -1354,10 +1702,14 @@ def install_bundle(bundle_id: str, on_status=None, on_progress=None) -> None:
         need = cat.peak_gb(b)
         free = cat.free_gb()
         if free < need + 2:  # a couple of GB of headroom for the .part → rename
+            # Only a bundle with a merge has a peak above its download size, and only
+            # for that bundle does the explanation make sense. Wan has no merges — it
+            # would have claimed a text encoder was being stitched together when the
+            # number is just the download.
+            why = " (peak, while the text encoder is being stitched together)" if pending else ""
             raise RuntimeError(
-                f"Not enough disk space for {b['label']}: it needs {need:.0f} GB "
-                f"(peak, while the text encoder is being stitched together) and only "
-                f"{free:.0f} GB is free."
+                f"Not enough disk space for {b['label']}: it needs {need:.0f} GB{why} "
+                f"and only {free:.0f} GB is free."
             )
 
         # Every download, whether it lands in a model dir or in a merge's staging area.

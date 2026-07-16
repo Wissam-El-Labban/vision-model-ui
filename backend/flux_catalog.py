@@ -28,9 +28,18 @@ _DIRS = {"unet": UNET_DIR, "clip": CLIP_DIR, "text_encoders": TE_DIR, "vae": VAE
 
 FAMILY_FLUX1 = "flux1"
 FAMILY_FLUX2 = "flux2"
+FAMILY_WAN = "wan"
 
 ROLE_CREATE = "create"
 ROLE_EDIT = "edit"
+ROLE_ANIMATE = "animate"
+
+# Every bundle key that names a transformer file. Wan 2.2 is a mixture of experts: two
+# transformers that run in *one* graph, one after the other, rather than FLUX.1's two
+# that split by role. So the list is not "unet + unet_edit" any more, and the lookups
+# below must agree on it — they used to spell the pair out separately, which is how a
+# third key could be invisible to one of them and not the other.
+_EXPERT_KEYS = ("unet", "unet_edit", "unet_low")
 
 # Shards land here while a merge runs, not in the model dirs — ComfyUI scans those and
 # would offer a half-written encoder as a loadable file.
@@ -175,6 +184,45 @@ BUNDLES = [
             ("ffxvs/vae-flux", "ae.safetensors", "vae"),
         ],
     },
+    {
+        "id": "wan22-i2v-a14b-fp16",
+        "label": "Wan 2.2 I2V A14B — fp16",
+        "family": FAMILY_WAN,
+        "roles": [ROLE_ANIMATE],
+        "blurb": ("Turns one image into a 5-second 720p video. Two 14B expert "
+                  "transformers: the first lays down motion, the second sharpens it. "
+                  "Ungated — no HuggingFace token needed. Needs a very large card."),
+        "size_gb": 68.8,
+        # Estimate: one 28.6 GB expert resident at a time (ComfyUI evicts the high-noise
+        # one before loading the low-noise one) + the 11.4 GB encoder + activations for
+        # 81 frames at 720p. Measure on real hardware and correct this.
+        "vram_gb": 80,
+        "gated": False,
+        # The two experts run in one graph, so `unet_low` is not `unet_edit`: that key
+        # means "the transformer for the *edit role*" and `_default_for` reads it as a
+        # role split. Wan's split is temporal and both experts serve `animate`. Naming
+        # the high-noise one `unet` keeps it the bundle's canonical handle, so every
+        # lookup that resolves a model by filename works unmodified; `unet_low` stays a
+        # detail the graph builder reads back off the bundle.
+        "unet": "wan2.2_i2v_high_noise_14B_fp16.safetensors",
+        "unet_low": "wan2.2_i2v_low_noise_14B_fp16.safetensors",
+        # fp16 is native on this hardware and the checkpoint is already fp16 — the size
+        # heuristic for user-added models would cast it to fp8, which is a real loss
+        # here and unnecessary on a card this big.
+        "weight_dtype": "default",
+        "clip": "umt5_xxl_fp16.safetensors",
+        "vae": "wan_2.1_vae.safetensors",
+        "files": [
+            ("Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+             "split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors", "unet"),
+            ("Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+             "split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors", "unet"),
+            ("Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+             "split_files/text_encoders/umt5_xxl_fp16.safetensors", "text_encoders"),
+            ("Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+             "split_files/vae/wan_2.1_vae.safetensors", "vae"),
+        ],
+    },
 ]
 
 _BY_ID = {b["id"]: b for b in BUNDLES}
@@ -237,9 +285,24 @@ def bundle_of_unet(name: str) -> dict | None:
     """The bundle a UNet filename belongs to, or None for a user-added model."""
     base = os.path.basename(name or "")
     for b in BUNDLES:
-        if base in (b.get("unet"), b.get("unet_edit")):
+        if base in {b.get(k) for k in _EXPERT_KEYS}:
             return b
     return None
+
+
+def is_primary(name: str, bundle: dict | None = None) -> bool:
+    """Whether a UNet filename is a model a user can *pick*, rather than half of one.
+
+    True for anything uncatalogued: a user-added transformer is a model in its own
+    right. Only a bundle's second expert is not — Wan's low-noise half sits in
+    models/unet like any other transformer, so a directory scan finds it and would
+    offer it as a model. Picking it isn't meaningful; the graph loads both experts off
+    the bundle regardless of which one was named.
+
+    `bundle` is this name's bundle when the caller already has it, to save the lookup.
+    """
+    b = bundle if bundle is not None else bundle_of_unet(name)
+    return not b or os.path.basename(name or "") != b.get("unet_low")
 
 
 def bundle_rank(unet: str) -> int:
@@ -260,7 +323,7 @@ def unets() -> dict[str, dict]:
     """Every UNet filename the catalog knows about -> its bundle."""
     out = {}
     for b in BUNDLES:
-        for key in ("unet", "unet_edit"):
+        for key in _EXPERT_KEYS:
             if b.get(key):
                 out[b[key]] = b
     return out
@@ -278,14 +341,20 @@ def family_of(unet: str) -> str:
 
 
 def roles_of(unet: str) -> list[str]:
-    """Which modes a UNet can serve. FLUX.2 does both; a FLUX.1 UNet does one.
+    """Which modes a UNet can serve. FLUX.2 creates and edits; Wan only animates; a
+    FLUX.1 UNet does one or the other.
 
-    For a user-added model the filename is the only signal we have — a Kontext
-    transformer takes a ReferenceLatent and a plain dev one ignores it.
+    A catalogued bundle states its own roles, and that answer is authoritative — the
+    filename heuristic below is scoped to FLUX.1 deliberately. It is the only family
+    whose transformers genuinely split by role, and it's the only family a user-added
+    model can land in (`family_of` says so). Letting the heuristic see every family
+    meant a Wan file fell through it and came back as a *create* model.
     """
     b = bundle_of_unet(unet)
-    if b and b["family"] == FAMILY_FLUX2:
+    if b and b["family"] != FAMILY_FLUX1:
         return list(b["roles"])
+    # A user-added model: a Kontext transformer takes a ReferenceLatent and a plain dev
+    # one ignores it, and the filename is the only signal we have for which it is.
     return [ROLE_EDIT] if "kontext" in os.path.basename(unet or "").lower() else [ROLE_CREATE]
 
 
