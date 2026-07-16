@@ -91,6 +91,10 @@ export default function Composer({
   const settingsRef = useRef<HTMLDivElement>(null);
   const [sysOpen, setSysOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  // Generate doesn't need an Ollama model, so `disabled` only bites in chat mode
+  // — same rule the attach button uses.
+  const dropDisabled = disabled && !genMode;
 
   const hasSystem = systemPrompt.trim().length > 0 || !!systemImage;
   const patchGen = (p: Partial<typeof gen>) => setGen({ ...gen, ...p });
@@ -152,8 +156,45 @@ export default function Composer({
     }
   }
 
+  // Dropping images anywhere on the composer attaches them — in generate mode
+  // those are FLUX's reference images, so this is the natural place to drop them.
+  // Without a handler the browser treats a dropped image as a navigation and
+  // replaces the page, losing the conversation.
+  const dropTarget = {
+    onDragOver: (e: React.DragEvent) => {
+      // Always cancel, even when we won't accept the files: a dragover that isn't
+      // cancelled makes the composer an invalid drop target, so `drop` never fires
+      // and the browser navigates to the image instead. Only the *affordance* is
+      // conditional.
+      e.preventDefault();
+      if (!dropDisabled) setDragOver(true);
+    },
+    onDragLeave: (e: React.DragEvent) => {
+      // dragleave also fires when the cursor crosses onto a child, and the
+      // composer is full of them — ignore those or the outline strobes.
+      if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+      setDragOver(false);
+    },
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault();
+      setDragOver(false);
+      if (!dropDisabled && e.dataTransfer.files.length) onAddFiles(e.dataTransfer.files);
+    },
+  };
+
   return (
-    <div className="composer">
+    <div className={`composer ${dragOver ? "drag" : ""}`} {...dropTarget}>
+      {dragOver && (
+        <div className="drop-overlay">
+          {genMode
+            ? isEdit
+              ? "🖼️ Drop to add — first image is edited, the rest are references"
+              : isCompose
+                ? "🖼️ Drop to add reference images to combine"
+                : "🖼️ Drop an image to generate from"
+            : "📎 Drop to attach to your message"}
+        </div>
+      )}
       {fluxAvailable && (
         <div className="mode-toggle" role="tablist" aria-label="Composer mode">
           <button

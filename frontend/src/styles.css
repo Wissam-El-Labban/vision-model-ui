@@ -849,6 +849,7 @@ textarea {
 
 /* ---------- Composer ---------- */
 .composer {
+  position: relative; /* anchors the drop hint */
   border-top: 1px solid var(--border);
   padding: 14px 22px;
   background: var(--panel);
@@ -857,6 +858,20 @@ textarea {
 .composer.drag {
   outline: 2px dashed var(--accent);
   outline-offset: -8px;
+}
+
+/* The composer doesn't scroll, so `.drop-overlay`'s sticky positioning would put
+   the hint in normal flow and shove the input down the moment a drag starts.
+   Float it over instead — the dashed outline already marks the target, and this
+   only has to say what dropping will do. `pointer-events: none` keeps it from
+   becoming the drop target itself and stealing the drag. */
+.composer .drop-overlay {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  white-space: nowrap;
 }
 
 .composer-row {
