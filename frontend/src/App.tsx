@@ -626,9 +626,30 @@ export default function App() {
       try {
         const initHash = initUrl ? (await ensureHashes([initUrl]))[0] : null;
         const refHashes = refUrls.length ? await ensureHashes(refUrls) : [];
+
+        // Create the chat before sampling, so the backend has a row to record the
+        // turns against — it writes them from a thread that outlives this page,
+        // which is what lets a reload mid-generation find the result. Best-effort
+        // for the same reason it always was: losing the history is a smaller harm
+        // than refusing to generate.
+        try {
+          await putChat(chatId, {
+            model: model || modelId,
+            system_prompt: systemPrompt,
+            pinned_hashes: await ensureHashes(pinnedImages),
+            system_image_hash: systemImage
+              ? (await ensureHashes([systemImage]))[0]
+              : null,
+          });
+          setChatExists(true);
+        } catch (err) {
+          console.error("putChat failed; this turn won't be recorded", err);
+        }
+
         await generate(
           {
             mode,
+            chat_id: chatId,
             flux_model: fluxModel || null,
             prompt,
             init_image_hash: initHash,
@@ -682,8 +703,9 @@ export default function App() {
                   model: resultLabel,
                 });
               }
-              // Relabel the user turn too, so the pair matches what gets persisted
-              // — otherwise a fallback shows one model now and another on reload.
+              // Relabel the user turn too, so the pair on screen matches the one the
+              // backend recorded — otherwise a fallback shows this client's guess
+              // now and the model that really ran on reload.
               setMessages((prev) =>
                 prev.map((m, i) =>
                   i === prev.length - 2 && m.role === "user"
@@ -704,40 +726,17 @@ export default function App() {
         setStreaming(false);
         abortRef.current = null;
 
-        // Persist (best-effort). Only if we actually produced an image.
+        // Both turns are the backend's to write (see `chat_id` above), so what's
+        // left here is only the work that needs this page: the title, which runs
+        // on the VLM, and the sidebar.
         if (resultHash) {
           try {
-            await putChat(chatId, {
-              model: model || modelId,
-              system_prompt: systemPrompt,
-              pinned_hashes: await ensureHashes(pinnedImages),
-              system_image_hash: systemImage
-                ? (await ensureHashes([systemImage]))[0]
-                : null,
-            });
-            setChatExists(true);
-            await appendMessage(chatId, {
-              role: "user",
-              content: prompt,
-              model: resultLabel,
-              image_hashes: isCompose
-                ? await ensureHashes(refUrls)
-                : initUrl
-                  ? await ensureHashes([initUrl])
-                  : [],
-            });
-            await appendMessage(chatId, {
-              role: "assistant",
-              content: "",
-              model: resultLabel,
-              image_hashes: [resultHash],
-            });
             if (isFirstExchange && model) {
               await generateTitle(chatId, model, ollamaUrl).catch(() => "");
             }
             await refreshChats();
           } catch (err) {
-            console.error("persist failed", err);
+            console.error("post-generate refresh failed", err);
           }
         }
       }

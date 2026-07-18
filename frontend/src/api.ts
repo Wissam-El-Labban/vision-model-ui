@@ -431,6 +431,10 @@ export async function enhancePrompt(params: {
 
 export interface GenerateParams {
   mode: GenMode;
+  // The chat to record this generation in. The backend writes both turns itself,
+  // from a thread that outlives this page — which is what makes a result survive
+  // a reload. The chat must already exist (`putChat`); null skips recording.
+  chat_id?: string | null;
   flux_model?: string | null; // which FLUX UNet ("" / null = that mode's default)
   prompt: string;
   init_image_hash?: string | null; // img2img / edit: the source image

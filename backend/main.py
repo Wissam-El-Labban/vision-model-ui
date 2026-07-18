@@ -5,6 +5,7 @@ browser never talks to Ollama directly.
 """
 import base64
 import json
+import logging
 import os
 import queue
 import random
@@ -122,6 +123,10 @@ class GenerateRequest(BaseModel):
     seconds: float | None = None  # animate: clip length (capped at 5s)
     seed: int | None = None
     ollama_url: str = oc.DEFAULT_URL
+    # The chat to record this generation in. The worker that runs the job outlives
+    # the request, so it — not the browser — is what writes the turns. None means
+    # don't record. The chat row must already exist (PUT /api/chats/<id>).
+    chat_id: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -470,6 +475,20 @@ def generate(req: GenerateRequest):
     def gen():
         events: queue.Queue = queue.Queue()
 
+        def record(turn: str, content: str, model_label: str, hashes: list[str]) -> None:
+            """Write one turn of this generation to the chat.
+
+            Best-effort: a database that won't take the row is no reason to sink a
+            job the user has already waited minutes for. The generation itself is
+            still delivered over the stream regardless.
+            """
+            if not req.chat_id:
+                return
+            try:
+                db.append_message(req.chat_id, turn, content, model_label, hashes)
+            except Exception:
+                logging.exception("recording %s turn in chat %s failed", turn, req.chat_id)
+
         def worker():
             try:
                 events.put({"type": "status", "message": "Freeing VRAM (unloading vision model)…"})
@@ -492,6 +511,16 @@ def generate(req: GenerateRequest):
                     events.put({"type": "status", "message":
                                 f"{os.path.basename(str(req.flux_model))} can't {req.mode} "
                                 f"here — using {fx.label(unet)} instead"})
+                label = fx.label(unet)
+
+                # Record the prompt before sampling rather than after it. This thread
+                # outlives the request — a reload or a Stop drops the stream but not
+                # the job — so a turn written only on completion is lost in exactly
+                # the case that hurts, a cold FLUX.2 load that runs for minutes.
+                # `label` is what will actually run, so the pair can't disagree.
+                record("user", req.prompt, label,
+                       req.ref_image_hashes if req.mode == "compose"
+                       else [h for h in (req.init_image_hash,) if h])
 
                 seed = req.seed if req.seed is not None else random.randint(0, 2**31 - 1)
                 common = dict(steps=req.steps, guidance=req.guidance, seed=seed,
@@ -508,12 +537,13 @@ def generate(req: GenerateRequest):
                         "data:video/webm;base64," + base64.b64encode(data).decode(),
                         images.pil_to_data_url(frame, max_size=64, fmt="JPEG") if frame else None,
                     )
+                    record("assistant", "", label, [h])
                     events.put({
                         "type": "image", "kind": "video",
                         "hash": h, "url": db.image_url(h), "seed": seed,
                         "width": frame.size[0] if frame else 0,
                         "height": frame.size[1] if frame else 0,
-                        "model": unet, "model_label": fx.label(unet),
+                        "model": unet, "model_label": label,
                     })
                     return
 
@@ -542,6 +572,7 @@ def generate(req: GenerateRequest):
                 full = images.pil_to_data_url(image)
                 thumb = images.pil_to_data_url(image, max_size=64, fmt="JPEG")
                 h = db.save_image(full, thumb)
+                record("assistant", "", label, [h])
                 events.put(
                     {
                         "type": "image",
@@ -556,7 +587,7 @@ def generate(req: GenerateRequest):
                         "height": image.size[1],
                         # What actually ran, so the UI never has to guess.
                         "model": unet,
-                        "model_label": fx.label(unet),
+                        "model_label": label,
                     }
                 )
             except Exception as exc:
