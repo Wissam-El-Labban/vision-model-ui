@@ -21,18 +21,22 @@ export interface ChatMessage {
 /** Which generation workflow the composer is in. */
 export type GenOp = "create" | "edit" | "compose" | "animate";
 
-/** Liveness of the in-flight turn, for the progress bar under the chat.
+/** Progress of the in-flight turn, for the bar under the chat.
  *
- * The bar exists because a first run goes quiet for a long time: ComfyUI loads
- * tens of GB off disk before it emits step 1, so the status line sits on
- * "editing with flux-2-klein-9b…" with nothing to say whether it is loading or
- * wedged. `total` of 0 means no step has arrived yet and the bar runs
- * indeterminate; `updatedAt` is what separates "slow" from "stuck" — it only
- * moves when the backend actually says something. */
+ * `frac` is the whole job, not the sampler: the backend prices every node in the
+ * ComfyUI graph and reports the share that is finished (see `_Progress` in
+ * flux_client.py), which is what makes the bar mean something during the minutes a
+ * cold run spends loading weights before step 1 exists. It is null only until the
+ * first backend event arrives. `updatedAt` is what separates "slow" from "stuck" —
+ * it only moves when the backend actually says something. */
 export interface GenProgress {
   /** Last status line from the backend, minus the leading icon. */
   phase: string;
-  /** Sampler steps done, and the total for this job. Both 0 before sampling. */
+  /** What the graph is doing right now ("Loading the model"), from the backend. */
+  stage: string;
+  /** Share of the whole job that is done, 0–1. Null before the first event. */
+  frac: number | null;
+  /** Sampler steps done, and the total for this job. Both 0 outside sampling. */
   step: number;
   total: number;
   /** ms epoch, for elapsed time. */

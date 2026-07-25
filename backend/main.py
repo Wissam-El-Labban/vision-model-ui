@@ -554,7 +554,10 @@ def generate(req: GenerateRequest):
                     pass  # best-effort; Ollama may be remote or already free
 
                 status_cb = lambda m: events.put({"type": "status", "message": m})
-                step_cb = lambda s, t: events.put({"type": "progress", "step": s, "total": t})
+                # One snapshot of the whole job per event — overall fraction, the stage
+                # producing it, and the sampler counters — so the client renders the bar
+                # from the last event it saw rather than stitching partial updates.
+                prog_cb = lambda p: events.put({"type": "progress", **p})
 
                 # Resolve the transformer once, here, and pass the resolved name down
                 # (resolving is idempotent). A request naming a model that can't serve
@@ -585,7 +588,7 @@ def generate(req: GenerateRequest):
 
                 seed = req.seed if req.seed is not None else random.randint(0, 2**31 - 1)
                 common = dict(steps=req.steps, guidance=req.guidance, seed=seed,
-                              model=unet, on_step=step_cb, on_status=status_cb)
+                              model=unet, on_progress=prog_cb, on_status=status_cb)
 
                 if req.mode == "animate":
                     if init_image is None:

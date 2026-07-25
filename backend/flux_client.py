@@ -302,6 +302,11 @@ def ensure_server(on_status=None) -> None:
         raise RuntimeError("No image model is installed — install one in the Models panel.")
     if on_status:
         on_status("starting FLUX engine…")
+    # A sidecar we are about to start holds nothing, whatever an earlier one held —
+    # which also means residency is knowable again from here on.
+    global _residency_known
+    _resident.clear()
+    _residency_known = True
     # Default (normalvram) memory management: ComfyUI keeps the model resident and
     # offloads only as needed — the right balance on this 15 GB GPU. (--lowvram
     # would over-offload and slow things down for no quality gain.) Loopback-only
@@ -331,6 +336,11 @@ def free() -> None:
     """Release FLUX's VRAM (call before handing the GPU back to chat)."""
     if not _server_up():
         return
+    # Nothing is loaded after this, so the next run pays the cold price again and the
+    # progress bar should expect it (see `_resident`).
+    global _residency_known
+    _resident.clear()
+    _residency_known = True
     try:
         _post("/free", {"unload_models": True, "free_memory": True})
     except Exception:
@@ -865,26 +875,419 @@ def _wan_i2v_graph(image_name, prompt, width, height, length, steps, boundary, c
 
 
 # --------------------------------------------------------------------------- #
+# Progress
+# --------------------------------------------------------------------------- #
+# What a generation spends its time on is the *graph*, not the sampler. ComfyUI
+# executes a graph node by node and says which node it is on; sampling is one of
+# those nodes, and on a cold run it is not the slow one — reading a 32 GB
+# transformer off disk is. So each node is priced in seconds, and progress is the
+# share of the graph's total price that is finished: nodes ComfyUI reports as
+# executed (or cached, which is what a warm re-run reports for the loaders) count
+# in full, the running node counts for as much of itself as it has reported.
+#
+# The prices below are only a cold start. Every node is timed as it runs and the
+# result is folded into `data/gen_timing.json`, so after a run or two the weights
+# are measurements from this machine rather than these guesses.
+#
+# They are not what the node names suggest, because ComfyUI's loaders are lazy: the
+# *Loader nodes hand back a patcher in milliseconds and the weights are read and
+# staged by the first node that actually uses them. Measured on a cold FLUX.2 Klein
+# run here: CLIPLoader 0.3s but CLIPTextEncode 115s, and the transformer's own load
+# lands inside the sampler. The one exception is the GGUF loader, which dequantizes
+# in the node.
+_NODE_SECONDS = {
+    "UNETLoader": 3.0, "UnetLoaderGGUF": 40.0,
+    "CLIPLoader": 3.0, "DualCLIPLoader": 3.0, "CLIPLoaderGGUF": 20.0,
+    "VAELoader": 1.0,
+    "LoraLoaderModelOnly": 5.0, "LoraLoader": 5.0,
+    "ModelSamplingSD3": 0.5,
+    # Where the text encoder is really loaded, on the run that loads it.
+    "CLIPTextEncode": 60.0,
+    "LoadImage": 0.5, "VAEEncode": 2.0, "WanImageToVideo": 4.0,
+    "VAEDecode": 3.0, "SaveImage": 0.5, "SaveWEBM": 10.0,
+}
+_OTHER_NODE_SECONDS = 0.3
+# Per sampler step, multiplied by the steps that node actually runs. High for a step
+# because the transformer's load is inside the first one on a cold run.
+_STEP_SECONDS = 6.0
+_SAMPLERS = ("KSampler", "KSamplerAdvanced", "SamplerCustomAdvanced")
+
+# The file names that identify *which* model a node loads. A 6 GB Klein and a 32 GB
+# FLUX.2 both load through UNETLoader and are a minute apart, so timings are keyed by
+# the file, not by the node class.
+_MODEL_INPUTS = ("unet_name", "clip_name", "clip_name1", "vae_name", "lora_name")
+
+# How often the bar advances while ComfyUI is silent (seconds).
+_TICK = 1.0
+
+_STAGE_LABELS = {
+    "UNETLoader": "Loading the model", "UnetLoaderGGUF": "Loading the model",
+    "CLIPLoader": "Loading the text encoder", "DualCLIPLoader": "Loading the text encoder",
+    "CLIPLoaderGGUF": "Loading the text encoder",
+    "VAELoader": "Loading the VAE",
+    "LoraLoaderModelOnly": "Applying the LoRA", "LoraLoader": "Applying the LoRA",
+    "CLIPTextEncode": "Reading the prompt", "FluxGuidance": "Reading the prompt",
+    "ReferenceLatent": "Reading the reference images",
+    "FluxKontextMultiReferenceLatentMethod": "Reading the reference images",
+    "LoadImage": "Reading the source image", "VAEEncode": "Encoding the source image",
+    "FluxKontextImageScale": "Sizing the source image",
+    "ImageScaleToTotalPixels": "Sizing the source image",
+    "EmptySD3LatentImage": "Preparing the canvas",
+    "EmptyFlux2LatentImage": "Preparing the canvas",
+    "Flux2Scheduler": "Preparing the schedule", "SplitSigmas": "Preparing the schedule",
+    "RandomNoise": "Preparing the noise", "BasicGuider": "Preparing the sampler",
+    "KSamplerSelect": "Preparing the sampler", "ModelSamplingSD3": "Preparing the sampler",
+    "WanImageToVideo": "Preparing the frames",
+    "KSampler": "Generating", "KSamplerAdvanced": "Generating",
+    "SamplerCustomAdvanced": "Generating",
+    "VAEDecode": "Decoding the image",
+    "SaveImage": "Saving", "SaveWEBM": "Encoding the video",
+}
+
+_TIMING_PATH = Path(__file__).resolve().parent / "data" / "gen_timing.json"
+_timing_mu = threading.Lock()
+_timing_cache: dict | None = None
+
+# Model files ComfyUI is known to have loaded already. The same node is two orders of
+# magnitude apart on either side of this — 115s to stage a 15 GB encoder, 0.2s to reuse
+# the staged one — so a single average of the two would describe neither, and every
+# timing is filed as cold or warm accordingly.
+#
+# Best-effort by construction: it is this process's memory of what it asked for, while
+# residency is ComfyUI's to decide (it evicts under VRAM pressure). Wrong here costs
+# pacing, never correctness — the bar is still driven by what the graph reports.
+_resident: set[str] = set()
+
+# Whether that memory means anything yet. A backend that restarts against a sidecar
+# left running has no idea what it is holding, and a warm run filed as cold would
+# teach the store that a 15 GB encoder loads in 200ms. Such a run is still measured —
+# it just isn't allowed to write anything down.
+_residency_known = False
+
+
+def _model_inputs(graph: dict) -> set[str]:
+    """Every model file this graph names."""
+    return {v for node in graph.values()
+            for k, v in (node.get("inputs") or {}).items()
+            if k in _MODEL_INPUTS and isinstance(v, str)}
+
+
+def _timings() -> dict:
+    """Measured node durations from previous runs. Seconds, keyed by `_cost_key`."""
+    global _timing_cache
+    if _timing_cache is None:
+        try:
+            loaded = json.loads(_TIMING_PATH.read_text())
+            _timing_cache = loaded if isinstance(loaded, dict) else {}
+        except (OSError, ValueError):
+            _timing_cache = {}
+    return _timing_cache
+
+
+def _remember_timings(measured: dict[str, float]) -> None:
+    """Fold one run's durations into the store, as an EMA so a cold outlier fades.
+
+    Best-effort: a progress bar is not worth failing a finished generation over.
+    """
+    if not measured:
+        return
+    with _timing_mu:
+        store = _timings()
+        for key, seconds in measured.items():
+            prev = store.get(key)
+            store[key] = seconds if not isinstance(prev, (int, float)) else prev * 0.6 + seconds * 0.4
+        try:
+            _TIMING_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _TIMING_PATH.write_text(json.dumps(store))
+        except OSError:
+            pass
+
+
+def _cost_key(graph: dict, nid: str, depth: int = 0) -> str:
+    """The identity a node's duration is remembered under.
+
+    Keyed by the model it works on, not just its class: a 9B Klein and a 32B FLUX.2
+    both encode through `CLIPTextEncode` and are two minutes apart, and that node is
+    where the encoder is loaded (see `_NODE_SECONDS`). A node that names no model
+    inherits the one it reads from, which is how the encode and the decode end up
+    filed under the encoder and the transformer they really wait on.
+    """
+    node = graph.get(nid) or {}
+    cls = node.get("class_type", "?")
+    ins = node.get("inputs") or {}
+    for k in _MODEL_INPUTS:
+        if isinstance(ins.get(k), str):
+            return _keyed(cls, ins[k])
+    if cls in _SAMPLERS:
+        # Per *step*, not per node: the step count is the user's to change, so a
+        # 40-step run must not teach the bar that sampling takes twice as long.
+        return _keyed("step", _graph_unet(graph))
+    if depth < 3:
+        for v in ins.values():
+            if isinstance(v, (list, tuple)) and len(v) == 2 and v[0] in graph:
+                upstream = _cost_key(graph, v[0], depth + 1)
+                if ":" in upstream:
+                    return f"{cls}:{upstream.split(':', 1)[1]}"
+    return cls
+
+
+def _keyed(prefix: str, model: str) -> str:
+    return f"{prefix}:{model}#{'warm' if model in _resident else 'cold'}"
+
+
+def _graph_unet(graph: dict) -> str:
+    for node in graph.values():
+        name = (node.get("inputs") or {}).get("unet_name")
+        if isinstance(name, str):
+            return name
+    return "?"
+
+
+def _sigma_steps(graph: dict, ref) -> int:
+    """How many steps a sigma schedule holds, following SplitSigmas back to its source.
+
+    SamplerCustomAdvanced takes no step count of its own — the schedule it is handed
+    is what decides how long it runs (see `_sampler`), so the count is read from there.
+    """
+    if not (isinstance(ref, (list, tuple)) and len(ref) == 2 and ref[0] in graph):
+        return DEFAULT_STEPS
+    node = graph[ref[0]]
+    ins = node.get("inputs") or {}
+    if node.get("class_type") == "SplitSigmas":
+        base = _sigma_steps(graph, ins.get("sigmas"))
+        cut = int(ins.get("step", 0) or 0)
+        # Output 1 is the tail the partial-denoise path samples; output 0 is the head.
+        return max(1, base - cut if ref[1] == 1 else cut)
+    try:
+        return max(1, int(ins.get("steps", DEFAULT_STEPS)))
+    except (TypeError, ValueError):
+        return DEFAULT_STEPS
+
+
+def _sampler_steps(graph: dict, nid: str) -> int:
+    """Steps this sampler node runs — 0 if it isn't a sampler.
+
+    Not simply `inputs["steps"]`: KSampler at denoise < 1 starts part-way down the
+    schedule, and the two Wan experts each run a *slice* of one shared schedule.
+    """
+    node = graph.get(nid) or {}
+    cls = node.get("class_type")
+    ins = node.get("inputs") or {}
+    try:
+        if cls == "KSampler":
+            return max(1, round(int(ins.get("steps", DEFAULT_STEPS))
+                                * float(ins.get("denoise", 1.0))))
+        if cls == "KSamplerAdvanced":
+            steps = int(ins.get("steps", DEFAULT_STEPS))
+            first = int(ins.get("start_at_step", 0))
+            last = min(int(ins.get("end_at_step", steps)), steps)
+            return max(1, last - first)
+    except (TypeError, ValueError):
+        return DEFAULT_STEPS
+    if cls == "SamplerCustomAdvanced":
+        return _sigma_steps(graph, ins.get("sigmas"))
+    return 0
+
+
+class _Progress:
+    """One graph's execution, as a single monotonic fraction.
+
+    `on_progress` receives `{"frac", "stage", "step", "total"}` — the overall share
+    of the job that is done, what is happening right now, and the sampler counters
+    (0 outside sampling). Every field is a snapshot, so a client can render straight
+    from the last event it saw.
+    """
+
+    def __init__(self, graph: dict, on_progress=None):
+        self.graph = graph
+        self.on_progress = on_progress
+        self.steps = {nid: _sampler_steps(graph, nid) for nid in graph}
+        self.steps = {nid: n for nid, n in self.steps.items() if n}
+        self.cost = {nid: self._cost(nid) for nid in graph}
+        self.done: set[str] = set()
+        self.measured: dict[str, float] = {}
+        self.trusted = _residency_known   # may this run teach the timing store?
+        self.node: str | None = None
+        self.started = 0.0
+        self.reported = 0.0     # within-node fraction, as ComfyUI reported it
+        self.pre: float | None = None   # where the clock had the node when it spoke
+        self.steps_done = 0     # steps credited by samplers that have finished
+        self.step = 0
+        self.stage = "Queued"
+        self.sent = -1.0
+        self.sent_at = 0.0
+
+    # -- cost model -------------------------------------------------------- #
+    def _cost(self, nid: str) -> float:
+        cls = (self.graph.get(nid) or {}).get("class_type", "")
+        known = _timings().get(_cost_key(self.graph, nid))
+        known = float(known) if isinstance(known, (int, float)) and known > 0 else None
+        if nid in self.steps:
+            return max(0.05, known or _STEP_SECONDS) * self.steps[nid]
+        return max(0.05, known or _NODE_SECONDS.get(cls, _OTHER_NODE_SECONDS))
+
+    @property
+    def total_steps(self) -> int:
+        return sum(self.steps.values())
+
+    # -- events ------------------------------------------------------------ #
+    def begin(self) -> None:
+        self._emit(force=True)
+
+    def cached(self, ids) -> None:
+        """Nodes ComfyUI is reusing from its cache — a warm re-run's loaders, which are
+        most of a cold run's cost.
+
+        They are priced at zero rather than credited as done: work that will not happen
+        this run does not belong in the total either. Otherwise a second generation with
+        the same model would open at 40% and spend the whole job in the last stretch,
+        when what is actually left to do is all of it. ComfyUI sends this before the
+        first node executes, so the denominator is settled before the bar moves.
+        """
+        for i in ids:
+            if i in self.cost:
+                self.cost[i] = 0.0
+                self.done.add(i)
+                self.steps.pop(i, None)
+        self._emit(force=True)
+
+    def executing(self, nid) -> None:
+        self._close()
+        if nid in self.cost:
+            self.node, self.started = nid, time.time()
+            self.reported, self.pre = 0.0, None
+            self.stage = _STAGE_LABELS.get(self.graph[nid].get("class_type", ""), "Working")
+        self._emit(force=True)
+
+    def node_progress(self, nid, value: float, maximum: float) -> None:
+        """A node reporting its own progress: sampler steps, or VAE frames."""
+        if nid not in self.cost:
+            nid = self.node          # older payloads omit the node id
+        if nid is None:
+            return
+        if nid != self.node:
+            self.executing(nid)
+        if maximum > 0:
+            # The clock's estimate for this node stops here and the node's own count
+            # takes over the rest of it. A sampler spends its first minute loading the
+            # transformer and says nothing; step 1 of 8 does not mean the node is an
+            # eighth done, it means the silent part is behind us.
+            if self.pre is None:
+                self.pre = self._elapsed_frac(self.cost[nid])
+            self.reported = max(self.reported, min(1.0, value / maximum))
+        if nid in self.steps:
+            # ComfyUI knows what it is actually running; our count came from reading
+            # the graph, so let its number correct ours.
+            if maximum > 0 and int(maximum) != self.steps[nid]:
+                self.steps[nid] = int(maximum)
+                self.cost[nid] = self._cost(nid)
+            self.step = min(self.steps_done + int(value), self.total_steps)
+        self._emit()
+
+    def tick(self) -> None:
+        """Advance the estimate while ComfyUI says nothing (see `_frac`).
+
+        Marked `live: False`, because it is this module's arithmetic rather than news
+        from the sidecar. A client that used these to decide the job is alive would
+        watch a wedged ComfyUI creep forward forever.
+        """
+        self._emit(live=False)
+
+    def finish(self) -> None:
+        self._close()
+        self.done = set(self.cost)
+        self.step = self.total_steps
+        self.stage = "Finishing"
+        self._emit(force=True)
+        # Order matters: the durations were measured against this run's cold/warm
+        # keys, and it is only now that these models count as loaded — which is also
+        # what makes residency knowable from here on, whatever it was at the start.
+        global _residency_known
+        if self.trusted:
+            _remember_timings(self.measured)
+        _resident.update(_model_inputs(self.graph))
+        _residency_known = True
+
+    # -- internals --------------------------------------------------------- #
+    def _close(self) -> None:
+        """Credit the running node in full and time it for the next run."""
+        nid, self.node = self.node, None
+        if nid is None:
+            return
+        self.done.add(nid)
+        if nid in self.steps:
+            self.steps_done = min(self.steps_done + self.steps[nid], self.total_steps)
+            self.step = self.steps_done
+        elapsed = time.time() - self.started
+        if elapsed > 0.05:
+            per = elapsed / self.steps[nid] if nid in self.steps else elapsed
+            self.measured[_cost_key(self.graph, nid)] = per
+
+    def _frac(self) -> float:
+        total = sum(self.cost.values()) or 1.0
+        done = sum(c for nid, c in self.cost.items() if nid in self.done)
+        nid = self.node
+        if nid is not None and nid not in self.done:
+            share = self.cost[nid]
+            within = (self.pre + (1.0 - self.pre) * self.reported
+                      if self.pre is not None else self._elapsed_frac(share))
+            done += share * within
+        return min(1.0, done / total)
+
+    def _elapsed_frac(self, share: float) -> float:
+        """How much of the running node the clock says is behind us.
+
+        A node that loads a 15 GB text encoder reports nothing for the minute it takes,
+        so its share is filled against how long that same node took last time. Linear
+        for as long as it was expected to take, then an exponential tail: an estimate
+        that is running late must keep moving — a bar parked at 80% is the useless kind
+        — but it must never arrive, because the only thing allowed to say a node is
+        finished is ComfyUI saying so.
+        """
+        if share <= 0:
+            return 0.0
+        ratio = (time.time() - self.started) / share
+        if ratio <= 1.0:
+            return 0.8 * ratio
+        return 0.8 + 0.2 * (1.0 - math.exp(-(ratio - 1.0)))
+
+    def _emit(self, force: bool = False, live: bool = True) -> None:
+        if not self.on_progress:
+            return
+        frac = max(self._frac(), self.sent)   # a progress bar never goes backwards
+        now = time.time()
+        if not force and (frac - self.sent < 0.002 or now - self.sent_at < 0.15):
+            return
+        self.sent, self.sent_at = frac, now
+        self.on_progress({"frac": round(frac, 4), "stage": self.stage, "live": live,
+                          "step": self.step, "total": self.total_steps})
+
+
+# --------------------------------------------------------------------------- #
 # Run
 # --------------------------------------------------------------------------- #
-def _await(graph, on_step=None, on_status=None, on_progress=None,
+def _await(graph, on_progress=None, on_status=None,
            recv_timeout=600, poll_timeout=900) -> dict:
     """Submit a graph, relay progress, and return its history entry once it finishes.
 
-    `on_step(value, max)` is the simple view every image op wants. `on_progress(data)`
-    gets the raw payload instead — which carries `node`, the id of the node reporting it
-    (main.py's stream relies on the same field) — for callers that must tell one sampler
-    from another. Pass one or the other, not both.
+    `on_progress` gets `_Progress`'s snapshots — one dict per update, covering the
+    whole graph rather than only the sampler. `live` on a snapshot separates the ones
+    ComfyUI prompted from the ones the clock did, which is what lets a client keep a
+    stall detector while the bar still moves through a silent load.
 
     The timeouts are parameters because they describe the *job*, not this function.
-    `recv_timeout` is how long the websocket sits in silence before giving up: ample at
-    600s for a FLUX step every few seconds, but a Wan graph goes quiet for minutes while
-    ComfyUI swaps a 28 GB expert *inside* a node, emitting nothing. `poll_timeout` is
-    the fallback path's hard wall, and too short is worse than useless there — it stops
-    waiting and lets the caller report "no output" for a job still running fine.
+    `recv_timeout` is how long ComfyUI may stay silent before we give up on the
+    websocket: ample at 600s for a FLUX step every few seconds, but a Wan graph goes
+    quiet for minutes while ComfyUI swaps a 28 GB expert *inside* a node. It is now
+    spent a second at a time, because the bar has to keep moving through exactly that
+    silence. `poll_timeout` is the fallback path's hard wall, and too short is worse
+    than useless there — it stops waiting and lets the caller report "no output" for a
+    job still running fine.
     """
     client_id = uuid.uuid4().hex
     pid = _post("/prompt", {"prompt": graph, "client_id": client_id})["prompt_id"]
+    prog = _Progress(graph, on_progress=on_progress)
+    prog.begin()
 
     # Progress via websocket if the client lib is available; otherwise just wait.
     try:
@@ -893,22 +1296,41 @@ def _await(graph, on_step=None, on_status=None, on_progress=None,
         ws = websocket.create_connection(
             COMFY_URL.replace("http", "ws") + "/ws?clientId=" + client_id, timeout=5
         )
-        ws.settimeout(recv_timeout)
-        while True:
-            msg = ws.recv()
-            if not isinstance(msg, str):
-                continue
-            ev = json.loads(msg)
-            if ev.get("type") == "progress":
-                d = ev["data"]
-                if on_progress:
-                    on_progress(d)
-                elif on_step:
-                    on_step(d.get("value", 0), d.get("max", DEFAULT_STEPS))
-            elif ev.get("type") == "executing" and ev["data"].get("node") is None \
-                    and ev["data"].get("prompt_id") == pid:
-                break
-        ws.close()
+        ws.settimeout(_TICK)
+        try:
+            silent = 0.0
+            while True:
+                try:
+                    msg = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    silent += _TICK
+                    if silent >= recv_timeout:
+                        raise TimeoutError(f"ComfyUI sent nothing for {recv_timeout}s")
+                    prog.tick()
+                    continue
+                silent = 0.0
+                if not isinstance(msg, str):
+                    continue
+                ev = json.loads(msg)
+                data = ev.get("data") or {}
+                # Our own client id already filters most of it; this drops anything
+                # left over from a different prompt on the same socket.
+                if data.get("prompt_id") not in (None, pid):
+                    continue
+                kind = ev.get("type")
+                if kind == "progress":
+                    prog.node_progress(data.get("node"), data.get("value", 0),
+                                       data.get("max", 0))
+                elif kind == "execution_cached":
+                    prog.cached(data.get("nodes") or [])
+                elif kind == "executing":
+                    if data.get("node") is None and data.get("prompt_id") == pid:
+                        break
+                    prog.executing(data.get("node"))
+                elif kind == "executed":
+                    prog.executing(None)
+        finally:
+            ws.close()
     except Exception:
         # No websocket lib / connection: poll history until the prompt completes.
         t0 = time.time()
@@ -916,14 +1338,16 @@ def _await(graph, on_step=None, on_status=None, on_progress=None,
             h = _get("/history/" + pid)
             if h.get(pid, {}).get("outputs"):
                 break
+            prog.tick()
             time.sleep(2)
 
+    prog.finish()
     return _get("/history/" + pid).get(pid, {})
 
 
-def _run(graph, on_step=None, on_status=None):
-    """Submit a graph, relay step progress via the ComfyUI websocket, return PIL."""
-    hist = _await(graph, on_step=on_step, on_status=on_status)
+def _run(graph, on_progress=None, on_status=None):
+    """Submit a graph, relay progress via the ComfyUI websocket, return PIL."""
+    hist = _await(graph, on_progress=on_progress, on_status=on_status)
     for node in hist.get("outputs", {}).values():
         for im in node.get("images", []):
             return _fetch_output(im["filename"], im.get("subfolder", ""))
@@ -931,7 +1355,7 @@ def _run(graph, on_step=None, on_status=None):
     raise RuntimeError(f"FLUX generation produced no image ({status.get('status_str', 'unknown')}).")
 
 
-def _run_video(graph, on_step=None, on_status=None, steps=None, boundary=None):
+def _run_video(graph, on_progress=None, on_status=None):
     """Run a Wan graph and return (webm bytes, PIL first frame | None).
 
     Separate from `_run` rather than a flag on it, because the two disagree about what
@@ -944,10 +1368,12 @@ def _run_video(graph, on_step=None, on_status=None, steps=None, boundary=None):
     Outputs are read by node id, not by scanning for `animated`: this module builds the
     graph and names the nodes, so "the video is at `video`" is a fact about our own
     code, while `animated` is an inference about someone else's UI payload.
+
+    The two samplers need no special handling: each KSamplerAdvanced runs a slice of
+    one shared schedule (`start_at_step`/`end_at_step`), and `_Progress` prices and
+    counts them from exactly those inputs, so the bar reads as the one 20-step job it is.
     """
-    hist = _await(graph, on_status=on_status,
-                  on_progress=_wan_progress(on_step, on_status, steps or WAN_STEPS,
-                                            boundary if boundary is not None else WAN_BOUNDARY),
+    hist = _await(graph, on_progress=on_progress, on_status=on_status,
                   recv_timeout=WAN_RECV_TIMEOUT, poll_timeout=WAN_POLL_TIMEOUT)
     outs = hist.get("outputs", {})
     vid = (outs.get("video") or {}).get("images") or []
@@ -962,30 +1388,6 @@ def _run_video(graph, on_step=None, on_status=None, steps=None, boundary=None):
     thumb = (outs.get("thumb") or {}).get("images") or []
     frame = _fetch_output(thumb[0]["filename"], thumb[0].get("subfolder", "")) if thumb else None
     return data, frame
-
-
-def _wan_progress(on_step, on_status, steps: int, boundary: int):
-    """Fold two samplers' progress into one monotonic bar over `steps`.
-
-    Each KSamplerAdvanced restarts its count at 0: ComfyUI reports the steps *that node*
-    runs, and the two experts each run half the schedule (their sigmas are sliced by
-    start/end_at_step). Reported raw, the bar would climb to 10, snap back to 0, and
-    climb again. Offsetting the second pass by the first's length is what makes it read
-    as one 20-step job — which is what it is.
-
-    VAEDecode reports progress too, over frames rather than steps; it's the slow tail of
-    a video job (81 frames through the VAE), so it says so rather than silently pinning
-    the bar at 100%.
-    """
-    def on_progress(d):
-        node, value = d.get("node"), d.get("value", 0)
-        if node == "sampler_hi" and on_step:
-            on_step(min(value, boundary), steps)
-        elif node == "sampler_lo" and on_step:
-            on_step(min(boundary + value, steps), steps)
-        elif node == "dec" and on_status:
-            on_status("Decoding video…")
-    return on_progress
 
 
 def _prompt_for(prompt: str, enhance: bool) -> str:
@@ -1013,7 +1415,7 @@ def _label(unet: str) -> str:
 
 
 def create(prompt, width=None, height=None, steps=None, guidance=None, seed=0,
-           model=None, enhance=True, on_step=None, on_status=None):
+           model=None, enhance=True, on_progress=None, on_status=None):
     """Text-to-image ('a candid photo of a woman laughing')."""
     ensure_server(on_status=on_status)
     unet = _resolve_unet(model, ROLE_CREATE)
@@ -1023,11 +1425,11 @@ def create(prompt, width=None, height=None, steps=None, guidance=None, seed=0,
                        int(seed), "flux_create", unet)
     if on_status:
         on_status(f"generating with {_label(unet)}…")
-    return _run(g, on_step=on_step, on_status=on_status)
+    return _run(g, on_progress=on_progress, on_status=on_status)
 
 
 def img2img(pil, prompt, strength=None, steps=None, guidance=None, seed=0,
-            model=None, enhance=True, on_step=None, on_status=None):
+            model=None, enhance=True, on_progress=None, on_status=None):
     """Transform an attached image, keeping its composition."""
     ensure_server(on_status=on_status)
     unet = _resolve_unet(model, ROLE_CREATE)
@@ -1038,11 +1440,11 @@ def img2img(pil, prompt, strength=None, steps=None, guidance=None, seed=0,
                        int(seed), w, h, "flux_img2img", unet)
     if on_status:
         on_status(f"transforming with {_label(unet)}…")
-    return _run(g, on_step=on_step, on_status=on_status)
+    return _run(g, on_progress=on_progress, on_status=on_status)
 
 
 def edit(pil, prompt, refs=(), steps=None, guidance=None, seed=0, model=None,
-         on_step=None, on_status=None):
+         on_progress=None, on_status=None):
     """Instruction-edit an image ('make the cat eat the cauliflower').
 
     `refs` are optional extra images the instruction may draw subjects from, e.g.
@@ -1060,10 +1462,10 @@ def edit(pil, prompt, refs=(), steps=None, guidance=None, seed=0, model=None,
                     int(seed), w, h, "flux_edit", unet)
     if on_status:
         on_status(f"editing with {_label(unet)}…")
-    return _run(g, on_step=on_step, on_status=on_status)
+    return _run(g, on_progress=on_progress, on_status=on_status)
 
 
-def compose(pils, prompt, steps=None, guidance=None, seed=0, model=None, on_step=None, on_status=None):
+def compose(pils, prompt, steps=None, guidance=None, seed=0, model=None, on_progress=None, on_status=None):
     """Combine multiple reference images into one new image."""
     ensure_server(on_status=on_status)
     if not pils:
@@ -1078,11 +1480,11 @@ def compose(pils, prompt, steps=None, guidance=None, seed=0, model=None, on_step
                        int(seed), "flux_compose", unet)
     if on_status:
         on_status(f"composing with {_label(unet)}…")
-    return _run(g, on_step=on_step, on_status=on_status)
+    return _run(g, on_progress=on_progress, on_status=on_status)
 
 
 def animate(pil, prompt, seconds=None, steps=None, guidance=None, seed=0, model=None,
-            on_step=None, on_status=None):
+            on_progress=None, on_status=None):
     """Animate an image into a short video ('she turns to look at the camera').
 
     Returns `(webm bytes, PIL first frame | None)` — not a PIL image like every other
@@ -1113,8 +1515,7 @@ def animate(pil, prompt, seconds=None, steps=None, guidance=None, seed=0, model=
     if on_status:
         on_status(f"animating with {_label(unet)} — {length} frames "
                   f"({length / WAN_FPS:.0f}s at {w}x{h}). This takes a few minutes.")
-    return _run_video(g, on_step=on_step, on_status=on_status,
-                      steps=n_steps, boundary=boundary)
+    return _run_video(g, on_progress=on_progress, on_status=on_status)
 
 
 # --------------------------------------------------------------------------- #

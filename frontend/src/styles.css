@@ -727,29 +727,14 @@ textarea {
   background: var(--panel-2);
 }
 
+/* The fill is the backend's measured fraction and nothing else — it advances only
+   when the job does. `width` is the only thing that moves it. */
 .genbar-fill {
   height: 100%;
   border-radius: 2px;
   background: var(--green);
   box-shadow: 0 0 6px rgba(63, 185, 80, 0.55);
   transition: width 0.25s linear, background-color 0.3s ease;
-}
-
-/* Pre-sampling: nothing to measure yet, so sweep instead of filling. The sweep
-   only says "the UI is alive" — the quiet-for readout is what says the backend
-   is too. */
-.genbar-fill.indet {
-  width: 30%;
-  animation: genbar-sweep 1.4s ease-in-out infinite;
-}
-
-@keyframes genbar-sweep {
-  0% {
-    transform: translateX(-110%);
-  }
-  100% {
-    transform: translateX(370%);
-  }
 }
 
 .genbar-label {
@@ -783,7 +768,16 @@ textarea {
   color: var(--green);
 }
 
+.genbar-pct {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .genbar-time {
+  opacity: 0.75;
+}
+
+.genbar-eta {
   opacity: 0.75;
 }
 
@@ -794,12 +788,6 @@ textarea {
 .genbar.stalled .genbar-fill {
   background: var(--amber);
   box-shadow: 0 0 6px rgba(210, 153, 34, 0.55);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .genbar-fill.indet {
-    animation-duration: 3s;
-  }
 }
 
 .drop-overlay {

@@ -559,9 +559,23 @@ export interface GeneratedImage {
   model_label?: string;
 }
 
+/** One backend progress snapshot: the whole job's share done, the stage producing
+ *  it, and the sampler counters (0 outside sampling).
+ *
+ *  `live` is false when the update is the backend's own estimate ticking through a
+ *  silent model load rather than news from ComfyUI — the difference between "still
+ *  working" and "still there", and only the latter clears a stall. */
+export interface GenProgressEvent {
+  frac: number;
+  stage: string;
+  live: boolean;
+  step: number;
+  total: number;
+}
+
 interface GenerateHandlers {
   onStatus?: (message: string) => void;
-  onProgress?: (step: number, total: number) => void;
+  onProgress?: (p: GenProgressEvent) => void;
   onImage: (r: GeneratedImage) => void;
   onError?: (message: string) => void;
 }
@@ -591,7 +605,13 @@ export async function generate(
     }
     if (ev.type === "status") handlers.onStatus?.(ev.message as string);
     else if (ev.type === "progress")
-      handlers.onProgress?.(ev.step as number, ev.total as number);
+      handlers.onProgress?.({
+        frac: Math.max(0, Math.min(1, (ev.frac as number) ?? 0)),
+        stage: (ev.stage as string) ?? "",
+        live: ev.live !== false,
+        step: (ev.step as number) ?? 0,
+        total: (ev.total as number) ?? 0,
+      });
     else if (ev.type === "image") handlers.onImage(ev as unknown as GeneratedImage);
     else if (ev.type === "error") handlers.onError?.(ev.message as string);
   });

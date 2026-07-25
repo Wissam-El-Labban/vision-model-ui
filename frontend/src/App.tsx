@@ -386,8 +386,12 @@ export default function App() {
       // Text has one silent stretch — Ollama loading the model before the first
       // token. The streamed text is its own liveness signal after that, so the
       // bar clears on first token rather than running the whole turn.
+      // No fraction: Ollama reports nothing at all while it loads, so the bar shows
+      // the phase and the clock rather than inventing a position for itself.
       setProgress({
         phase: `Loading ${model}…`,
+        stage: "",
+        frac: null,
         step: 0,
         total: 0,
         startedAt: Date.now(),
@@ -639,6 +643,8 @@ export default function App() {
       setStreaming(true);
       setProgress({
         phase: "Preparing…",
+        stage: "",
+        frac: null,
         step: 0,
         total: 0,
         startedAt: Date.now(),
@@ -704,18 +710,25 @@ export default function App() {
           {
             onStatus: (m) => {
               setAssistant({ content: `${icon} ${m}` });
-              // A new phase drops back to indeterminate: the step counts the
-              // sampler reports belong to the phase that emitted them, and
-              // carrying them across would leave a full bar sitting over a
-              // stage that hasn't started.
-              setProgress((p) =>
-                p ? { ...p, phase: m, step: 0, total: 0, updatedAt: Date.now() } : p
-              );
+              // A status line renames the job; it doesn't rewind it. The fraction
+              // covers the whole graph, so it survives every phase change until the
+              // job ends.
+              setProgress((p) => (p ? { ...p, phase: m, updatedAt: Date.now() } : p));
             },
-            onProgress: (step, total) => {
-              setAssistant({ content: `${icon} Generating… step ${step}/${total}` });
-              setProgress((p) =>
-                p ? { ...p, step, total, updatedAt: Date.now() } : p
+            onProgress: ({ live, ...p }) => {
+              setAssistant({
+                content:
+                  p.step > 0
+                    ? `${icon} ${p.stage}… step ${p.step}/${p.total} (${Math.round(p.frac * 100)}%)`
+                    : `${icon} ${p.stage}… ${Math.round(p.frac * 100)}%`,
+              });
+              // Only a live update means the backend is still there, so only a live
+              // update clears the stall clock — an estimate ticking through a silent
+              // load looks identical to a wedged one, and must not vouch for it.
+              setProgress((cur) =>
+                cur
+                  ? { ...cur, ...p, updatedAt: live ? Date.now() : cur.updatedAt }
+                  : cur
               );
             },
             onImage: async (r) => {

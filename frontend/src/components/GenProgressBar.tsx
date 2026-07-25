@@ -15,12 +15,19 @@ function short(ms: number): string {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
 }
 
-/** A thin liveness bar under the conversation.
+/** A real progress bar for the in-flight generation.
  *
- * Determinate once the sampler reports steps, indeterminate before that. The
- * indeterminate sweep alone can't tell "loading" from "wedged" — both animate —
- * so the elapsed and quiet-for readouts carry that: only a real backend event
- * moves `updatedAt`, and once the gap passes the threshold the bar goes amber. */
+ * The fill is the backend's own measure of how much of the job is done — it prices
+ * every node in the ComfyUI graph and reports the finished share (`_Progress` in
+ * flux_client.py), so loading weights, sampling and decoding each move the bar by
+ * what they actually cost. Nothing here animates on its own: a bar that swept while
+ * the backend was wedged would be decoration, and the point of this one is to be
+ * readable. The clock readouts carry what the fill can't — only a real backend event
+ * moves `updatedAt`, and once the gap passes the threshold the bar goes amber.
+ *
+ * `frac === null` is the one honest gap: the text path (Ollama loading a model)
+ * reports no progress at all, so the bar stays at zero and only the phase and the
+ * elapsed clock move. */
 export default function GenProgressBar({ progress }: { progress: GenProgress | null }) {
   const active = progress !== null;
   // Elapsed and quiet-for are read off the clock rather than off props, because
@@ -36,32 +43,49 @@ export default function GenProgressBar({ progress }: { progress: GenProgress | n
 
   if (!progress) return null;
 
-  const determinate = progress.total > 0;
-  const pct = determinate
-    ? Math.min(100, (progress.step / progress.total) * 100)
-    : 0;
+  const measured = progress.frac !== null;
+  const pct = measured ? Math.max(0, Math.min(100, progress.frac! * 100)) : 0;
+  const elapsed = now - progress.startedAt;
   const quiet = now - progress.updatedAt;
-  const stalled = quiet > (determinate ? QUIET_SAMPLING_MS : QUIET_LOADING_MS);
+  // `step > 0`, not `total > 0`: the step total is read off the graph before anything
+  // runs, so it says nothing about whether sampling has started. A reported step does.
+  const stalled = quiet > (progress.step > 0 ? QUIET_SAMPLING_MS : QUIET_LOADING_MS);
+  // Elapsed against the share done. Held back until the bar has enough of the job
+  // behind it to divide by — at 1% the same arithmetic says anything at all.
+  const eta =
+    measured && progress.frac! >= 0.04 && progress.frac! < 1
+      ? (elapsed * (1 - progress.frac!)) / progress.frac!
+      : null;
 
   return (
     <div className={`genbar ${stalled ? "stalled" : ""}`}>
-      <div className="genbar-track">
-        <div
-          className={`genbar-fill ${determinate ? "" : "indet"}`}
-          style={determinate ? { width: `${pct}%` } : undefined}
-        />
+      <div
+        className="genbar-track"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={measured ? Math.round(pct) : undefined}
+        aria-valuetext={measured ? `${Math.round(pct)}%` : "working"}
+      >
+        <div className="genbar-fill" style={{ width: `${pct}%` }} />
       </div>
       <div className="genbar-label">
         <span className="genbar-phase" title={progress.phase}>
-          {progress.phase}
+          {progress.stage || progress.phase}
         </span>
         <span className="genbar-meta">
-          {determinate && (
+          {progress.step > 0 && (
             <span className="genbar-step">
               {progress.step}/{progress.total}
             </span>
           )}
-          <span className="genbar-time">{short(now - progress.startedAt)}</span>
+          {measured && <span className="genbar-pct">{Math.round(pct)}%</span>}
+          <span className="genbar-time">{short(elapsed)}</span>
+          {eta !== null && !stalled && (
+            <span className="genbar-eta" title="Estimated from the share done so far">
+              ~{short(eta)} left
+            </span>
+          )}
           {stalled && (
             <span
               className="genbar-warn"
