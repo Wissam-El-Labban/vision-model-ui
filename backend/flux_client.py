@@ -1064,6 +1064,7 @@ def list_unets() -> list[dict]:
                     "bundle": b["id"] if b else None,
                     "family": cat.family_of(p.name),
                     "size_gb": round(p.stat().st_size / 1e9, 2),
+                    "encoder": encoder_for(p.name),
                 })
     out.sort(key=lambda m: (cat.bundle_rank(m["name"]), m["name"].lower()))
     return out
@@ -1807,6 +1808,23 @@ def clip_for(bundle: dict) -> str:
     if chosen and (cat.TE_DIR / os.path.basename(chosen)).exists():
         return os.path.basename(chosen)
     return bundle["clip"]
+
+
+def encoder_for(unet: str) -> str:
+    """The text encoder(s) `_loaders` will attach to this transformer, for display.
+
+    Mirrors `_loaders`'s three cases exactly — FLUX.2's swappable pick, Wan's bundled
+    umt5, FLUX.1's fixed CLIP-L + T5 pair — so the header can't name one encoder while
+    the graph loads another. `family_of` returns FLUX.1 for a user-added UNet with no
+    bundle, which is the same fallback `_loaders` takes.
+    """
+    family = cat.family_of(unet)
+    if family == cat.FAMILY_FLUX2:
+        return clip_for(cat.bundle_of_unet(unet))
+    if family == cat.FAMILY_WAN:
+        b = cat.bundle_of_unet(unet)
+        return b["clip"] if b else ""
+    return f"{CLIP_L} + {T5}"
 
 
 def list_text_encoders() -> list[dict]:

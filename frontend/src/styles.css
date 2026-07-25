@@ -270,6 +270,9 @@ textarea {
   display: flex;
   align-items: center;
   gap: 10px;
+  /* Lets the gen pill's ellipsis engage instead of pushing the row wider than
+     the bar — flex items refuse to shrink past content without this. */
+  min-width: 0;
 }
 
 .model-pill {
@@ -279,6 +282,52 @@ textarea {
   padding: 4px 12px;
   font-size: 12px;
   color: var(--muted);
+}
+
+/* The image/video model a generate would run, with its text encoder. Tinted green
+   to read as a different axis from the blue-grey vision-model pill beside it. */
+.gen-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 40vw;
+  background: rgba(63, 185, 80, 0.1);
+  border: 1px solid rgba(63, 185, 80, 0.35);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.gen-pill-icon {
+  flex: none;
+  font-size: 11px;
+}
+
+/* The model name is the headline and shrinks last; the encoder is the detail and
+   gives up width first. Both need min-width:0 for ellipsis inside a flex row. */
+.gen-pill-model {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gen-pill-sep {
+  flex: none;
+  color: var(--border);
+}
+
+.gen-pill-enc {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
 }
 
 .ctx-meter {

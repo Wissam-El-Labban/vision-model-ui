@@ -4,6 +4,7 @@ import Chat from "./components/Chat";
 import Composer from "./components/Composer";
 import ImageBar from "./components/ImageBar";
 import ContextMeter from "./components/ContextMeter";
+import GenModelPill from "./components/GenModelPill";
 import {
   appendMessage,
   deleteChat,
@@ -950,6 +951,9 @@ export default function App() {
           <h1>👁️ Vision Model Chat</h1>
           <div className="topbar-actions">
             {usage && <ContextMeter used={usage.used} numCtx={usage.num_ctx} />}
+            {fluxAvailable && (
+              <GenModelPill op={genOp} picked={gen.fluxModel} models={fluxModels} />
+            )}
             {model && <span className="model-pill">{model}</span>}
             {messages.length > 0 && (
               <button className="btn ghost" onClick={newChat}>

@@ -165,6 +165,9 @@ export interface FluxModel {
   bundle: string | null; // catalog id, or null for a user-added model
   family: string;
   size_gb: number;
+  /** The text encoder the graph will actually load — the backend's `encoder_for`,
+   *  so this can't drift from what runs. FLUX.1 reports its pair as "a + b". */
+  encoder: string;
 }
 
 /** An installable model: its weights, text encoder and VAE, downloaded together. */

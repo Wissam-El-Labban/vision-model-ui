@@ -202,6 +202,9 @@ export default function ImageModels({ models, onChanged }: Props) {
     try {
       await selectTextEncoder(bundleId, name);
       await refresh();
+      // The app's model list carries each model's encoder (for the header pill),
+      // so a pick changes it — refresh both, not just this panel.
+      onChanged();
     } catch (e) {
       setTeStatus(`✗ ${(e as Error).message}`);
     }
@@ -211,6 +214,9 @@ export default function ImageModels({ models, onChanged }: Props) {
     try {
       await deleteTextEncoder(name);
       await refresh();
+      // Deleting the selected override drops that model back to its default
+      // encoder, which the app's list is likewise reporting.
+      onChanged();
     } catch (e) {
       setTeStatus(`✗ ${(e as Error).message}`);
     }
