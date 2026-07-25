@@ -337,6 +337,28 @@ textarea {
   gap: 4px;
 }
 
+/* Role first, at full opacity and never shrinking; the shared model label takes
+   whatever width is left and clips there instead. */
+.lora-model {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.lora-role {
+  flex: none;
+  color: var(--green);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.lora-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .lora-strength {
   padding-left: 4px;
 }

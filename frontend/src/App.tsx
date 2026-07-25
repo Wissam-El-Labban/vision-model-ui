@@ -615,7 +615,12 @@ export default function App() {
       const refUrls = isCompose ? images : op === "edit" ? images.slice(1) : [];
       // Shared with the prompt enhancer, so both brief the model on the same job.
       const mode = modeFor(op, images);
-      const shownImages = isCompose ? refUrls : initUrl ? [initUrl] : undefined;
+      // Every image the job conditions on, in the order the backend receives them.
+      // edit has two kinds — the scene in `initUrl` and the subject references after
+      // it — and showing only the first made the references invisible in the turn
+      // that used them. compose has no init, so the spread covers it too.
+      const conditioning = [...(initUrl ? [initUrl] : []), ...refUrls];
+      const shownImages = conditioning.length ? conditioning : undefined;
       const icon = op === "animate" ? "🎬" : "🎨";
 
       // Show the prompt as a user turn, then an assistant placeholder we fill

@@ -428,7 +428,7 @@ def flux_lora_pull(req: LoraPullRequest):
 
 
 class LoraSelectRequest(BaseModel):
-    bundle_id: str
+    model: str  # the transformer's filename — FLUX.1's dev and Kontext pick separately
     name: str  # "" detaches — the "None" option
     strength: float = 1.0
 
@@ -436,9 +436,9 @@ class LoraSelectRequest(BaseModel):
 @app.put("/api/flux/loras/select")
 def flux_lora_select(req: LoraSelectRequest):
     try:
-        fx.set_lora(req.bundle_id, req.name, req.strength)
+        fx.set_lora(req.model, req.name, req.strength)
         return {"ok": True, "selected": fx.selected_loras()}
-    except ValueError as exc:  # unknown bundle id, from cat.get
+    except ValueError as exc:  # not installed, or a model that takes no adapter
         raise HTTPException(status_code=400, detail=str(exc))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="That LoRA isn't installed.")
@@ -574,9 +574,14 @@ def generate(req: GenerateRequest):
                 # the job — so a turn written only on completion is lost in exactly
                 # the case that hurts, a cold FLUX.2 load that runs for minutes.
                 # `label` is what will actually run, so the pair can't disagree.
+                # Every image the job conditions on, not just the first. An edit takes
+                # the scene in `init_image_hash` *and* subject references after it;
+                # recording only the init left a reloaded turn showing fewer images
+                # than the generate actually used. compose sends no init, so the same
+                # expression covers every mode.
                 record("user", req.prompt, label,
-                       req.ref_image_hashes if req.mode == "compose"
-                       else [h for h in (req.init_image_hash,) if h])
+                       [h for h in (req.init_image_hash,) if h]
+                       + list(req.ref_image_hashes))
 
                 seed = req.seed if req.seed is not None else random.randint(0, 2**31 - 1)
                 common = dict(steps=req.steps, guidance=req.guidance, seed=seed,

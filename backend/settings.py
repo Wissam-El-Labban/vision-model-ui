@@ -97,23 +97,26 @@ def set_text_encoder(bundle_id: str, name: str) -> None:
 
 
 def loras() -> dict:
-    """Per-model LoRA choice: {bundle_id: {"name": filename, "strength": float}}.
+    """Per-transformer LoRA choice: {unet_filename: {"name": ..., "strength": ...}}.
 
     Unlike a text encoder, no model has a default LoRA — absent means "none", which is
-    the state the user starts in and can always return to. Kept per bundle because a
-    LoRA is trained against one base: a FLUX.2 [dev] adapter does nothing useful on
-    klein, whose transformer is a different size and shape entirely.
+    the state the user starts in and can always return to.
+
+    Keyed by the transformer file, not the bundle that shipped it. A LoRA is trained
+    against one specific base, and one bundle can carry two: FLUX.1 pairs dev with
+    Kontext, whose adapter ecosystems are entirely disjoint. Keying by bundle would
+    chain a dev adapter onto Kontext whenever you edited.
     """
     return _read().get("loras") or {}
 
 
-def set_lora(bundle_id: str, name: str, strength: float = 1.0) -> None:
-    """Attach a LoRA to a model. Empty name detaches it (the "None" option)."""
+def set_lora(model: str, name: str, strength: float = 1.0) -> None:
+    """Attach a LoRA to one transformer. Empty name detaches it (the "None" option)."""
     data = _read()
     picks = data.get("loras") or {}
     if name:
-        picks[bundle_id] = {"name": name, "strength": strength}
+        picks[model] = {"name": name, "strength": strength}
     else:
-        picks.pop(bundle_id, None)
+        picks.pop(model, None)
     data["loras"] = picks
     _write(data)

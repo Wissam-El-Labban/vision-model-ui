@@ -162,28 +162,42 @@ BUNDLES = [
         ],
     },
     {
-        "id": "flux1-q8-gguf",
-        "label": "FLUX.1 dev + Kontext — Q8 GGUF",
+        "id": "flux1-dev-kontext-bf16",
+        "label": "FLUX.1 dev + Kontext — full bf16",
         "family": FAMILY_FLUX1,
         "roles": [ROLE_CREATE, ROLE_EDIT],
-        "blurb": ("Quantized FLUX.1. Two transformers (dev creates, Kontext edits). "
-                  "Lower quality than FLUX.2, but runs on a 24 GB card."),
-        "size_gb": 30.9,
-        "vram_gb": 24,
-        "gated": False,
+        "blurb": ("Unquantized FLUX.1 straight from Black Forest Labs. Two transformers "
+                  "(dev creates, Kontext edits) plus the fp16 T5. Needs a licence "
+                  "acceptance on both repos and your HF token."),
+        # 23.8 + 23.8 (transformers) + 9.79 (T5 fp16) + 0.25 (CLIP-L) + 0.34 (VAE),
+        # read off the HuggingFace file listings rather than estimated.
+        "size_gb": 58.0,
+        # The transformer alone is 23.8 GB at bf16 and the encoders sit beside it, so
+        # this wants more card than the Q8 build did. It still runs below this —
+        # ComfyUI offloads under pressure — it just stops being fast. Dropping
+        # `weight_dtype` to "fp8_e4m3fn" halves the transformer's resident size if a
+        # smaller card can't cope.
+        "vram_gb": 32,
+        # Both transformers come from Black Forest Labs' own gated repos: accept the
+        # licence on each, once, while signed in to the account the token belongs to.
+        "gated": True,
         # Two UNets, split by role — the only bundle where that's true.
-        "unet": "flux1-dev-Q8_0.gguf",
-        "unet_edit": "flux1-kontext-dev-Q8_0.gguf",
+        "unet": "flux1-dev.safetensors",
+        "unet_edit": "flux1-kontext-dev.safetensors",
+        # "default" keeps the weights at the precision they shipped in, which is the
+        # point of taking the full checkpoint over the Q8 one.
         "weight_dtype": "default",
-        "clip": "t5-v1_1-xxl-encoder-Q8_0.gguf",
+        "clip": "t5xxl_fp16.safetensors",
         "clip_l": "clip_l.safetensors",
         "vae": "ae.safetensors",
         "files": [
-            ("city96/FLUX.1-dev-gguf", "flux1-dev-Q8_0.gguf", "unet"),
-            ("QuantStack/FLUX.1-Kontext-dev-GGUF", "flux1-kontext-dev-Q8_0.gguf", "unet"),
-            ("city96/t5-v1_1-xxl-encoder-gguf", "t5-v1_1-xxl-encoder-Q8_0.gguf", "clip"),
+            ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors", "unet"),
+            ("black-forest-labs/FLUX.1-Kontext-dev", "flux1-kontext-dev.safetensors", "unet"),
+            ("comfyanonymous/flux_text_encoders", "t5xxl_fp16.safetensors", "clip"),
             ("comfyanonymous/flux_text_encoders", "clip_l.safetensors", "clip"),
-            ("ffxvs/vae-flux", "ae.safetensors", "vae"),
+            # BFL's own VAE rather than a third-party mirror — the token is already
+            # required for the transformers, so the mirror bought nothing.
+            ("black-forest-labs/FLUX.1-dev", "ae.safetensors", "vae"),
         ],
     },
     {

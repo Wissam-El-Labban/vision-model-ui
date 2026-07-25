@@ -359,7 +359,9 @@ export interface FluxLoraPick {
 
 export interface FluxLoras {
   loras: FluxLora[];
-  selected: Record<string, FluxLoraPick | null>; // bundle id -> pick, or null
+  /** Transformer filename -> pick, or null for none. Keyed per transformer, not per
+   *  bundle: FLUX.1 ships dev and Kontext together and their adapters don't cross. */
+  selected: Record<string, FluxLoraPick | null>;
 }
 
 export async function getLoras(): Promise<FluxLoras> {
@@ -398,16 +400,16 @@ export async function pullLora(
   if (failure) throw new Error(failure);
 }
 
-/** Attach a LoRA to a model. An empty name detaches it — the "None" option. */
+/** Attach a LoRA to one transformer. An empty name detaches it — the "None" option. */
 export async function selectLora(
-  bundleId: string,
+  model: string,
   name: string,
   strength = 1.0
 ): Promise<void> {
   const res = await fetch("/api/flux/loras/select", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ bundle_id: bundleId, name, strength }),
+    body: JSON.stringify({ model, name, strength }),
   });
   if (!res.ok) {
     const detail = await res.json().catch(() => ({ detail: res.statusText }));

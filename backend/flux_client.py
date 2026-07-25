@@ -59,7 +59,7 @@ UNET_DIR = cat.UNET_DIR
 UNET_EXTS = (".gguf", ".safetensors", ".sft")
 
 # FLUX.1's shared encoders + VAE. FLUX.2 brings its own, named by its bundle.
-T5 = "t5-v1_1-xxl-encoder-Q8_0.gguf"
+T5 = "t5xxl_fp16.safetensors"
 CLIP_L = "clip_l.safetensors"
 FLUX1_VAE = "ae.safetensors"
 
@@ -458,6 +458,20 @@ def _clip_node(name: str, kind: str) -> dict:
     return {"class_type": cls, "inputs": {"clip_name": name, "type": kind}}
 
 
+def _dual_clip_node(name1: str, name2: str, kind: str) -> dict:
+    """The same choice as `_clip_node`, for FLUX.1's two-encoder pair (CLIP-L + T5).
+
+    The GGUF loader can read a plain safetensors too, but it forces GGML custom ops and
+    a GGUF patcher onto a model with nothing quantized in it — so it's used only when
+    one of the pair actually is a GGUF. Which one that is depends on the installed
+    bundle, hence the check rather than a fixed class.
+    """
+    gguf = name1.lower().endswith(".gguf") or name2.lower().endswith(".gguf")
+    cls = "DualCLIPLoaderGGUF" if gguf else "DualCLIPLoader"
+    return {"class_type": cls,
+            "inputs": {"clip_name1": name1, "clip_name2": name2, "type": kind}}
+
+
 def _with_lora(unet: str, loaders: dict) -> dict:
     """Chain the model's selected LoRA onto its transformer, if it has one.
 
@@ -496,8 +510,7 @@ def _loaders(unet: str) -> dict:
         })
     return _with_lora(unet, {
         "unet": _unet_node(unet),
-        "clip": {"class_type": "DualCLIPLoaderGGUF",
-                 "inputs": {"clip_name1": CLIP_L, "clip_name2": T5, "type": "flux"}},
+        "clip": _dual_clip_node(CLIP_L, T5, "flux"),
         "vae": {"class_type": "VAELoader", "inputs": {"vae_name": FLUX1_VAE}},
     })
 
@@ -1418,6 +1431,28 @@ except HTTPError as e:
     else:
         print("ERROR: huggingface.co returned %s for %s" % (e.code, sys.argv[-1]), flush=True)
     sys.exit(1)
+except Exception as e:
+    # huggingface_hub raises its own requests-based errors, which are NOT
+    # urllib.error.HTTPError and so sail past the handler above. Uncaught, they reached
+    # the UI as a raw "404 Client Error. (Request ID: ...)" — technically the truth and
+    # practically useless, since the actionable part (which repo, which file, whose
+    # fault) is exactly what that string omits.
+    name = type(e).__name__
+    repo = sys.argv[2] if len(sys.argv) > 2 else "?"
+    if name == "RepositoryNotFoundError":
+        print("ERROR: No such repo on HuggingFace: %s — check the owner/name spelling "
+              "(it is case-sensitive), or the repo is private." % repo, flush=True)
+    elif name == "GatedRepoError":
+        print("ERROR: %s is gated — accept its license on huggingface.co while signed in "
+              "as the account your token belongs to." % repo, flush=True)
+    elif name == "EntryNotFoundError":
+        print("ERROR: %s has no file named '%s'." % (repo, sys.argv[3] if len(sys.argv) > 3
+                                                     else "?"), flush=True)
+    elif name in ("LocalEntryNotFoundError", "ConnectionError", "URLError"):
+        print("ERROR: Could not reach huggingface.co — check the connection.", flush=True)
+    else:
+        print("ERROR: %s while fetching from %s: %s" % (name, repo, e), flush=True)
+    sys.exit(1)
 except URLError as e:
     print("ERROR: could not reach huggingface.co (%s)" % e, flush=True); sys.exit(1)
 except Exception as e:
@@ -2038,13 +2073,23 @@ def delete_text_encoder(name: str) -> None:
 LORA_EXTS = (".safetensors", ".sft", ".pt")
 
 
-def _lora_pick(bundle_id: str) -> dict | None:
-    """The stored LoRA choice for one bundle, or None for the "no LoRA" default.
+def _takes_lora(unet: str) -> bool:
+    """Whether this transformer's graph can actually apply an adapter.
+
+    Wan is excluded: `_wan_i2v_graph` assembles its own two-expert graph rather than
+    going through `_loaders`, so a LoRA chained there would never be reached. Better to
+    not offer the choice than to accept one that silently does nothing.
+    """
+    return cat.family_of(unet) != cat.FAMILY_WAN
+
+
+def _lora_pick(model: str) -> dict | None:
+    """The stored LoRA choice for one transformer, or None for the "no LoRA" default.
 
     A pick whose file has since been deleted reads as None rather than failing the
     graph — the same fallback shape `clip_for` takes for a missing encoder.
     """
-    pick = settings.loras().get(bundle_id)
+    pick = settings.loras().get(model)
     if not pick:
         return None
     name = os.path.basename(pick.get("name") or "")
@@ -2054,13 +2099,9 @@ def _lora_pick(bundle_id: str) -> dict | None:
 
 
 def lora_for(unet: str) -> dict | None:
-    """The LoRA `_with_lora` will chain onto this transformer, if any.
-
-    A user-added UNet has no bundle to key on and so takes no LoRA — it has no
-    declared base for one to be trained against.
-    """
-    b = cat.bundle_of_unet(unet)
-    return _lora_pick(b["id"]) if b else None
+    """The LoRA `_with_lora` will chain onto this transformer, if any."""
+    name = os.path.basename(unet)
+    return _lora_pick(name) if _takes_lora(name) else None
 
 
 def list_loras() -> list[dict]:
@@ -2073,27 +2114,23 @@ def list_loras() -> list[dict]:
     return out
 
 
-def _takes_lora(b: dict) -> bool:
-    """Whether a bundle's graph can actually apply an adapter.
-
-    Wan is excluded: `_wan_i2v_graph` assembles its own two-expert graph rather than
-    going through `_loaders`, so a LoRA chained there would never be reached. Better to
-    not offer the choice than to accept one that silently does nothing.
-    """
-    return b["family"] != cat.FAMILY_WAN
-
-
 def selected_loras() -> dict[str, dict | None]:
-    """What each installed model is set to load. None means no LoRA."""
-    return {b["id"]: _lora_pick(b["id"])
-            for b in cat.BUNDLES if cat.installed(b) and _takes_lora(b)}
+    """What each installed transformer is set to load. None means no LoRA.
+
+    Keyed the same way the picker is: one entry per selectable transformer, so the
+    FLUX.1 bundle's dev and Kontext halves get a row each.
+    """
+    return {m["name"]: _lora_pick(m["name"])
+            for m in list_unets() if _takes_lora(m["name"])}
 
 
-def set_lora(bundle_id: str, name: str, strength: float = 1.0) -> None:
-    """Attach a LoRA to a model, or detach it when `name` is empty."""
-    b = cat.get(bundle_id)  # raises on an unknown bundle
-    if not _takes_lora(b):
-        raise ValueError(f"{b['label']} doesn't take a LoRA adapter.")
+def set_lora(model: str, name: str, strength: float = 1.0) -> None:
+    """Attach a LoRA to one transformer, or detach it when `name` is empty."""
+    target = os.path.basename(model or "")
+    if not target or not (UNET_DIR / target).exists():
+        raise ValueError(f"'{target}' isn't an installed model.")
+    if not _takes_lora(target):
+        raise ValueError(f"{label(target)} doesn't take a LoRA adapter.")
     safe = os.path.basename(name or "")
     if safe and not (cat.LORA_DIR / safe).exists():
         raise FileNotFoundError(safe)
@@ -2102,15 +2139,61 @@ def set_lora(bundle_id: str, name: str, strength: float = 1.0) -> None:
     # can't produce an out-of-range value, so anything here came from a hand-made
     # request and silently doing the sane thing beats a 400.
     strength = max(-2.0, min(2.0, float(strength)))
-    settings.set_lora(bundle_id, safe, strength)
+    settings.set_lora(target, safe, strength)
+
+
+# Filenames that name the format rather than the adapter. Several popular repos call
+# their only file exactly this, which both collides with the next such repo and leaves a
+# picker full of entries called "lora" — so these get renamed after the repo instead.
+_GENERIC_LORA_NAMES = frozenset((
+    "lora.safetensors", "lora.sft", "lora.pt",
+    "pytorch_lora_weights.safetensors", "adapter_model.safetensors",
+    "model.safetensors", "lora_weights.safetensors",
+    "diffusion_pytorch_model.safetensors",
+))
+
+# Trainers publish intermediate snapshots beside the finished weights, named with the
+# step count: `style_000000500.safetensors` next to `style.safetensors`.
+_LORA_SNAPSHOT_RE = re.compile(r"_\d{6,}\.(safetensors|sft|pt)$", re.I)
+
+# An adapter is a low-rank patch. Anything this size is a merged checkpoint that has
+# been filed under "LoRA" — downloading it into models/loras/ would waste tens of GB and
+# then fail to load, since LoraLoaderModelOnly expects lora_A/lora_B pairs. FLUX.2's
+# Turbo adapter is a legitimate 2.8 GB, so the line sits well above that.
+_LORA_MAX_BYTES = 10e9
+
+
+def _lora_out_name(repo_id: str, filename: str) -> str:
+    """What to call the downloaded file on disk.
+
+    A descriptive upstream name is kept — `aidmaNSFWunlock-FLUX-V0.2.safetensors` says
+    what it is. A generic one is replaced by the repo's own name, which does.
+    """
+    base = os.path.basename(filename)
+    if base.lower() not in _GENERIC_LORA_NAMES:
+        return base
+    return repo_id.split("/")[-1] + os.path.splitext(base)[1]
+
+
+def _drop_snapshots(files: list[dict]) -> list[dict]:
+    """Prefer finished weights over training snapshots.
+
+    A repo publishing `style.safetensors` alongside four `style_0000NNNN.safetensors`
+    isn't ambiguous to a person — they want the final one. Only applied when it leaves
+    something behind: a repo of nothing but snapshots still needs a choice made.
+    """
+    finals = [f for f in files if not _LORA_SNAPSHOT_RE.search(f["name"])]
+    return finals or files
 
 
 def pull_lora(repo: str, on_status=None, on_progress=None) -> None:
     """Add a LoRA from a HuggingFace repo — `owner/repo:file` or `owner/repo`.
 
     Single-file only, with none of `pull_text_encoder`'s shard-stitching: a LoRA is
-    tens to hundreds of MB and is published as one file. A repo holding several is an
-    ambiguity we'd rather hand back than guess at, since the names carry the meaning.
+    tens to hundreds of MB and is published as one file. A repo holding several
+    genuinely different adapters is an ambiguity we hand back rather than guess at,
+    since the names carry the meaning — but training snapshots and generic filenames
+    are resolved here rather than pushed onto the user.
 
     Files downloaded from elsewhere (Civitai hosts most of the FLUX.2 adapters) can be
     dropped straight into `models/loras/` — `list_loras` reads the directory, so
@@ -2122,24 +2205,36 @@ def pull_lora(repo: str, on_status=None, on_progress=None) -> None:
     say = on_status or (lambda _m: None)
     tick = on_progress or (lambda _p: None)
 
-    if filename:
-        _run_child(["fetch", repo_id, filename, str(cat.LORA_DIR)],
+    def grab(name: str):
+        _run_child(["fetch", repo_id, name, str(cat.LORA_DIR),
+                    _lora_out_name(repo_id, name)],
                    on_status=say, on_progress=tick, token=token)
         say("Download complete.")
+
+    if filename:
+        grab(filename)
         return
 
     say(f"Resolving {repo_id}…")
     tensors = _json_line(_run_child(["probe", repo_id], token=token))
-    whole = [f for f in tensors if f["name"].lower().endswith(LORA_EXTS)]
+    whole = _drop_snapshots([f for f in tensors
+                             if f["name"].lower().endswith(LORA_EXTS)])
     if len(whole) == 1:
-        _run_child(["fetch", repo_id, whole[0]["name"], str(cat.LORA_DIR)],
-                   on_status=say, on_progress=tick, token=token)
-        say("Download complete.")
+        if whole[0]["size"] > _LORA_MAX_BYTES:
+            raise ValueError(
+                f"{repo_id}'s only weights file is {whole[0]['size'] / 1e9:.1f} GB — "
+                "that's a merged checkpoint, not a LoRA adapter. Add it under 'Add a "
+                "model from any repo' instead.")
+        grab(whole[0]["name"])
         return
     if len(whole) > 1:
-        listed = "\n".join(f"  {repo_id}:{f['name']}  ({f['size'] / 1e6:.0f} MB)"
-                           for f in sorted(whole, key=lambda f: -f["size"])[:10])
-        raise ValueError(f"{repo_id} holds several LoRAs — name the one you want:\n{listed}")
+        # Sorted by name, not size: a collection's adapters are all the same rank and
+        # therefore all the same size, so a size sort returns an arbitrary slice.
+        shown = sorted(f["name"] for f in whole)
+        listed = "\n".join(f"  {repo_id}:{n}" for n in shown[:15])
+        more = f"\n  …and {len(shown) - 15} more" if len(shown) > 15 else ""
+        raise ValueError(
+            f"{repo_id} holds {len(shown)} LoRAs — name the one you want:\n{listed}{more}")
     raise ValueError(f"No LoRA found in {repo_id}. Use owner/repo:file to name one.")
 
 
@@ -2154,9 +2249,9 @@ def delete_lora(name: str) -> None:
     p = cat.LORA_DIR / safe
     if not p.exists():
         raise FileNotFoundError(safe)
-    for bundle_id, pick in list(settings.loras().items()):
+    for model, pick in list(settings.loras().items()):
         if os.path.basename((pick or {}).get("name") or "") == safe:
-            settings.set_lora(bundle_id, "")
+            settings.set_lora(model, "")
     p.unlink()
 
 

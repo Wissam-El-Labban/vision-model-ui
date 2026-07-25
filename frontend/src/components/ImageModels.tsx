@@ -263,9 +263,9 @@ export default function ImageModels({ models, onChanged }: Props) {
   /** Attach, re-weight, or (with an empty name) detach. Strength travels with every
    *  call because the backend stores the pair — sending one without the other would
    *  reset the half that wasn't touched. */
-  async function pickLora(bundleId: string, name: string, strength: number) {
+  async function pickLora(model: string, name: string, strength: number) {
     try {
-      await selectLora(bundleId, name, strength);
+      await selectLora(model, name, strength);
       await refresh();
       onChanged(); // the app's model list carries the pick, for the header pill
     } catch (e) {
@@ -284,11 +284,11 @@ export default function ImageModels({ models, onChanged }: Props) {
   }
 
   const extras = models.filter((m) => m.bundle === null);
-  // Which models can take an adapter is the backend's call (Wan's graph can't), so
-  // read it off the response rather than re-deriving the rule here.
-  const loraBundles = (cat?.bundles ?? []).filter(
-    (b) => b.installed && loras?.selected && b.id in loras.selected
-  );
+  // One row per *transformer*, not per bundle — FLUX.1 installs dev and Kontext
+  // together and each takes its own adapter. Which ones qualify is the backend's call
+  // (Wan's graph can't apply one), so read it off the response rather than
+  // re-deriving the rule here.
+  const loraModels = models.filter((m) => loras?.selected && m.name in loras.selected);
   // Only FLUX.2 models take a swappable encoder; FLUX.1's is wired into its graph.
   const flux2 = (cat?.bundles ?? []).filter((b) => b.family === "flux2" && b.installed);
 
@@ -504,19 +504,29 @@ export default function ImageModels({ models, onChanged }: Props) {
               {/* LoRA adapters. Optional in a way the encoder isn't: no model has a
                   default, so "None" is both where everyone starts and always one
                   selection away. */}
-              {loraBundles.length > 0 && (
+              {loraModels.length > 0 && (
                 <>
                   <label className="lbl">LoRA adapters</label>
-                  {loraBundles.map((b) => {
-                    const pick = loras?.selected[b.id] ?? null;
+                  {loraModels.map((m) => {
+                    const pick = loras?.selected[m.name] ?? null;
                     return (
-                      <div key={b.id} className="lora-row">
+                      <div key={m.name} className="lora-row">
                         <div className="row">
-                          <span className="muted small te-model">{b.label}</span>
+                          {/* The role leads and never truncates: FLUX.1's two rows
+                              come from one bundle, so they share a label that the
+                              40%-width column clips to "FLUX.1 dev + K…" — leaving
+                              the only distinguishing part off the end. */}
+                          <span
+                            className="muted small te-model lora-model"
+                            title={`${m.label} — ${m.name}`}
+                          >
+                            <span className="lora-role">{m.roles.join("/")}</span>
+                            <span className="lora-label">{m.label}</span>
+                          </span>
                           <select
                             value={pick?.name ?? ""}
                             onChange={(e) =>
-                              pickLora(b.id, e.target.value, pick?.strength ?? 1.0)
+                              pickLora(m.name, e.target.value, pick?.strength ?? 1.0)
                             }
                             disabled={busy !== null}
                           >
@@ -541,7 +551,7 @@ export default function ImageModels({ models, onChanged }: Props) {
                               value={pick.strength}
                               disabled={busy !== null}
                               onChange={(e) =>
-                                pickLora(b.id, pick.name, parseFloat(e.target.value))
+                                pickLora(m.name, pick.name, parseFloat(e.target.value))
                               }
                             />
                             <span className="muted small lora-weight">
@@ -554,9 +564,10 @@ export default function ImageModels({ models, onChanged }: Props) {
                   })}
                   <div className="muted small">
                     A LoRA is a small patch over the transformer — it changes what the
-                    model renders without replacing the checkpoint. Adapters are trained
-                    against one base, so a FLUX.2 [dev] LoRA won't bind to klein. Start
-                    around 0.6-0.8.
+                    model renders without replacing the checkpoint. Each row picks
+                    separately, because adapters are trained against one base: a
+                    FLUX.2 [dev] LoRA won't bind to klein, and a FLUX.1 dev one won't
+                    bind to Kontext. Start around 0.6-0.8.
                   </div>
                   {(loras?.loras ?? []).map((l) => (
                     <div key={l.name} className="row extra-model">
