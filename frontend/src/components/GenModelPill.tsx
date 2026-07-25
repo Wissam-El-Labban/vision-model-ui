@@ -36,7 +36,8 @@ export default function GenModelPill({ op, picked, models }: Props) {
       className="gen-pill"
       title={
         `${video ? "Video" : "Image"} model: ${model.label}\n` +
-        `Text encoder: ${model.encoder || "—"}`
+        `Text encoder: ${model.encoder || "—"}\n` +
+        `LoRA: ${model.lora ? `${model.lora.name} @ ${model.lora.strength}` : "none"}`
       }
     >
       <span className="gen-pill-icon">{video ? "🎬" : "🎨"}</span>
@@ -46,6 +47,14 @@ export default function GenModelPill({ op, picked, models }: Props) {
           <span className="gen-pill-sep">·</span>
           <span className="gen-pill-enc">{shortEncoder(model.encoder)}</span>
         </>
+      )}
+      {/* Only rendered when one is attached — "none" is the normal state and would
+          be noise on every generate. The weight is part of the identity: the same
+          adapter at 0.3 and at 1.2 are different pictures. */}
+      {model.lora && (
+        <span className="gen-pill-lora">
+          ⊕ {shortEncoder(model.lora.name)} @{model.lora.strength.toFixed(2)}
+        </span>
       )}
     </span>
   );

@@ -168,6 +168,8 @@ export interface FluxModel {
   /** The text encoder the graph will actually load — the backend's `encoder_for`,
    *  so this can't drift from what runs. FLUX.1 reports its pair as "a + b". */
   encoder: string;
+  /** The LoRA chained onto this transformer, or null when none is attached. */
+  lora: FluxLoraPick | null;
 }
 
 /** An installable model: its weights, text encoder and VAE, downloaded together. */
@@ -336,6 +338,91 @@ export async function deleteTextEncoder(name: string): Promise<void> {
   if (!res.ok) {
     const detail = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(detail.detail ?? `delete encoder: ${res.status}`);
+  }
+}
+
+// --------------------------------------------------------------------------- #
+// LoRA adapters — an optional low-rank patch over a model's transformer, the
+// practical way to change what a model renders without replacing a 64 GB
+// checkpoint. Every model starts with none and can be put back to none.
+// --------------------------------------------------------------------------- #
+export interface FluxLora {
+  name: string;
+  size_mb: number; // patches, not checkpoints — MB, not GB
+}
+
+/** What one model is set to load. `null` is the "None" state, not an error. */
+export interface FluxLoraPick {
+  name: string;
+  strength: number;
+}
+
+export interface FluxLoras {
+  loras: FluxLora[];
+  selected: Record<string, FluxLoraPick | null>; // bundle id -> pick, or null
+}
+
+export async function getLoras(): Promise<FluxLoras> {
+  const res = await fetch("/api/flux/loras");
+  if (!res.ok) throw new Error(`loras: ${res.status}`);
+  return res.json();
+}
+
+/** Add one from HuggingFace (owner/repo:file, or a repo holding exactly one).
+ *  Streams progress like the other pulls, though a LoRA is MBs not GBs. */
+export async function pullLora(
+  repo: string,
+  onStatus: (message: string) => void,
+  onProgress: (p: FluxProgress) => void
+): Promise<void> {
+  const res = await fetch("/api/flux/loras/pull", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `lora pull: ${res.status}`);
+  }
+  let failure: string | null = null;
+  await readLines(res, (line) => {
+    try {
+      const ev = JSON.parse(line);
+      if (ev.type === "status") onStatus(ev.message as string);
+      else if (ev.type === "progress") onProgress(ev as FluxProgress);
+      else if (ev.type === "error") failure = ev.message as string;
+    } catch {
+      /* ignore keepalives */
+    }
+  });
+  if (failure) throw new Error(failure);
+}
+
+/** Attach a LoRA to a model. An empty name detaches it — the "None" option. */
+export async function selectLora(
+  bundleId: string,
+  name: string,
+  strength = 1.0
+): Promise<void> {
+  const res = await fetch("/api/flux/loras/select", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bundle_id: bundleId, name, strength }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `select lora: ${res.status}`);
+  }
+}
+
+/** Remove a LoRA from disk. Any model using it falls back to none. */
+export async function deleteLora(name: string): Promise<void> {
+  const res = await fetch(`/api/flux/loras/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `delete lora: ${res.status}`);
   }
 }
 

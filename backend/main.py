@@ -398,6 +398,62 @@ def flux_text_encoder_delete(name: str):
 
 
 # --------------------------------------------------------------------------- #
+# LoRA adapters — an optional low-rank patch over a model's transformer. Every model
+# starts with none, and "none" stays available; the pick is per model, because a LoRA
+# is trained against one base and binds to nothing useful on another.
+# --------------------------------------------------------------------------- #
+@app.get("/api/flux/loras")
+def flux_loras():
+    return {"loras": fx.list_loras(), "selected": fx.selected_loras()}
+
+
+class LoraPullRequest(BaseModel):
+    repo: str
+
+
+@app.post("/api/flux/loras/pull")
+def flux_lora_pull(req: LoraPullRequest):
+    """Add a LoRA from HuggingFace. owner/repo:file, or owner/repo holding exactly one."""
+    if not fx.runtime_ready():
+        raise HTTPException(status_code=503, detail="The image engine isn't installed.")
+
+    def work(emit):
+        fx.pull_lora(
+            req.repo,
+            on_status=lambda m: emit({"type": "status", "message": m}),
+            on_progress=lambda p: emit({"type": "progress", **p}),
+        )
+
+    return _ndjson(work)
+
+
+class LoraSelectRequest(BaseModel):
+    bundle_id: str
+    name: str  # "" detaches — the "None" option
+    strength: float = 1.0
+
+
+@app.put("/api/flux/loras/select")
+def flux_lora_select(req: LoraSelectRequest):
+    try:
+        fx.set_lora(req.bundle_id, req.name, req.strength)
+        return {"ok": True, "selected": fx.selected_loras()}
+    except ValueError as exc:  # unknown bundle id, from cat.get
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="That LoRA isn't installed.")
+
+
+@app.delete("/api/flux/loras/{name}")
+def flux_lora_delete(name: str):
+    try:
+        fx.delete_lora(name)
+        return {"ok": True, "selected": fx.selected_loras()}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="LoRA not found.")
+
+
+# --------------------------------------------------------------------------- #
 # HuggingFace token — needed only for gated repos. Stored server-side, 0600, and
 # never sent back to the browser: the UI only ever learns whether one is set.
 # --------------------------------------------------------------------------- #

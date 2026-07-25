@@ -330,6 +330,41 @@ textarea {
   font-size: 11px;
 }
 
+/* One model's LoRA row: the picker, then its weight slider once attached. */
+.lora-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lora-strength {
+  padding-left: 4px;
+}
+
+.lora-strength input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.lora-weight {
+  flex: none;
+  width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Amber against the pill's green, so an attached adapter reads as a modification
+   of the model rather than another of its parts. */
+.gen-pill-lora {
+  flex: 0 2 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--amber);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
 .ctx-meter {
   display: flex;
   align-items: center;

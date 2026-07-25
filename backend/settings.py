@@ -94,3 +94,26 @@ def set_text_encoder(bundle_id: str, name: str) -> None:
         tes.pop(bundle_id, None)
     data["text_encoders"] = tes
     _write(data)
+
+
+def loras() -> dict:
+    """Per-model LoRA choice: {bundle_id: {"name": filename, "strength": float}}.
+
+    Unlike a text encoder, no model has a default LoRA — absent means "none", which is
+    the state the user starts in and can always return to. Kept per bundle because a
+    LoRA is trained against one base: a FLUX.2 [dev] adapter does nothing useful on
+    klein, whose transformer is a different size and shape entirely.
+    """
+    return _read().get("loras") or {}
+
+
+def set_lora(bundle_id: str, name: str, strength: float = 1.0) -> None:
+    """Attach a LoRA to a model. Empty name detaches it (the "None" option)."""
+    data = _read()
+    picks = data.get("loras") or {}
+    if name:
+        picks[bundle_id] = {"name": name, "strength": strength}
+    else:
+        picks.pop(bundle_id, None)
+    data["loras"] = picks
+    _write(data)

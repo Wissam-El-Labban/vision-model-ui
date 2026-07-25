@@ -458,23 +458,48 @@ def _clip_node(name: str, kind: str) -> dict:
     return {"class_type": cls, "inputs": {"clip_name": name, "type": kind}}
 
 
+def _with_lora(unet: str, loaders: dict) -> dict:
+    """Chain the model's selected LoRA onto its transformer, if it has one.
+
+    Every graph builder here refers to the model as `["unet", 0]`. Rather than teach
+    each of them about adapters, the raw loader moves to `unet_base` and `unet`
+    becomes the *patched* output — so the whole pipeline picks the LoRA up with no
+    other change, and a graph with no LoRA is byte-for-byte what it was before.
+
+    LoraLoaderModelOnly rather than LoraLoader: FLUX adapters patch the transformer,
+    and the CLIP-patching variant demands a `clip` input that would also have to be
+    rewired into every text-encode node for no gain.
+    """
+    pick = lora_for(unet)
+    if not pick:
+        return loaders
+    base = dict(loaders)
+    base["unet_base"] = base.pop("unet")
+    base["unet"] = {
+        "class_type": "LoraLoaderModelOnly",
+        "inputs": {"model": ["unet_base", 0],
+                   "lora_name": pick["name"], "strength_model": pick["strength"]},
+    }
+    return base
+
+
 def _loaders(unet: str) -> dict:
     """The transformer + its text encoder + its VAE. All three are family-specific:
     a FLUX.2 transformer decodes 128-channel latents through its own VAE and reads
     conditioning from a Mistral-3 encoder, none of which FLUX.1's parts can supply."""
     if cat.family_of(unet) == cat.FAMILY_FLUX2:
         b = cat.bundle_of_unet(unet)
-        return {
+        return _with_lora(unet, {
             "unet": _unet_node(unet),
             "clip": _clip_node(clip_for(b), "flux2"),
             "vae": {"class_type": "VAELoader", "inputs": {"vae_name": b["vae"]}},
-        }
-    return {
+        })
+    return _with_lora(unet, {
         "unet": _unet_node(unet),
         "clip": {"class_type": "DualCLIPLoaderGGUF",
                  "inputs": {"clip_name1": CLIP_L, "clip_name2": T5, "type": "flux"}},
         "vae": {"class_type": "VAELoader", "inputs": {"vae_name": FLUX1_VAE}},
-    }
+    })
 
 
 def _sampler(g: dict, unet, latent_src, steps, seed, width, height, denoise=1.0) -> None:
@@ -1065,6 +1090,7 @@ def list_unets() -> list[dict]:
                     "family": cat.family_of(p.name),
                     "size_gb": round(p.stat().st_size / 1e9, 2),
                     "encoder": encoder_for(p.name),
+                    "lora": lora_for(p.name),  # None when nothing is attached
                 })
     out.sort(key=lambda m: (cat.bundle_rank(m["name"]), m["name"].lower()))
     return out
@@ -1993,6 +2019,144 @@ def delete_text_encoder(name: str) -> None:
     for b in cat.BUNDLES:
         if b["family"] == cat.FAMILY_FLUX2 and cat.installed(b) and clip_for(b) == safe:
             raise ValueError(f"{b['label']} is using {safe}. Point it at another encoder first.")
+    p.unlink()
+
+
+# --------------------------------------------------------------------------- #
+# LoRA adapters
+# --------------------------------------------------------------------------- #
+# A LoRA is a low-rank patch applied over the transformer's weights at load time. It
+# steers style or subject matter without replacing the 64 GB checkpoint, which is what
+# makes it the practical way to change what a model will render — the base weights are
+# far too expensive to retrain.
+#
+# Unlike a text encoder, none of this is required: no bundle has a default LoRA, and
+# "none" is both the starting state and always reachable again. And unlike an encoder,
+# a LoRA is silently base-specific — a FLUX.2 [dev] adapter loaded onto klein doesn't
+# error, it just fails to bind to most of the layers it names. Hence the per-bundle
+# keying: the pick follows the model it was trained for.
+LORA_EXTS = (".safetensors", ".sft", ".pt")
+
+
+def _lora_pick(bundle_id: str) -> dict | None:
+    """The stored LoRA choice for one bundle, or None for the "no LoRA" default.
+
+    A pick whose file has since been deleted reads as None rather than failing the
+    graph — the same fallback shape `clip_for` takes for a missing encoder.
+    """
+    pick = settings.loras().get(bundle_id)
+    if not pick:
+        return None
+    name = os.path.basename(pick.get("name") or "")
+    if not name or not (cat.LORA_DIR / name).exists():
+        return None
+    return {"name": name, "strength": float(pick.get("strength", 1.0))}
+
+
+def lora_for(unet: str) -> dict | None:
+    """The LoRA `_with_lora` will chain onto this transformer, if any.
+
+    A user-added UNet has no bundle to key on and so takes no LoRA — it has no
+    declared base for one to be trained against.
+    """
+    b = cat.bundle_of_unet(unet)
+    return _lora_pick(b["id"]) if b else None
+
+
+def list_loras() -> list[dict]:
+    """Every LoRA on disk. Sizes are MB — these are patches, not checkpoints."""
+    out = []
+    if cat.LORA_DIR.is_dir():
+        for p in sorted(cat.LORA_DIR.iterdir()):
+            if p.is_file() and p.suffix.lower() in LORA_EXTS:
+                out.append({"name": p.name, "size_mb": round(p.stat().st_size / 1e6, 1)})
+    return out
+
+
+def _takes_lora(b: dict) -> bool:
+    """Whether a bundle's graph can actually apply an adapter.
+
+    Wan is excluded: `_wan_i2v_graph` assembles its own two-expert graph rather than
+    going through `_loaders`, so a LoRA chained there would never be reached. Better to
+    not offer the choice than to accept one that silently does nothing.
+    """
+    return b["family"] != cat.FAMILY_WAN
+
+
+def selected_loras() -> dict[str, dict | None]:
+    """What each installed model is set to load. None means no LoRA."""
+    return {b["id"]: _lora_pick(b["id"])
+            for b in cat.BUNDLES if cat.installed(b) and _takes_lora(b)}
+
+
+def set_lora(bundle_id: str, name: str, strength: float = 1.0) -> None:
+    """Attach a LoRA to a model, or detach it when `name` is empty."""
+    b = cat.get(bundle_id)  # raises on an unknown bundle
+    if not _takes_lora(b):
+        raise ValueError(f"{b['label']} doesn't take a LoRA adapter.")
+    safe = os.path.basename(name or "")
+    if safe and not (cat.LORA_DIR / safe).exists():
+        raise FileNotFoundError(safe)
+    # ComfyUI accepts any float, but outside this range a LoRA either does nothing or
+    # overwhelms the base weights into noise. Clamp rather than reject: the slider
+    # can't produce an out-of-range value, so anything here came from a hand-made
+    # request and silently doing the sane thing beats a 400.
+    strength = max(-2.0, min(2.0, float(strength)))
+    settings.set_lora(bundle_id, safe, strength)
+
+
+def pull_lora(repo: str, on_status=None, on_progress=None) -> None:
+    """Add a LoRA from a HuggingFace repo — `owner/repo:file` or `owner/repo`.
+
+    Single-file only, with none of `pull_text_encoder`'s shard-stitching: a LoRA is
+    tens to hundreds of MB and is published as one file. A repo holding several is an
+    ambiguity we'd rather hand back than guess at, since the names carry the meaning.
+
+    Files downloaded from elsewhere (Civitai hosts most of the FLUX.2 adapters) can be
+    dropped straight into `models/loras/` — `list_loras` reads the directory, so
+    nothing has to come through here.
+    """
+    repo_id, filename = _parse_repo(repo)
+    token = settings.hf_token()
+    cat.LORA_DIR.mkdir(parents=True, exist_ok=True)
+    say = on_status or (lambda _m: None)
+    tick = on_progress or (lambda _p: None)
+
+    if filename:
+        _run_child(["fetch", repo_id, filename, str(cat.LORA_DIR)],
+                   on_status=say, on_progress=tick, token=token)
+        say("Download complete.")
+        return
+
+    say(f"Resolving {repo_id}…")
+    tensors = _json_line(_run_child(["probe", repo_id], token=token))
+    whole = [f for f in tensors if f["name"].lower().endswith(LORA_EXTS)]
+    if len(whole) == 1:
+        _run_child(["fetch", repo_id, whole[0]["name"], str(cat.LORA_DIR)],
+                   on_status=say, on_progress=tick, token=token)
+        say("Download complete.")
+        return
+    if len(whole) > 1:
+        listed = "\n".join(f"  {repo_id}:{f['name']}  ({f['size'] / 1e6:.0f} MB)"
+                           for f in sorted(whole, key=lambda f: -f["size"])[:10])
+        raise ValueError(f"{repo_id} holds several LoRAs — name the one you want:\n{listed}")
+    raise ValueError(f"No LoRA found in {repo_id}. Use owner/repo:file to name one.")
+
+
+def delete_lora(name: str) -> None:
+    """Remove a LoRA, detaching it from any model that had it selected.
+
+    Detach rather than refuse (which is what `delete_text_encoder` does): a model
+    without its encoder can't run at all, while a model without its LoRA is just the
+    base model — the state it shipped in.
+    """
+    safe = os.path.basename(name or "")
+    p = cat.LORA_DIR / safe
+    if not p.exists():
+        raise FileNotFoundError(safe)
+    for bundle_id, pick in list(settings.loras().items()):
+        if os.path.basename((pick or {}).get("name") or "") == safe:
+            settings.set_lora(bundle_id, "")
     p.unlink()
 
 

@@ -3,16 +3,20 @@ import {
   clearHfToken,
   deleteFluxBundle,
   deleteFluxModel,
+  deleteLora,
   deleteTextEncoder,
   getFluxCatalog,
+  getLoras,
   getTextEncoders,
   installFluxBundle,
   pullFluxModel,
+  pullLora,
   pullTextEncoder,
+  selectLora,
   selectTextEncoder,
   setHfToken,
 } from "../api";
-import type { FluxCatalog, FluxModel, FluxTextEncoders } from "../api";
+import type { FluxCatalog, FluxLoras, FluxModel, FluxTextEncoders } from "../api";
 
 interface Props {
   models: FluxModel[]; // installed transformers, incl. user-added ones
@@ -38,12 +42,16 @@ export default function ImageModels({ models, onChanged }: Props) {
   // Kept apart from `status`: that renders up beside the bundle list, which on a long
   // panel is off-screen from the encoder form — an error there reads as nothing at all.
   const [teStatus, setTeStatus] = useState<string | null>(null);
+  const [loras, setLoras] = useState<FluxLoras | null>(null);
+  const [loraRepo, setLoraRepo] = useState("");
+  const [loraStatus, setLoraStatus] = useState<string | null>(null);
 
   async function refresh() {
     try {
       const c = await getFluxCatalog();
       setCat(c);
       setTes(await getTextEncoders().catch(() => null));
+      setLoras(await getLoras().catch(() => null));
       return c;
     } catch {
       setCat(null);
@@ -222,7 +230,65 @@ export default function ImageModels({ models, onChanged }: Props) {
     }
   }
 
+  async function addLora() {
+    if (!loraRepo.trim()) return;
+    setBusy("lora");
+    setLoraStatus("starting…");
+    setPct(null);
+    try {
+      await pullLora(
+        loraRepo.trim(),
+        (m) => setLoraStatus(m),
+        (p) => {
+          // MB, not GB like the encoders — a LoRA that reported "0.0/0.2 GB" the
+          // whole way down would look stalled.
+          setLoraStatus(
+            `${p.file} — ${(p.done / 1e6).toFixed(0)}/${(p.total / 1e6).toFixed(0)} MB`
+          );
+          setPct(p.pct);
+        }
+      );
+      setLoraStatus("✓ LoRA added");
+      setPct(null);
+      setLoraRepo("");
+      await refresh();
+    } catch (e) {
+      setLoraStatus(`✗ ${(e as Error).message}`);
+      setPct(null);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Attach, re-weight, or (with an empty name) detach. Strength travels with every
+   *  call because the backend stores the pair — sending one without the other would
+   *  reset the half that wasn't touched. */
+  async function pickLora(bundleId: string, name: string, strength: number) {
+    try {
+      await selectLora(bundleId, name, strength);
+      await refresh();
+      onChanged(); // the app's model list carries the pick, for the header pill
+    } catch (e) {
+      setLoraStatus(`✗ ${(e as Error).message}`);
+    }
+  }
+
+  async function removeLora(name: string) {
+    try {
+      await deleteLora(name);
+      await refresh();
+      onChanged(); // deleting it detaches it from whichever model had it
+    } catch (e) {
+      setLoraStatus(`✗ ${(e as Error).message}`);
+    }
+  }
+
   const extras = models.filter((m) => m.bundle === null);
+  // Which models can take an adapter is the backend's call (Wan's graph can't), so
+  // read it off the response rather than re-deriving the rule here.
+  const loraBundles = (cat?.bundles ?? []).filter(
+    (b) => b.installed && loras?.selected && b.id in loras.selected
+  );
   // Only FLUX.2 models take a swappable encoder; FLUX.1's is wired into its graph.
   const flux2 = (cat?.bundles ?? []).filter((b) => b.family === "flux2" && b.installed);
 
@@ -431,6 +497,108 @@ export default function ImageModels({ models, onChanged }: Props) {
                     are stitched into the single file ComfyUI loads. Add{" "}
                     <code>:file</code> to name one checkpoint in a repo that holds several.
                     Gated repos use your token.
+                  </div>
+                </>
+              )}
+
+              {/* LoRA adapters. Optional in a way the encoder isn't: no model has a
+                  default, so "None" is both where everyone starts and always one
+                  selection away. */}
+              {loraBundles.length > 0 && (
+                <>
+                  <label className="lbl">LoRA adapters</label>
+                  {loraBundles.map((b) => {
+                    const pick = loras?.selected[b.id] ?? null;
+                    return (
+                      <div key={b.id} className="lora-row">
+                        <div className="row">
+                          <span className="muted small te-model">{b.label}</span>
+                          <select
+                            value={pick?.name ?? ""}
+                            onChange={(e) =>
+                              pickLora(b.id, e.target.value, pick?.strength ?? 1.0)
+                            }
+                            disabled={busy !== null}
+                          >
+                            <option value="">None</option>
+                            {(loras?.loras ?? []).map((l) => (
+                              <option key={l.name} value={l.name}>
+                                {l.name} ({l.size_mb} MB)
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        {/* Only meaningful once something is attached, and most
+                            adapters want less than full weight — 1.0 often overcooks
+                            the base model's own style away. */}
+                        {pick && (
+                          <div className="row lora-strength">
+                            <input
+                              type="range"
+                              min="0"
+                              max="1.5"
+                              step="0.05"
+                              value={pick.strength}
+                              disabled={busy !== null}
+                              onChange={(e) =>
+                                pickLora(b.id, pick.name, parseFloat(e.target.value))
+                              }
+                            />
+                            <span className="muted small lora-weight">
+                              {pick.strength.toFixed(2)}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <div className="muted small">
+                    A LoRA is a small patch over the transformer — it changes what the
+                    model renders without replacing the checkpoint. Adapters are trained
+                    against one base, so a FLUX.2 [dev] LoRA won't bind to klein. Start
+                    around 0.6-0.8.
+                  </div>
+                  {(loras?.loras ?? []).map((l) => (
+                    <div key={l.name} className="row extra-model">
+                      <span className="muted small">
+                        {l.name} ({l.size_mb} MB)
+                      </span>
+                      <button
+                        className="btn danger small"
+                        onClick={() => removeLora(l.name)}
+                        title="Remove"
+                      >
+                        🗑
+                      </button>
+                    </div>
+                  ))}
+                  <div className="row">
+                    <input
+                      value={loraRepo}
+                      onChange={(e) => setLoraRepo(e.target.value)}
+                      placeholder="owner/repo:file.safetensors (HuggingFace)"
+                    />
+                    <button className="btn" onClick={addLora} disabled={busy !== null}>
+                      {busy === "lora" ? "Adding…" : "⬇ Add"}
+                    </button>
+                  </div>
+                  {busy === "lora" && (
+                    <div className="bundle-progress">
+                      <div className="progress">
+                        <div className="progress-bar" style={{ width: `${pct ?? 0}%` }} />
+                      </div>
+                      <div className="muted small">{loraStatus ?? "starting…"}</div>
+                    </div>
+                  )}
+                  {busy !== "lora" && loraStatus && (
+                    <div className="muted small note te-status">{loraStatus}</div>
+                  )}
+                  <div className="muted small">
+                    Most FLUX.2 adapters are published on Civitai rather than
+                    HuggingFace — those download in the browser, so drop the{" "}
+                    <code>.safetensors</code> into{" "}
+                    <code>flux_runtime/ComfyUI/models/loras/</code> and it shows up in
+                    the list above.
                   </div>
                 </>
               )}

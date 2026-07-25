@@ -23,8 +23,10 @@ UNET_DIR = MODELS_DIR / "unet"
 CLIP_DIR = MODELS_DIR / "clip"
 TE_DIR = MODELS_DIR / "text_encoders"
 VAE_DIR = MODELS_DIR / "vae"
+LORA_DIR = MODELS_DIR / "loras"
 
-_DIRS = {"unet": UNET_DIR, "clip": CLIP_DIR, "text_encoders": TE_DIR, "vae": VAE_DIR}
+_DIRS = {"unet": UNET_DIR, "clip": CLIP_DIR, "text_encoders": TE_DIR, "vae": VAE_DIR,
+         "loras": LORA_DIR}
 
 FAMILY_FLUX1 = "flux1"
 FAMILY_FLUX2 = "flux2"
