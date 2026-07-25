@@ -458,6 +458,50 @@ def _clip_node(name: str, kind: str) -> dict:
     return {"class_type": cls, "inputs": {"clip_name": name, "type": kind}}
 
 
+def _check_encoder_layout(name: str) -> None:
+    """Reject a FLUX.2 text encoder ComfyUI won't recognise, before sampling starts.
+
+    ComfyUI identifies an encoder from its tensor *names* (`detect_te_model` in
+    comfy/sd.py), and every FLUX.2 candidate — Mistral-3, Qwen3 — is keyed off
+    `model.layers.0.…`. HuggingFace's multimodal layout names the same tensors
+    `language_model.model.layers.0.…`; ComfyUI's only prefix remap is for
+    `model.language_model.`, the other ordering, so nothing matches.
+
+    Nothing errors when that happens. Detection falls through, a default CLIP-L is
+    built from config, the 48 GB of real weights are discarded as unmatched, and the
+    only symptom arrives minutes later inside the sampler as "mat1 and mat2 shapes
+    cannot be multiplied (512x768 and 15360x6144)" — 768 being CLIP-L's width. This
+    reads the header (tens of KB, not the weights) and says so up front instead.
+    """
+    if name.lower().endswith(".gguf"):
+        return  # GGUF carries its architecture in metadata; detection can't misfire
+    path = cat.TE_DIR / name
+    if not path.exists():
+        path = cat.CLIP_DIR / name
+    if not path.exists():
+        return  # missing entirely is ComfyUI's error to report, and it does it clearly
+    try:
+        with open(path, "rb") as fh:
+            n = struct.unpack("<Q", fh.read(8))[0]
+            keys = json.loads(fh.read(n)).keys()
+    except (OSError, ValueError, struct.error):
+        return  # unreadable header: let ComfyUI be the one to complain
+    if any(k.startswith("model.layers.0.") for k in keys):
+        return
+    nested = next((k for k in keys if k.startswith("language_model.model.layers.0.")), None)
+    if nested:
+        raise RuntimeError(
+            f"{name} is in HuggingFace's multimodal layout (its tensors are named "
+            f"'language_model.model.…'), which ComfyUI's FLUX.2 loader can't identify — "
+            f"it would silently fall back to CLIP-L and fail mid-sample. Install the "
+            f"ComfyUI-packaged encoder instead: in the Models panel, under Text "
+            f"encoders, add "
+            f"Comfy-Org/flux2-dev:split_files/text_encoders/{name}")
+    raise RuntimeError(
+        f"{name} doesn't look like a FLUX.2 text encoder — ComfyUI identifies one by "
+        f"its tensor names and this file has none it recognises.")
+
+
 def _dual_clip_node(name1: str, name2: str, kind: str) -> dict:
     """The same choice as `_clip_node`, for FLUX.1's two-encoder pair (CLIP-L + T5).
 
@@ -503,9 +547,11 @@ def _loaders(unet: str) -> dict:
     conditioning from a Mistral-3 encoder, none of which FLUX.1's parts can supply."""
     if cat.family_of(unet) == cat.FAMILY_FLUX2:
         b = cat.bundle_of_unet(unet)
+        clip = clip_for(b)
+        _check_encoder_layout(clip)
         return _with_lora(unet, {
             "unet": _unet_node(unet),
-            "clip": _clip_node(clip_for(b), "flux2"),
+            "clip": _clip_node(clip, "flux2"),
             "vae": {"class_type": "VAELoader", "inputs": {"vae_name": b["vae"]}},
         })
     return _with_lora(unet, {

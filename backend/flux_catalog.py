@@ -94,9 +94,9 @@ BUNDLES = [
         "family": FAMILY_FLUX2,
         "roles": [ROLE_CREATE, ROLE_EDIT],
         "blurb": ("The full bf16 release, straight from Black Forest Labs. Gated: accept "
-                  "the licence on HuggingFace and save a token first. 113 GB on disk — "
+                  "the licence on HuggingFace and save a token first. 100 GB on disk — "
                   "the weights are cast to fp8 at load to fit the GPU."),
-        "size_gb": 112.8,
+        "size_gb": 100.4,
         "vram_gb": 46,
         "gated": True,
         "unet": "flux2-dev.safetensors",
@@ -109,20 +109,21 @@ BUNDLES = [
             ("black-forest-labs/FLUX.2-dev", "flux2-dev.safetensors", "unet"),
             # Renamed: upstream calls it ae.safetensors, same as FLUX.1's very different VAE.
             ("black-forest-labs/FLUX.2-dev", "ae.safetensors", "vae", "flux2-dev-vae.safetensors"),
-        ],
-        "merges": [
-            {
-                "repo": "black-forest-labs/FLUX.2-dev",
-                "shards": [f"text_encoder/model-{i:05d}-of-00010.safetensors"
-                           for i in range(1, 11)],
-                "key": "text_encoders",
-                "out": "mistral_3_small_flux2_bf16.safetensors",
-                "shards_gb": 48.0,
-                # BFL ships an HF-format tokenizer.json; ComfyUI wants Mistral's tekken
-                # vocab, which only Mistral publishes. Same tokenizer, first-party source.
-                "embed": ("mistralai/Mistral-Small-3.2-24B-Instruct-2506",
-                          "tekken.json", "tekken_model"),
-            },
+            # The encoder comes from ComfyUI's packaging, not BFL's own text_encoder/
+            # shards, even though the transformer beside it is first-party.
+            #
+            # BFL publishes the encoder in HuggingFace's multimodal layout, naming its
+            # tensors `language_model.model.…` / `vision_tower.…`. ComfyUI identifies an
+            # encoder purely by tensor name (`detect_te_model`) and every FLUX.2 case is
+            # keyed off a flattened `model.layers.0.…`, with a prefix remap only for
+            # `model.language_model.` — the other ordering. So a faithful stitch of the
+            # shards produces a file ComfyUI cannot recognise: it silently falls back to
+            # a default CLIP-L and the run dies deep in the sampler with a 768-vs-15360
+            # matmul. This build is the same weights, re-keyed (and pruned to the 30
+            # layers FLUX.2 actually taps), which is what the loader expects.
+            ("Comfy-Org/flux2-dev",
+             "split_files/text_encoders/mistral_3_small_flux2_bf16.safetensors",
+             "text_encoders"),
         ],
     },
     {
