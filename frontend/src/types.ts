@@ -21,6 +21,26 @@ export interface ChatMessage {
 /** Which generation workflow the composer is in. */
 export type GenOp = "create" | "edit" | "compose" | "animate";
 
+/** Liveness of the in-flight turn, for the progress bar under the chat.
+ *
+ * The bar exists because a first run goes quiet for a long time: ComfyUI loads
+ * tens of GB off disk before it emits step 1, so the status line sits on
+ * "editing with flux-2-klein-9b…" with nothing to say whether it is loading or
+ * wedged. `total` of 0 means no step has arrived yet and the bar runs
+ * indeterminate; `updatedAt` is what separates "slow" from "stuck" — it only
+ * moves when the backend actually says something. */
+export interface GenProgress {
+  /** Last status line from the backend, minus the leading icon. */
+  phase: string;
+  /** Sampler steps done, and the total for this job. Both 0 before sampling. */
+  step: number;
+  total: number;
+  /** ms epoch, for elapsed time. */
+  startedAt: number;
+  /** ms epoch of the last backend event, for the stall detector. */
+  updatedAt: number;
+}
+
 /** User-tunable generation settings.
  *  No negative prompt is exposed: FLUX.1 samples at cfg=1.0 (the negative branch
  *  has no effect) and FLUX.2 has none at all. Guidance is mode-scaled — ~3.5 for

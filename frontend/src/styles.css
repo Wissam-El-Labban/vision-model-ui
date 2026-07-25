@@ -8,6 +8,7 @@
   --accent: #2f81f7;
   --accent-2: #1f6feb;
   --green: #3fb950;
+  --amber: #d29922;
   --red: #f85149;
   --radius: 10px;
 }
@@ -601,6 +602,98 @@ textarea {
 .messages.drag {
   outline: 2px dashed var(--accent);
   outline-offset: -10px;
+}
+
+/* Generation liveness bar — sits between the conversation and the composer.
+   Deliberately tiny: it reports that work is happening, it isn't a focal point. */
+.genbar {
+  flex: none;
+  padding: 5px 18px 6px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.genbar-track {
+  position: relative;
+  height: 3px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--panel-2);
+}
+
+.genbar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(63, 185, 80, 0.55);
+  transition: width 0.25s linear, background-color 0.3s ease;
+}
+
+/* Pre-sampling: nothing to measure yet, so sweep instead of filling. The sweep
+   only says "the UI is alive" — the quiet-for readout is what says the backend
+   is too. */
+.genbar-fill.indet {
+  width: 30%;
+  animation: genbar-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes genbar-sweep {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(370%);
+  }
+}
+
+.genbar-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.genbar-phase {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Counters are pushed right as a group and monospaced, so ticking digits don't
+   jitter the layout. */
+.genbar-meta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.genbar-step {
+  color: var(--green);
+}
+
+.genbar-time {
+  opacity: 0.75;
+}
+
+.genbar-warn {
+  color: var(--amber);
+}
+
+.genbar.stalled .genbar-fill {
+  background: var(--amber);
+  box-shadow: 0 0 6px rgba(210, 153, 34, 0.55);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .genbar-fill.indet {
+    animation-duration: 3s;
+  }
 }
 
 .drop-overlay {

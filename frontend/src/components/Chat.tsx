@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatMessage } from "../types";
+import type { ChatMessage, GenProgress } from "../types";
+import GenProgressBar from "./GenProgressBar";
 
 /** Stable color per model name, for the per-chunk indicator. */
 function modelColor(model?: string): string {
@@ -57,11 +58,19 @@ interface Props {
   messages: ChatMessage[];
   streaming: boolean;
   disabled: boolean;
+  /** Liveness of the in-flight turn; null when idle. Drives the bar below. */
+  progress: GenProgress | null;
   onDropFiles: (files: FileList | File[]) => void;
 }
 
 /** The scrolling conversation (the composer lives full-width below it). */
-export default function Chat({ messages, streaming, disabled, onDropFiles }: Props) {
+export default function Chat({
+  messages,
+  streaming,
+  disabled,
+  progress,
+  onDropFiles,
+}: Props) {
   const endRef = useRef<HTMLDivElement>(null);
   const [dragOver, setDragOver] = useState(false);
   const [zoom, setZoom] = useState<string | null>(null);
@@ -206,6 +215,7 @@ export default function Chat({ messages, streaming, disabled, onDropFiles }: Pro
         })}
         <div ref={endRef} />
       </div>
+      <GenProgressBar progress={progress} />
       {zoom && (
         <div className="lightbox" onClick={() => setZoom(null)}>
           <div className="lightbox-body" onClick={(e) => e.stopPropagation()}>

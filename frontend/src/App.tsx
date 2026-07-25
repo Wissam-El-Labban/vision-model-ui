@@ -24,7 +24,13 @@ import {
 import { fileToDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
 import { guidanceFor, imagesFor, modeFor, resolveFlux, roleFor } from "./flux";
 import { trimHistory } from "./context";
-import type { ChatMessage, ChatSummary, GenSettings, GenOp } from "./types";
+import type {
+  ChatMessage,
+  ChatSummary,
+  GenProgress,
+  GenSettings,
+  GenOp,
+} from "./types";
 
 const DEFAULT_URL = "http://localhost:11434";
 
@@ -117,6 +123,10 @@ export default function App() {
   const [pinnedImages, setPinnedImages] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
+  // Liveness of the in-flight turn. Separate from `streaming` because it carries
+  // *when* the last backend event landed, which is the only thing that tells a
+  // slow first-run model load apart from a wedged one.
+  const [progress, setProgress] = useState<GenProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [usage, setUsage] = useState<Usage | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -372,6 +382,16 @@ export default function App() {
       const history = [...messages, userMsg];
       setMessages([...history, { role: "assistant", content: "", model }]);
       setStreaming(true);
+      // Text has one silent stretch — Ollama loading the model before the first
+      // token. The streamed text is its own liveness signal after that, so the
+      // bar clears on first token rather than running the whole turn.
+      setProgress({
+        phase: `Loading ${model}…`,
+        step: 0,
+        total: 0,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+      });
 
       // Auto-trim oldest turns from what we SEND (the UI keeps the full history)
       // when the last measured usage shows we're near the window limit.
@@ -482,6 +502,7 @@ export default function App() {
           {
             onToken: (token) => {
               assistantText += token;
+              setProgress(null);
               setMessages((prev) => {
                 const next = [...prev];
                 next[next.length - 1] = {
@@ -511,6 +532,7 @@ export default function App() {
         }
       } finally {
         setStreaming(false);
+        setProgress(null);
         abortRef.current = null;
 
         // Persist this turn (best-effort; a failure here must not break the UI).
@@ -609,6 +631,13 @@ export default function App() {
         { role: "assistant", content: `${icon} Preparing…`, model: modelId },
       ]);
       setStreaming(true);
+      setProgress({
+        phase: "Preparing…",
+        step: 0,
+        total: 0,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+      });
 
       const setAssistant = (patch: Partial<ChatMessage>) =>
         setMessages((prev) => {
@@ -667,9 +696,22 @@ export default function App() {
             ollama_url: ollamaUrl,
           },
           {
-            onStatus: (m) => setAssistant({ content: `${icon} ${m}` }),
-            onProgress: (step, total) =>
-              setAssistant({ content: `${icon} Generating… step ${step}/${total}` }),
+            onStatus: (m) => {
+              setAssistant({ content: `${icon} ${m}` });
+              // A new phase drops back to indeterminate: the step counts the
+              // sampler reports belong to the phase that emitted them, and
+              // carrying them across would leave a full bar sitting over a
+              // stage that hasn't started.
+              setProgress((p) =>
+                p ? { ...p, phase: m, step: 0, total: 0, updatedAt: Date.now() } : p
+              );
+            },
+            onProgress: (step, total) => {
+              setAssistant({ content: `${icon} Generating… step ${step}/${total}` });
+              setProgress((p) =>
+                p ? { ...p, step, total, updatedAt: Date.now() } : p
+              );
+            },
             onImage: async (r) => {
               resultHash = r.hash;
               // The store keeps each result in its own format, so take the URL the
@@ -724,6 +766,7 @@ export default function App() {
         }
       } finally {
         setStreaming(false);
+        setProgress(null);
         abortRef.current = null;
 
         // Both turns are the backend's to write (see `chat_id` above), so what's
@@ -928,6 +971,7 @@ export default function App() {
             <Chat
               messages={messages}
               streaming={streaming}
+              progress={progress}
               disabled={!model && !genMode}
               onDropFiles={addComposerFiles}
             />
