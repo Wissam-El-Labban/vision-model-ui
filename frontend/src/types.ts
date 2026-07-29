@@ -16,6 +16,10 @@ export interface ChatMessage {
   contextImages?: string[];
   /** Which model this turn was sent to (for the per-chunk model indicator). */
   model?: string;
+  /** Verbose-mode prompt enhancer's rewrite of `content` — the text that
+   *  actually generated the image, shown underneath the user's own typed
+   *  prompt. Live-session only: not persisted, so it's gone on reload. */
+  enhancedPrompt?: string;
 }
 
 /** Which generation workflow the composer is in. */
@@ -63,7 +67,6 @@ export interface GenSettings {
   steps: number;
   guidance: number;
   strength: number; // img2img: how far from the source image
-  enhance: boolean; // wrap create prompts in a photoreal template
   width: number;
   height: number;
   seed: string; // blank = random; kept as string for the input field

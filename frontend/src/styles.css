@@ -902,6 +902,14 @@ textarea {
   white-space: normal;
 }
 
+/* Verbose prompt enhancer's rewrite, under the user's own typed prompt. */
+.content.enhanced-prompt {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  font-style: italic;
+}
+
 .markdown > :first-child {
   margin-top: 0;
 }

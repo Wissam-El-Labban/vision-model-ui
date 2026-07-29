@@ -7,6 +7,12 @@ interface Props {
   setEnhancerModel: (v: string) => void;
   enhancerMode: EnhancerMode;
   setEnhancerMode: (v: EnhancerMode) => void;
+  /** Independent of the model/mode above: a simpler server-side template wrap
+   *  (adds boilerplate camera + lighting phrasing) for create/img2img prompts,
+   *  skipped whenever this same request was already rewritten by the picks
+   *  above. */
+  enhanceTemplate: boolean;
+  setEnhanceTemplate: (v: boolean) => void;
 }
 
 const HINTS: Record<EnhancerMode, string> = {
@@ -22,6 +28,8 @@ export default function PromptEnhancer({
   setEnhancerModel,
   enhancerMode,
   setEnhancerMode,
+  enhanceTemplate,
+  setEnhanceTemplate,
 }: Props) {
   const [open, setOpen] = useState(false);
 
@@ -56,6 +64,20 @@ export default function PromptEnhancer({
           </select>
 
           <p className="hint muted small">{HINTS[enhancerMode]}</p>
+
+          <label className="enhance-row">
+            <input
+              type="checkbox"
+              checked={enhanceTemplate}
+              onChange={(e) => setEnhanceTemplate(e.target.checked)}
+            />
+            Enhance photoreal prompt (adds camera + lighting detail)
+          </label>
+          <p className="hint muted small">
+            A simpler, always-local template wrap for create/img2img prompts —
+            independent of the vision model above. Skipped whenever that model
+            already rewrote this prompt.
+          </p>
         </div>
       )}
     </div>

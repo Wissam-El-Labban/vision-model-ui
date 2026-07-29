@@ -72,19 +72,21 @@ export default function App() {
   // compose (blend multiple reference images).
   const [genOp, setGenOp] = useState<GenOp>("create");
   const [fluxAvailable, setFluxAvailable] = useState(false);
-  // Prompt enhancement. The rewrite replaces the composer text in place, so what
-  // the user reads is what gets sent — there is no second copy to drift from it.
-  // `originalPrompt` backs Undo; `promptEnhanced` stops the static template being
-  // wrapped around an already-rewritten prompt.
+  // Prompt enhancement. `enhanceTemplate` is the independent photoreal-template
+  // toggle (sidebar-level, see `PromptEnhancer`). `enhancing` guards the brief
+  // async gap while the settings-level auto-enhancer runs before a generation
+  // goes out. Verbose mode's rewrite isn't held in state here — it's attached
+  // directly to the chat message it produced (`ChatMessage.enhancedPrompt`) by
+  // `generateImage`, and rendered under that message, not in the composer.
+  const [enhanceTemplate, setEnhanceTemplate] = useState(
+    () => localStorage.getItem("enhanceTemplate") !== "false"
+  );
   const [enhancing, setEnhancing] = useState(false);
-  const [originalPrompt, setOriginalPrompt] = useState<string | null>(null);
-  const [promptEnhanced, setPromptEnhanced] = useState(false);
   const [gen, setGen] = useState<GenSettings>({
     fluxModel: "", // "" = let the backend pick this mode's default
     steps: 20,
     guidance: 3.5, // retuned to the installed model — see `guidanceFor`
     strength: 0.6,
-    enhance: true,
     width: 1024, // FLUX is trained at ~1 megapixel
     height: 1024,
     seed: "",
@@ -221,6 +223,10 @@ export default function App() {
   useEffect(() => localStorage.setItem("model", model), [model]);
   useEffect(() => localStorage.setItem("enhancerModel", enhancerModel), [enhancerModel]);
   useEffect(() => localStorage.setItem("enhancerMode", enhancerMode), [enhancerMode]);
+  useEffect(
+    () => localStorage.setItem("enhanceTemplate", String(enhanceTemplate)),
+    [enhanceTemplate]
+  );
 
   const refreshModels = useCallback(async () => {
     try {
@@ -293,8 +299,6 @@ export default function App() {
     setError(null);
     setComposerText("");
     setComposerImages([]);
-    setOriginalPrompt(null);
-    setPromptEnhanced(false);
   }, []);
 
   const openChat = useCallback(async (id: string) => {
@@ -361,8 +365,6 @@ export default function App() {
       setError(null);
       setComposerText("");
       setComposerImages([]);
-      setOriginalPrompt(null);
-      setPromptEnhanced(false);
     } catch {
       setError("Could not open that chat.");
     }
@@ -607,7 +609,19 @@ export default function App() {
   );
 
   const generateImage = useCallback(
-    async (prompt: string, op: GenOp, images: string[], autoEnhanced = false) => {
+    // `prompt` is always what the user typed — it's what's shown in the chat
+    // turn. `sendPrompt` is what actually goes to the backend: the same text,
+    // unless the settings-level auto-enhancer rewrote it, in which case the chat
+    // still shows the original while the rewrite does the generating.
+    // `displayEnhanced` (Verbose mode only) is that same rewrite, attached to
+    // the chat message so it renders underneath the user's prompt.
+    async (
+      prompt: string,
+      op: GenOp,
+      images: string[],
+      sendPrompt = prompt,
+      displayEnhanced: string | null = null
+    ) => {
       // Which transformer this run will use. Resolved once, here: it names the
       // placeholder turn, and it's what goes on the wire — so what the composer
       // shows, what the chat says, and what the backend loads are all one value.
@@ -647,6 +661,7 @@ export default function App() {
         content: prompt,
         images: shownImages,
         model: modelId,
+        enhancedPrompt: displayEnhanced ?? undefined,
       };
       setMessages((prev) => [
         ...prev,
@@ -705,18 +720,20 @@ export default function App() {
             mode,
             chat_id: chatId,
             flux_model: fluxModel || null,
-            prompt,
+            prompt: sendPrompt,
+            // Only set when the two diverge, so a reloaded turn shows what the
+            // user actually saw live rather than a rewrite they never typed.
+            display_prompt: sendPrompt !== prompt ? prompt : null,
             init_image_hash: initHash,
             ref_image_hashes: refHashes,
             steps: gen.steps,
             guidance: gen.guidance,
             strength: gen.strength,
             // The static template is a fallback for an un-enhanced create prompt.
-            // Wrapping it around a prompt the VLM already rewrote — by hand
-            // (`promptEnhanced`) or by the settings-level auto-enhancer
-            // (`autoEnhanced`) — would bury the rewrite's own framing inside a
-            // second, blunter one.
-            enhance: gen.enhance && !promptEnhanced && !autoEnhanced,
+            // Wrapping it around a prompt the settings-level auto-enhancer already
+            // rewrote would bury the rewrite's own framing inside a second,
+            // blunter one.
+            enhance: enhanceTemplate && sendPrompt === prompt,
             width: gen.width,
             height: gen.height,
             seed: gen.seed ? parseInt(gen.seed, 10) : null,
@@ -820,7 +837,7 @@ export default function App() {
     },
     [
       gen,
-      promptEnhanced,
+      enhanceTemplate,
       fluxAvailable,
       fluxModels,
       model,
@@ -879,61 +896,23 @@ export default function App() {
   const effectiveEnhanceModel =
     enhancerModel || (models.vision.includes(model) ? model : models.vision[0] || "");
 
-  async function enhanceComposerPrompt() {
-    const trimmed = composerText.trim();
-    if (!trimmed || enhancing) return;
-    const attached = composerImages.length ? composerImages : pinnedImages;
-    // The rewriter is briefed on the same mode, and shown the same images, that
-    // the generate will actually run with — both derived by the shared helpers, so
-    // an edit can't be briefed as a create.
-    const seen = imagesFor(genOp, attached);
-    const mode = modeFor(genOp, seen);
-    setEnhancing(true);
-    setError(null);
-    try {
-      const { prompt } = await enhancePrompt({
-        prompt: trimmed,
-        mode,
-        model: effectiveEnhanceModel,
-        // No vision model → the backend skips straight to its template.
-        image_hashes: effectiveEnhanceModel ? await ensureHashes(seen) : [],
-        ollama_url: ollamaUrl,
-      });
-      if (prompt && prompt !== trimmed) {
-        // Only the first rewrite captures the undo point. Enhancing twice would
-        // otherwise record the first rewrite as "the original", and Undo would
-        // restore text the user never wrote — losing their prompt for good.
-        setOriginalPrompt((prev) => (prev === null ? trimmed : prev));
-        setComposerText(prompt);
-        setPromptEnhanced(true);
-      }
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setEnhancing(false);
-    }
-  }
-
-  function undoEnhance() {
-    if (originalPrompt === null) return;
-    setComposerText(originalPrompt);
-    setOriginalPrompt(null);
-    setPromptEnhanced(false);
-  }
-
   /** Settings-level auto-enhance, run right before a generation goes out.
-   *  Off: no-op. On: rewrites silently — the caller uses the returned prompt but
-   *  the composer text and Undo state are untouched. Verbose: rewrites and shows
-   *  the result in the composer, exactly like the manual button, so Undo works.
-   *  Fails soft, same contract as the manual button and `/api/flux/enhance`
-   *  itself: an unreachable Ollama just means the typed prompt goes out as-is. */
+   *  Off: no-op. On/Verbose: rewrites with the picked vision model, reading
+   *  whatever images the generation itself will condition on — `sendPrompt` is
+   *  what actually goes to the backend either way. `displayEnhanced` is that
+   *  same rewrite, but only in Verbose mode: the caller attaches it to the chat
+   *  message so it renders underneath the user's own typed prompt, right in the
+   *  chat window. On keeps the rewrite invisible — `displayEnhanced` is null.
+   *  Fails soft: an unreachable Ollama, or no vision model picked/installed,
+   *  just means the typed prompt goes out as-is (`/api/flux/enhance` has the
+   *  same fallback contract). */
   async function maybeAutoEnhance(
     prompt: string,
     op: GenOp,
     images: string[]
-  ): Promise<{ prompt: string; wasEnhanced: boolean }> {
-    if (enhancerMode === "off" || !effectiveEnhanceModel || promptEnhanced) {
-      return { prompt, wasEnhanced: false };
+  ): Promise<{ sendPrompt: string; displayEnhanced: string | null }> {
+    if (enhancerMode === "off" || !effectiveEnhanceModel) {
+      return { sendPrompt: prompt, displayEnhanced: null };
     }
     const seen = imagesFor(op, images);
     const mode = modeFor(op, seen);
@@ -946,23 +925,21 @@ export default function App() {
         ollama_url: ollamaUrl,
       });
       if (rewritten && rewritten !== prompt) {
-        if (enhancerMode === "verbose") {
-          setOriginalPrompt((prev) => (prev === null ? prompt : prev));
-          setComposerText(rewritten);
-          setPromptEnhanced(true);
-        }
-        return { prompt: rewritten, wasEnhanced: true };
+        return {
+          sendPrompt: rewritten,
+          displayEnhanced: enhancerMode === "verbose" ? rewritten : null,
+        };
       }
     } catch {
       // Swallow — the typed prompt goes out unchanged below.
     }
-    return { prompt, wasEnhanced: false };
+    return { sendPrompt: prompt, displayEnhanced: null };
   }
 
   async function submitComposer() {
     const trimmed = composerText.trim();
     if (genMode) {
-      if (!trimmed) return; // a prompt is required to generate
+      if (!trimmed || enhancing) return; // a prompt is required to generate
       // Source images come from the message attachments, else the pinned panel.
       const attached = composerImages.length ? composerImages : pinnedImages;
       let op: GenOp;
@@ -998,21 +975,19 @@ export default function App() {
         op = "create";
         imgs = imagesFor("create", attached);
       }
-      // Settings-level auto-enhance (if on) runs — and, in verbose mode, shows
-      // its rewrite in the composer — before the box is cleared below, so
-      // there's no gap where the rewrite could flash into an already-cleared box.
-      const { prompt, wasEnhanced } = await maybeAutoEnhance(trimmed, op, imgs);
-      generateImage(prompt, op, imgs, wasEnhanced);
+      // Settings-level auto-enhance (if on) runs before the box is cleared
+      // below. Verbose's rewrite rides along to `generateImage`, which attaches
+      // it to the chat message it's about to create.
+      setEnhancing(true);
+      const { sendPrompt, displayEnhanced } = await maybeAutoEnhance(trimmed, op, imgs);
+      setEnhancing(false);
+      generateImage(trimmed, op, imgs, sendPrompt, displayEnhanced);
     } else {
       if (!trimmed && composerImages.length === 0) return;
       send(trimmed, composerImages);
     }
     setComposerText("");
     setComposerImages([]);
-    // The prompt is gone, so its rewrite history goes with it — the next prompt is
-    // un-enhanced and the static template is armed again.
-    setOriginalPrompt(null);
-    setPromptEnhanced(false);
   }
 
   return (
@@ -1033,6 +1008,8 @@ export default function App() {
         setEnhancerModel={setEnhancerModel}
         enhancerMode={enhancerMode}
         setEnhancerMode={setEnhancerMode}
+        enhanceTemplate={enhanceTemplate}
+        setEnhanceTemplate={setEnhanceTemplate}
       />
       <main className="main">
         <header className="topbar">
@@ -1094,11 +1071,7 @@ export default function App() {
             fluxModels={fluxModels}
             gen={gen}
             setGen={setGen}
-            onEnhance={enhanceComposerPrompt}
-            onUndoEnhance={undoEnhance}
             enhancing={enhancing}
-            canUndoEnhance={originalPrompt !== null}
-            enhanceModel={effectiveEnhanceModel}
             pinnedCount={pinnedImages.length}
             pinnedInit={pinnedImages[0] ?? null}
           />

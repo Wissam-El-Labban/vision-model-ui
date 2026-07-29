@@ -36,15 +36,11 @@ interface Props {
   fluxModels: FluxModel[];
   gen: GenSettings;
   setGen: (v: GenSettings) => void;
-  /** Rewrite the prompt with a local vision model that can see the attached
-   *  images. Replaces the composer text in place — what's shown is what's sent. */
-  onEnhance: () => void;
-  /** Restore the pre-enhance prompt. `canUndoEnhance` gates the button. */
-  onUndoEnhance: () => void;
+  /** True while the settings-level auto-enhancer (sidebar) is rewriting the
+   *  prompt for this submit — guards against a double-send during that gap.
+   *  Verbose mode's rewrite itself isn't shown here: it's attached to the chat
+   *  message it produced and rendered underneath it, not in the composer. */
   enhancing: boolean;
-  canUndoEnhance: boolean;
-  /** "" when no vision model is installed — the rewrite falls back to a template. */
-  enhanceModel: string;
   /** How many images are pinned in the panel (compose reference count). */
   pinnedCount: number;
   /** First pinned-panel image, used as the img2img source when nothing is
@@ -78,11 +74,7 @@ export default function Composer({
   fluxModels,
   gen,
   setGen,
-  onEnhance,
-  onUndoEnhance,
   enhancing,
-  canUndoEnhance,
-  enhanceModel,
   pinnedCount,
   pinnedInit,
 }: Props) {
@@ -460,47 +452,6 @@ export default function Composer({
                       onChange={(e) => patchGen({ seed: e.target.value.replace(/[^0-9]/g, "") })} />
                   </label>
                 </div>
-                {/* The static template only fits a create prompt — it describes a
-                    photograph, which is the wrong shape for an edit instruction. The
-                    ✨ rewrite below works in every mode, so edit/combine get their
-                    prompt help from there. */}
-                {genOp === "create" && (
-                  <label className="enhance-row">
-                    <input type="checkbox" checked={gen.enhance}
-                      onChange={(e) => patchGen({ enhance: e.target.checked })} />
-                    Enhance photoreal prompt (adds camera + lighting detail)
-                  </label>
-                )}
-                <div className="enhance-row">
-                  <button
-                    type="button"
-                    className="btn small"
-                    disabled={enhancing || !text.trim()}
-                    onClick={onEnhance}
-                    title={
-                      enhanceModel
-                        ? `Rewrite the prompt with ${enhanceModel}, which can see the attached images`
-                        : "No vision model installed — falls back to a text template"
-                    }
-                  >
-                    {enhancing ? "✨ Rewriting…" : "✨ Improve prompt"}
-                  </button>
-                  {canUndoEnhance && (
-                    <button
-                      type="button"
-                      className="btn small ghost"
-                      onClick={onUndoEnhance}
-                      title="Restore the prompt you wrote"
-                    >
-                      ↩ Undo
-                    </button>
-                  )}
-                </div>
-                <p className="hint muted">
-                  {enhanceModel
-                    ? "✨ rewrites your prompt in place, reading the attached images. Edit the result before generating."
-                    : "✨ uses a text template — install a vision model in Ollama for a rewrite that reads your images."}
-                </p>
                 <p className="hint muted">
                   {isAnimate
                     ? "Attach one image — it becomes the first frame. Describe the motion, not the scene; the frame already fixes that. Takes a few minutes."
@@ -565,12 +516,14 @@ export default function Composer({
           <button
             className={`btn send ${genMode ? "gen" : ""}`}
             onClick={onSubmit}
-            title={genMode ? "Generate image" : "Send"}
+            title={genMode && enhancing ? "Enhancing prompt…" : genMode ? "Generate image" : "Send"}
             disabled={
-              genMode ? !text.trim() : disabled || (!text.trim() && images.length === 0)
+              genMode
+                ? !text.trim() || enhancing
+                : disabled || (!text.trim() && images.length === 0)
             }
           >
-            {genMode ? "🎨" : "➤"}
+            {genMode ? (enhancing ? "✨" : "🎨") : "➤"}
           </button>
         )}
 

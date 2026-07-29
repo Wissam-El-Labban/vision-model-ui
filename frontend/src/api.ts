@@ -529,6 +529,10 @@ export interface GenerateParams {
   chat_id?: string | null;
   flux_model?: string | null; // which FLUX UNet ("" / null = that mode's default)
   prompt: string;
+  // What the user actually typed, when `prompt` is an auto-enhancer's rewrite of
+  // it — recorded to chat history in its place so a reload shows what was shown
+  // live. Omit when they're the same.
+  display_prompt?: string | null;
   init_image_hash?: string | null; // img2img / edit: the source image
   ref_image_hashes?: string[]; // compose: reference images to fuse
   steps?: number | null;

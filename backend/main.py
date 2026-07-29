@@ -111,6 +111,12 @@ class GenerateRequest(BaseModel):
     # (see flux_client.WAN_NEGATIVE), so it stays out of the API.
     mode: str = "txt2img"  # txt2img | img2img | edit | compose | animate
     prompt: str = ""
+    # What actually generated the image — may be a settings-level auto-enhancer's
+    # rewrite of what the user typed. `display_prompt`, if set, is recorded to chat
+    # history instead, so a reloaded turn shows what the user saw live rather than
+    # a rewrite they never typed and (in "on" mode) never saw at all. None means
+    # they're the same (the pre-enhancer behavior).
+    display_prompt: str | None = None
     init_image_hash: str | None = None  # img2img / edit / animate: the source image
     ref_image_hashes: list[str] = []  # compose: reference images to fuse
     flux_model: str | None = None  # which UNet (None = that mode's default)
@@ -582,7 +588,7 @@ def generate(req: GenerateRequest):
                 # recording only the init left a reloaded turn showing fewer images
                 # than the generate actually used. compose sends no init, so the same
                 # expression covers every mode.
-                record("user", req.prompt, label,
+                record("user", req.display_prompt or req.prompt, label,
                        [h for h in (req.init_image_hash,) if h]
                        + list(req.ref_image_hashes))
 

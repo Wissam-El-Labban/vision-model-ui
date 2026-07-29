@@ -208,6 +208,11 @@ export default function Chat({
                     streaming &&
                     i === messages.length - 1 && <span className="cursor">▋</span>
                   )}
+                  {m.role === "user" && m.enhancedPrompt && (
+                    <div className="content enhanced-prompt muted small">
+                      ✨ Sent as: {m.enhancedPrompt}
+                    </div>
+                  )}
                 </div>
               </div>
             </Fragment>

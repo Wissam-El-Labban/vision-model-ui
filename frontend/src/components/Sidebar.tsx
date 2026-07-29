@@ -23,6 +23,8 @@ interface Props {
   setEnhancerModel: (v: string) => void;
   enhancerMode: EnhancerMode;
   setEnhancerMode: (v: EnhancerMode) => void;
+  enhanceTemplate: boolean;
+  setEnhanceTemplate: (v: boolean) => void;
 }
 
 export default function Sidebar(props: Props) {
@@ -42,6 +44,8 @@ export default function Sidebar(props: Props) {
     setEnhancerModel,
     enhancerMode,
     setEnhancerMode,
+    enhanceTemplate,
+    setEnhanceTemplate,
   } = props;
   const [urlDraft, setUrlDraft] = useState(ollamaUrl);
 
@@ -84,6 +88,8 @@ export default function Sidebar(props: Props) {
         setEnhancerModel={setEnhancerModel}
         enhancerMode={enhancerMode}
         setEnhancerMode={setEnhancerMode}
+        enhanceTemplate={enhanceTemplate}
+        setEnhanceTemplate={setEnhanceTemplate}
       />
 
       <ImageModels models={fluxModels} onChanged={refreshFlux} />
