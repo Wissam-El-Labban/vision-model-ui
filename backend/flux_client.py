@@ -80,10 +80,14 @@ DEFAULT_STEPS = 20
 # At 3.5 the model clings to the reference image and silently ignores the
 # instruction, returning the source unchanged (measured on a two-reference edit).
 #
-# FLUX.2 uses one value for both jobs (ComfyUI's own template ships 4.0).
+# FLUX.2 [dev] uses one value for both jobs (ComfyUI's own template ships 4.0).
+# [klein] is a distilled 9B variant sharing the family — like Kontext next to
+# dev, a distilled model overshoots at the full model's guidance, so it gets
+# its own lower value rather than inheriting FLUX2_GUIDANCE.
 KONTEXT_GUIDANCE = 2.5
 CREATE_GUIDANCE = 3.5
 FLUX2_GUIDANCE = 4.0
+KLEIN_GUIDANCE = 2.5
 GUIDANCE_MIN, GUIDANCE_MAX = 0.5, 10.0
 
 # How the model lays out multiple reference images. See `_conditioning`.
@@ -260,6 +264,9 @@ def _default_guidance(unet, role: str) -> float:
     if fam == cat.FAMILY_WAN:
         return WAN_CFG
     if fam == cat.FAMILY_FLUX2:
+        bundle = cat.bundle_of_unet(unet)
+        if bundle and bundle["id"] == "flux2-klein-9b":
+            return KLEIN_GUIDANCE
         return FLUX2_GUIDANCE
     return KONTEXT_GUIDANCE if role == ROLE_EDIT else CREATE_GUIDANCE
 

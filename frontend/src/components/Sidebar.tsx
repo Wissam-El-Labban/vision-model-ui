@@ -1,9 +1,10 @@
 import { useState } from "react";
 import ImageModels from "./ImageModels";
 import ModelManager from "./ModelManager";
+import PromptEnhancer from "./PromptEnhancer";
 import UpdateBanner from "./UpdateBanner";
 import ChatList from "./ChatList";
-import type { ChatSummary } from "../types";
+import type { ChatSummary, EnhancerMode } from "../types";
 import type { FluxModel } from "../api";
 
 interface Props {
@@ -18,6 +19,10 @@ interface Props {
   onNewChat: () => void;
   onOpenChat: (id: string) => void;
   onDeleteChat: (id: string) => void;
+  enhancerModel: string;
+  setEnhancerModel: (v: string) => void;
+  enhancerMode: EnhancerMode;
+  setEnhancerMode: (v: EnhancerMode) => void;
 }
 
 export default function Sidebar(props: Props) {
@@ -33,6 +38,10 @@ export default function Sidebar(props: Props) {
     onNewChat,
     onOpenChat,
     onDeleteChat,
+    enhancerModel,
+    setEnhancerModel,
+    enhancerMode,
+    setEnhancerMode,
   } = props;
   const [urlDraft, setUrlDraft] = useState(ollamaUrl);
 
@@ -67,6 +76,14 @@ export default function Sidebar(props: Props) {
         ollamaUrl={ollamaUrl}
         allModels={models.all}
         onChanged={refreshModels}
+      />
+
+      <PromptEnhancer
+        visionModels={models.vision}
+        enhancerModel={enhancerModel}
+        setEnhancerModel={setEnhancerModel}
+        enhancerMode={enhancerMode}
+        setEnhancerMode={setEnhancerMode}
       />
 
       <ImageModels models={fluxModels} onChanged={refreshFlux} />

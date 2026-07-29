@@ -31,6 +31,7 @@ import type {
   GenProgress,
   GenSettings,
   GenOp,
+  EnhancerMode,
 } from "./types";
 
 const DEFAULT_URL = "http://localhost:11434";
@@ -52,6 +53,16 @@ export default function App() {
   const [model, setModel] = useState(() => localStorage.getItem("model") || "");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [systemImage, setSystemImage] = useState<string | null>(null);
+
+  // Prompt enhancer settings (sidebar). `enhancerModel` "" = auto-detect, same
+  // fallback the manual ✨ button always used. `enhancerMode` gates whether that
+  // rewrite also runs automatically before a generation, and whether it's shown.
+  const [enhancerModel, setEnhancerModel] = useState(
+    () => localStorage.getItem("enhancerModel") || ""
+  );
+  const [enhancerMode, setEnhancerMode] = useState<EnhancerMode>(
+    () => (localStorage.getItem("enhancerMode") as EnhancerMode) || "off"
+  );
 
   // Image generation. `genMode` flips the composer from analyze to generate;
   // `fluxAvailable` reports whether the engine *and* a model are installed;
@@ -208,6 +219,8 @@ export default function App() {
   // Persist settings.
   useEffect(() => localStorage.setItem("ollamaUrl", ollamaUrl), [ollamaUrl]);
   useEffect(() => localStorage.setItem("model", model), [model]);
+  useEffect(() => localStorage.setItem("enhancerModel", enhancerModel), [enhancerModel]);
+  useEffect(() => localStorage.setItem("enhancerMode", enhancerMode), [enhancerMode]);
 
   const refreshModels = useCallback(async () => {
     try {
@@ -594,7 +607,7 @@ export default function App() {
   );
 
   const generateImage = useCallback(
-    async (prompt: string, op: GenOp, images: string[]) => {
+    async (prompt: string, op: GenOp, images: string[], autoEnhanced = false) => {
       // Which transformer this run will use. Resolved once, here: it names the
       // placeholder turn, and it's what goes on the wire — so what the composer
       // shows, what the chat says, and what the backend loads are all one value.
@@ -699,9 +712,11 @@ export default function App() {
             guidance: gen.guidance,
             strength: gen.strength,
             // The static template is a fallback for an un-enhanced create prompt.
-            // Wrapping it around a prompt the VLM already rewrote would bury the
-            // rewrite's own framing inside a second, blunter one.
-            enhance: gen.enhance && !promptEnhanced,
+            // Wrapping it around a prompt the VLM already rewrote — by hand
+            // (`promptEnhanced`) or by the settings-level auto-enhancer
+            // (`autoEnhanced`) — would bury the rewrite's own framing inside a
+            // second, blunter one.
+            enhance: gen.enhance && !promptEnhanced && !autoEnhanced,
             width: gen.width,
             height: gen.height,
             seed: gen.seed ? parseInt(gen.seed, 10) : null,
@@ -858,9 +873,11 @@ export default function App() {
     const rotated = await rotateDataUrl(composerImages[i], 90);
     setComposerImages((prev) => prev.map((img, idx) => (idx === i ? rotated : img)));
   }
-  /** The Ollama model that will do the rewriting: the one in use if it can see,
-   *  else any vision model. "" means none is installed — skip the call entirely. */
-  const enhanceModel = models.vision.includes(model) ? model : models.vision[0] || "";
+  /** The Ollama model that will do the rewriting: the Settings pick if the user
+   *  made one, else the one in use if it can see, else any vision model. ""
+   *  means none is installed/picked — skip the call entirely. */
+  const effectiveEnhanceModel =
+    enhancerModel || (models.vision.includes(model) ? model : models.vision[0] || "");
 
   async function enhanceComposerPrompt() {
     const trimmed = composerText.trim();
@@ -877,9 +894,9 @@ export default function App() {
       const { prompt } = await enhancePrompt({
         prompt: trimmed,
         mode,
-        model: enhanceModel,
+        model: effectiveEnhanceModel,
         // No vision model → the backend skips straight to its template.
-        image_hashes: enhanceModel ? await ensureHashes(seen) : [],
+        image_hashes: effectiveEnhanceModel ? await ensureHashes(seen) : [],
         ollama_url: ollamaUrl,
       });
       if (prompt && prompt !== trimmed) {
@@ -904,12 +921,52 @@ export default function App() {
     setPromptEnhanced(false);
   }
 
-  function submitComposer() {
+  /** Settings-level auto-enhance, run right before a generation goes out.
+   *  Off: no-op. On: rewrites silently — the caller uses the returned prompt but
+   *  the composer text and Undo state are untouched. Verbose: rewrites and shows
+   *  the result in the composer, exactly like the manual button, so Undo works.
+   *  Fails soft, same contract as the manual button and `/api/flux/enhance`
+   *  itself: an unreachable Ollama just means the typed prompt goes out as-is. */
+  async function maybeAutoEnhance(
+    prompt: string,
+    op: GenOp,
+    images: string[]
+  ): Promise<{ prompt: string; wasEnhanced: boolean }> {
+    if (enhancerMode === "off" || !effectiveEnhanceModel || promptEnhanced) {
+      return { prompt, wasEnhanced: false };
+    }
+    const seen = imagesFor(op, images);
+    const mode = modeFor(op, seen);
+    try {
+      const { prompt: rewritten } = await enhancePrompt({
+        prompt,
+        mode,
+        model: effectiveEnhanceModel,
+        image_hashes: await ensureHashes(seen),
+        ollama_url: ollamaUrl,
+      });
+      if (rewritten && rewritten !== prompt) {
+        if (enhancerMode === "verbose") {
+          setOriginalPrompt((prev) => (prev === null ? prompt : prev));
+          setComposerText(rewritten);
+          setPromptEnhanced(true);
+        }
+        return { prompt: rewritten, wasEnhanced: true };
+      }
+    } catch {
+      // Swallow — the typed prompt goes out unchanged below.
+    }
+    return { prompt, wasEnhanced: false };
+  }
+
+  async function submitComposer() {
     const trimmed = composerText.trim();
     if (genMode) {
       if (!trimmed) return; // a prompt is required to generate
       // Source images come from the message attachments, else the pinned panel.
       const attached = composerImages.length ? composerImages : pinnedImages;
+      let op: GenOp;
+      let imgs: string[];
       if (genOp === "animate") {
         // The one image becomes the video's first frame. `imagesFor` caps it at one:
         // Wan I2V has a single start frame, so a second would be dropped in silence.
@@ -917,14 +974,16 @@ export default function App() {
           setError("Animate needs a source image to bring to life (attach or pin one).");
           return;
         }
-        generateImage(trimmed, "animate", imagesFor("animate", attached));
+        op = "animate";
+        imgs = imagesFor("animate", attached);
       } else if (genOp === "compose") {
         // Blend every available reference image (needs at least one).
         if (attached.length === 0) {
           setError("Combine needs at least one reference image (attach or pin some).");
           return;
         }
-        generateImage(trimmed, "compose", attached);
+        op = "compose";
+        imgs = attached;
       } else if (genOp === "edit") {
         // The first image is the one being edited; any others are references the
         // instruction can pull subjects from ("add the man from the second photo").
@@ -932,11 +991,18 @@ export default function App() {
           setError("Edit needs a source image to change (attach or pin one).");
           return;
         }
-        generateImage(trimmed, "edit", attached);
+        op = "edit";
+        imgs = attached;
       } else {
         // create: txt2img, or img2img from a single source image.
-        generateImage(trimmed, "create", imagesFor("create", attached));
+        op = "create";
+        imgs = imagesFor("create", attached);
       }
+      // Settings-level auto-enhance (if on) runs — and, in verbose mode, shows
+      // its rewrite in the composer — before the box is cleared below, so
+      // there's no gap where the rewrite could flash into an already-cleared box.
+      const { prompt, wasEnhanced } = await maybeAutoEnhance(trimmed, op, imgs);
+      generateImage(prompt, op, imgs, wasEnhanced);
     } else {
       if (!trimmed && composerImages.length === 0) return;
       send(trimmed, composerImages);
@@ -963,6 +1029,10 @@ export default function App() {
         onNewChat={newChat}
         onOpenChat={openChat}
         onDeleteChat={removeChat}
+        enhancerModel={enhancerModel}
+        setEnhancerModel={setEnhancerModel}
+        enhancerMode={enhancerMode}
+        setEnhancerMode={setEnhancerMode}
       />
       <main className="main">
         <header className="topbar">
@@ -1028,7 +1098,7 @@ export default function App() {
             onUndoEnhance={undoEnhance}
             enhancing={enhancing}
             canUndoEnhance={originalPrompt !== null}
-            enhanceModel={enhanceModel}
+            enhanceModel={effectiveEnhanceModel}
             pinnedCount={pinnedImages.length}
             pinnedInit={pinnedImages[0] ?? null}
           />

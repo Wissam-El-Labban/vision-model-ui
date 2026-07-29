@@ -21,6 +21,13 @@ export interface ChatMessage {
 /** Which generation workflow the composer is in. */
 export type GenOp = "create" | "edit" | "compose" | "animate";
 
+/** How the settings-level prompt enhancer runs before a generation.
+ *  "off": only the manual ✨ Improve prompt button rewrites, on demand.
+ *  "on": rewrites automatically before every generation, silently.
+ *  "verbose": rewrites automatically and shows the result in the composer
+ *  first, same as the manual button, so it's visible/editable and Undo works. */
+export type EnhancerMode = "off" | "on" | "verbose";
+
 /** Progress of the in-flight turn, for the bar under the chat.
  *
  * `frac` is the whole job, not the sampler: the backend prices every node in the
