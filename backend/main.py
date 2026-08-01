@@ -464,6 +464,42 @@ def flux_lora_delete(name: str):
 
 
 # --------------------------------------------------------------------------- #
+# Generation presets — a named snapshot of steps/guidance/size/model and that
+# model's attached LoRAs, so switching between two setups doesn't mean re-tuning
+# every slider and re-attaching every adapter by hand. No validation against what's
+# actually installed happens here: a stale reference (a deleted model or LoRA) is
+# the frontend's problem to filter around when applying, not a reason to refuse
+# saving or listing a preset.
+# --------------------------------------------------------------------------- #
+class PresetCreate(BaseModel):
+    name: str
+    gen_op: str
+    flux_model: str
+    steps: int
+    guidance: float
+    strength: float
+    width: int
+    height: int
+    loras: list[LoraPick] = []
+
+
+@app.get("/api/presets")
+def list_presets():
+    return {"presets": settings.presets()}
+
+
+@app.post("/api/presets")
+def create_preset(req: PresetCreate):
+    return settings.save_preset(req.dict())
+
+
+@app.delete("/api/presets/{preset_id}")
+def remove_preset(preset_id: str):
+    settings.delete_preset(preset_id)
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
 # HuggingFace token — needed only for gated repos. Stored server-side, 0600, and
 # never sent back to the browser: the UI only ever learns whether one is set.
 # --------------------------------------------------------------------------- #
