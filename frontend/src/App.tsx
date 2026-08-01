@@ -260,6 +260,31 @@ export default function App() {
     }
   }
 
+  /** The permanent "Default" entry in the presets list — not stored, not
+   *  deletable, always available. Unlike a saved preset it's computed live off
+   *  `stepsFor`/`guidanceFor`/`resolveFlux` with `""` (the same "no explicit pick"
+   *  those already use everywhere else), so it always means whichever model
+   *  actually resolves first for this mode rather than a name frozen at save time
+   *  — and unlike a saved preset, it also resets the seed and clears LoRAs, since
+   *  "default" means the clean state a fresh install starts in. */
+  async function applyDefault() {
+    setGen((g) => ({
+      ...g,
+      fluxModel: "",
+      steps: stepsFor(genOp, fluxModels, ""),
+      guidance: guidanceFor(genOp, fluxModels, ""),
+      seed: "",
+    }));
+    const resolved = resolveFlux("", fluxModels, roleFor(genOp));
+    if (!resolved) return;
+    try {
+      await setLoraPicks(resolved, []);
+      refreshFlux();
+    } catch {
+      /* LoRA clear didn't take — the rest of the reset already applied */
+    }
+  }
+
   async function saveCurrentAsPreset(name: string) {
     const role = roleFor(genOp);
     const resolved = resolveFlux(gen.fluxModel, fluxModels, role);
@@ -1166,6 +1191,7 @@ export default function App() {
             setGen={setGen}
             presets={presets}
             onApplyPreset={applyPreset}
+            onApplyDefault={applyDefault}
             onSavePreset={saveCurrentAsPreset}
             onDeletePreset={removePresetById}
             enhancing={enhancing}

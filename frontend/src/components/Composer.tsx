@@ -40,6 +40,7 @@ interface Props {
   /** Saved generation-setting bundles, shown at the top of the ⚙️ popover. */
   presets: GenPreset[];
   onApplyPreset: (p: GenPreset) => void;
+  onApplyDefault: () => void;
   onSavePreset: (name: string) => void;
   onDeletePreset: (id: string) => void;
   /** True while the settings-level auto-enhancer (sidebar) is rewriting the
@@ -82,6 +83,7 @@ export default function Composer({
   setGen,
   presets,
   onApplyPreset,
+  onApplyDefault,
   onSavePreset,
   onDeletePreset,
   enhancing,
@@ -406,6 +408,7 @@ export default function Composer({
                   <GenPresets
                     presets={presets}
                     onApply={onApplyPreset}
+                    onApplyDefault={onApplyDefault}
                     onSave={onSavePreset}
                     onDelete={onDeletePreset}
                     disabled={streaming}

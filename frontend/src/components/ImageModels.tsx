@@ -273,29 +273,35 @@ export default function ImageModels({ models, onChanged }: Props) {
     }
   }
 
+  // The currently-attached picks for a model come straight off the `models` prop
+  // (`FluxModel.loras`), not a separately-fetched copy — that prop is App's single
+  // source of truth for a model's LoRAs, kept fresh by *anything* that changes them
+  // (this panel, or a preset applied elsewhere in the composer). A second, locally
+  // fetched copy would only stay in sync with mutations made from this panel itself.
+  function currentPicks(model: string): { name: string; strength: number }[] {
+    return models.find((m) => m.name === model)?.loras ?? [];
+  }
+
   /** Attaches as soon as it's picked — same instant-select convention the text
    *  encoder dropdown above already uses. The dropdown always resets to its
    *  placeholder afterward because the just-attached name drops out of `available`
    *  on the next render, so it can't remain selected. */
   function attachLora(model: string, name: string) {
     if (!name) return;
-    const current = loras?.selected[model] ?? [];
-    saveModelLoras(model, [...current, { name, strength: 1.0 }]);
+    saveModelLoras(model, [...currentPicks(model), { name, strength: 1.0 }]);
   }
 
   function reweightLora(model: string, name: string, strength: number) {
-    const current = loras?.selected[model] ?? [];
     saveModelLoras(
       model,
-      current.map((p) => (p.name === name ? { ...p, strength } : p))
+      currentPicks(model).map((p) => (p.name === name ? { ...p, strength } : p))
     );
   }
 
   function detachLora(model: string, name: string) {
-    const current = loras?.selected[model] ?? [];
     saveModelLoras(
       model,
-      current.filter((p) => p.name !== name)
+      currentPicks(model).filter((p) => p.name !== name)
     );
   }
 
@@ -311,10 +317,9 @@ export default function ImageModels({ models, onChanged }: Props) {
 
   const extras = models.filter((m) => m.bundle === null);
   // One row per *transformer*, not per bundle — FLUX.1 installs dev and Kontext
-  // together and each takes its own adapter. Which ones qualify is the backend's call
-  // (Wan's graph can't apply one), so read it off the response rather than
-  // re-deriving the rule here.
-  const loraModels = models.filter((m) => loras?.selected && m.name in loras.selected);
+  // together and each takes its own adapter. Wan is excluded — its graph can't
+  // apply one — mirroring the backend's `_takes_lora` (flux_client.py).
+  const loraModels = models.filter((m) => m.family !== "wan");
   // Only FLUX.2 models take a swappable encoder; FLUX.1's is wired into its graph.
   const flux2 = (cat?.bundles ?? []).filter((b) => b.family === "flux2" && b.installed);
 
@@ -534,7 +539,7 @@ export default function ImageModels({ models, onChanged }: Props) {
                 <>
                   <label className="lbl">LoRA adapters</label>
                   {loraModels.map((m) => {
-                    const picks = loras?.selected[m.name] ?? [];
+                    const picks = m.loras;
                     const attached = new Set(picks.map((p) => p.name));
                     const available = (loras?.loras ?? []).filter((l) => !attached.has(l.name));
                     return (
