@@ -168,8 +168,8 @@ export interface FluxModel {
   /** The text encoder the graph will actually load — the backend's `encoder_for`,
    *  so this can't drift from what runs. FLUX.1 reports its pair as "a + b". */
   encoder: string;
-  /** The LoRA chained onto this transformer, or null when none is attached. */
-  lora: FluxLoraPick | null;
+  /** The LoRAs chained onto this transformer, in attach order. Empty when none. */
+  loras: FluxLoraPick[];
 }
 
 /** An installable model: its weights, text encoder and VAE, downloaded together. */
@@ -351,7 +351,7 @@ export interface FluxLora {
   size_mb: number; // patches, not checkpoints — MB, not GB
 }
 
-/** What one model is set to load. `null` is the "None" state, not an error. */
+/** One attached adapter and its weight. */
 export interface FluxLoraPick {
   name: string;
   strength: number;
@@ -359,9 +359,10 @@ export interface FluxLoraPick {
 
 export interface FluxLoras {
   loras: FluxLora[];
-  /** Transformer filename -> pick, or null for none. Keyed per transformer, not per
-   *  bundle: FLUX.1 ships dev and Kontext together and their adapters don't cross. */
-  selected: Record<string, FluxLoraPick | null>;
+  /** Transformer filename -> its attached picks, in attach order. An empty array
+   *  means none. Keyed per transformer, not per bundle: FLUX.1 ships dev and Kontext
+   *  together and their adapters don't cross. */
+  selected: Record<string, FluxLoraPick[]>;
 }
 
 export async function getLoras(): Promise<FluxLoras> {
@@ -400,20 +401,17 @@ export async function pullLora(
   if (failure) throw new Error(failure);
 }
 
-/** Attach a LoRA to one transformer. An empty name detaches it — the "None" option. */
-export async function selectLora(
-  model: string,
-  name: string,
-  strength = 1.0
-): Promise<void> {
+/** Replace the whole set of LoRAs attached to one transformer. An empty array
+ *  detaches everything — the "None" option. */
+export async function setLoraPicks(model: string, picks: FluxLoraPick[]): Promise<void> {
   const res = await fetch("/api/flux/loras/select", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, name, strength }),
+    body: JSON.stringify({ model, picks }),
   });
   if (!res.ok) {
     const detail = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(detail.detail ?? `select lora: ${res.status}`);
+    throw new Error(detail.detail ?? `select loras: ${res.status}`);
   }
 }
 

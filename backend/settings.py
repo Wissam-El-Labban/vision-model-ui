@@ -97,26 +97,32 @@ def set_text_encoder(bundle_id: str, name: str) -> None:
 
 
 def loras() -> dict:
-    """Per-transformer LoRA choice: {unet_filename: {"name": ..., "strength": ...}}.
+    """Per-transformer LoRA choices: {unet_filename: [{"name": ..., "strength": ...}, ...]}.
 
-    Unlike a text encoder, no model has a default LoRA — absent means "none", which is
-    the state the user starts in and can always return to.
+    Unlike a text encoder, no model has a default LoRA — an absent or empty list means
+    "none", which is the state the user starts in and can always return to. Several
+    adapters can be stacked on the same transformer at once.
 
     Keyed by the transformer file, not the bundle that shipped it. A LoRA is trained
     against one specific base, and one bundle can carry two: FLUX.1 pairs dev with
     Kontext, whose adapter ecosystems are entirely disjoint. Keying by bundle would
     chain a dev adapter onto Kontext whenever you edited.
     """
-    return _read().get("loras") or {}
+    raw = _read().get("loras") or {}
+    # Pre-multi-LoRA settings.json files store one {"name", "strength"} object per
+    # model rather than a list — normalize on read so an existing pick keeps working
+    # instead of vanishing the first time this runs after the upgrade.
+    return {model: [pick] if isinstance(pick, dict) else pick for model, pick in raw.items()}
 
 
-def set_lora(model: str, name: str, strength: float = 1.0) -> None:
-    """Attach a LoRA to one transformer. Empty name detaches it (the "None" option)."""
+def set_loras(model: str, picks: list[dict]) -> None:
+    """Replace the whole set of LoRAs attached to one transformer. An empty list
+    detaches everything (the "None" option)."""
     data = _read()
-    picks = data.get("loras") or {}
-    if name:
-        picks[model] = {"name": name, "strength": strength}
+    all_picks = data.get("loras") or {}
+    if picks:
+        all_picks[model] = picks
     else:
-        picks.pop(model, None)
-    data["loras"] = picks
+        all_picks.pop(model, None)
+    data["loras"] = all_picks
     _write(data)

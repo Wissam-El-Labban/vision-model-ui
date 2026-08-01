@@ -12,7 +12,7 @@ import {
   pullFluxModel,
   pullLora,
   pullTextEncoder,
-  selectLora,
+  setLoraPicks,
   selectTextEncoder,
   setHfToken,
 } from "../api";
@@ -260,17 +260,43 @@ export default function ImageModels({ models, onChanged }: Props) {
     }
   }
 
-  /** Attach, re-weight, or (with an empty name) detach. Strength travels with every
-   *  call because the backend stores the pair — sending one without the other would
-   *  reset the half that wasn't touched. */
-  async function pickLora(model: string, name: string, strength: number) {
+  /** Every mutation to a model's LoRA list sends the whole list — the backend
+   *  replaces rather than merges, so a partial update would drop whatever wasn't
+   *  named in this call. */
+  async function saveModelLoras(model: string, picks: { name: string; strength: number }[]) {
     try {
-      await selectLora(model, name, strength);
+      await setLoraPicks(model, picks);
       await refresh();
-      onChanged(); // the app's model list carries the pick, for the header pill
+      onChanged(); // the app's model list carries the picks, for the header pill
     } catch (e) {
       setLoraStatus(`✗ ${(e as Error).message}`);
     }
+  }
+
+  /** Attaches as soon as it's picked — same instant-select convention the text
+   *  encoder dropdown above already uses. The dropdown always resets to its
+   *  placeholder afterward because the just-attached name drops out of `available`
+   *  on the next render, so it can't remain selected. */
+  function attachLora(model: string, name: string) {
+    if (!name) return;
+    const current = loras?.selected[model] ?? [];
+    saveModelLoras(model, [...current, { name, strength: 1.0 }]);
+  }
+
+  function reweightLora(model: string, name: string, strength: number) {
+    const current = loras?.selected[model] ?? [];
+    saveModelLoras(
+      model,
+      current.map((p) => (p.name === name ? { ...p, strength } : p))
+    );
+  }
+
+  function detachLora(model: string, name: string) {
+    const current = loras?.selected[model] ?? [];
+    saveModelLoras(
+      model,
+      current.filter((p) => p.name !== name)
+    );
   }
 
   async function removeLora(name: string) {
@@ -508,55 +534,73 @@ export default function ImageModels({ models, onChanged }: Props) {
                 <>
                   <label className="lbl">LoRA adapters</label>
                   {loraModels.map((m) => {
-                    const pick = loras?.selected[m.name] ?? null;
+                    const picks = loras?.selected[m.name] ?? [];
+                    const attached = new Set(picks.map((p) => p.name));
+                    const available = (loras?.loras ?? []).filter((l) => !attached.has(l.name));
                     return (
                       <div key={m.name} className="lora-row">
-                        <div className="row">
-                          {/* The role leads and never truncates: FLUX.1's two rows
-                              come from one bundle, so they share a label that the
-                              40%-width column clips to "FLUX.1 dev + K…" — leaving
-                              the only distinguishing part off the end. */}
-                          <span
-                            className="muted small te-model lora-model"
-                            title={`${m.label} — ${m.name}`}
-                          >
-                            <span className="lora-role">{m.roles.join("/")}</span>
-                            <span className="lora-label">{m.label}</span>
-                          </span>
-                          <select
-                            value={pick?.name ?? ""}
-                            onChange={(e) =>
-                              pickLora(m.name, e.target.value, pick?.strength ?? 1.0)
-                            }
-                            disabled={busy !== null}
-                          >
-                            <option value="">None</option>
-                            {(loras?.loras ?? []).map((l) => (
-                              <option key={l.name} value={l.name}>
-                                {l.name} ({l.size_mb} MB)
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        {/* Only meaningful once something is attached, and most
-                            adapters want less than full weight — 1.0 often overcooks
-                            the base model's own style away. */}
-                        {pick && (
-                          <div className="row lora-strength">
-                            <input
-                              type="range"
-                              min="0"
-                              max="1.5"
-                              step="0.05"
-                              value={pick.strength}
+                        {/* The role leads and never truncates: FLUX.1's two rows
+                            come from one bundle, so they share a label that the
+                            40%-width column clips to "FLUX.1 dev + K…" — leaving
+                            the only distinguishing part off the end. */}
+                        <span
+                          className="muted small te-model lora-model"
+                          title={`${m.label} — ${m.name}`}
+                        >
+                          <span className="lora-role">{m.roles.join("/")}</span>
+                          <span className="lora-label">{m.label}</span>
+                        </span>
+                        {/* One block per attached adapter — several can stack on the
+                            same transformer, each with its own independent weight. */}
+                        {picks.map((pick) => (
+                          <div key={pick.name} className="lora-pick">
+                            <div className="row">
+                              <span className="muted small lora-pick-name" title={pick.name}>
+                                {pick.name}
+                              </span>
+                              <button
+                                className="btn danger small"
+                                onClick={() => detachLora(m.name, pick.name)}
+                                disabled={busy !== null}
+                                title="Detach"
+                              >
+                                🗑
+                              </button>
+                            </div>
+                            {/* Most adapters want less than full weight — 1.0 often
+                                overcooks the base model's own style away. */}
+                            <div className="row lora-strength">
+                              <input
+                                type="range"
+                                min="0"
+                                max="1.5"
+                                step="0.05"
+                                value={pick.strength}
+                                disabled={busy !== null}
+                                onChange={(e) =>
+                                  reweightLora(m.name, pick.name, parseFloat(e.target.value))
+                                }
+                              />
+                              <span className="muted small lora-weight">
+                                {pick.strength.toFixed(2)}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                        {available.length > 0 && (
+                          <div className="row">
+                            <select
+                              value=""
+                              onChange={(e) => attachLora(m.name, e.target.value)}
                               disabled={busy !== null}
-                              onChange={(e) =>
-                                pickLora(m.name, pick.name, parseFloat(e.target.value))
-                              }
-                            />
-                            <span className="muted small lora-weight">
-                              {pick.strength.toFixed(2)}
-                            </span>
+                            >
+                              <option value="">+ Add a LoRA…</option>
+                              {available.map((l) => (
+                                <option key={l.name} value={l.name}>
+                                  {l.name} ({l.size_mb} MB)
+                                </option>
+                              ))}
+                            </select>
                           </div>
                         )}
                       </div>
@@ -564,7 +608,8 @@ export default function ImageModels({ models, onChanged }: Props) {
                   })}
                   <div className="muted small">
                     A LoRA is a small patch over the transformer — it changes what the
-                    model renders without replacing the checkpoint. Each row picks
+                    model renders without replacing the checkpoint. Several can stack
+                    on the same model at once, each at its own weight. Models pick
                     separately, because adapters are trained against one base: a
                     FLUX.2 [dev] LoRA won't bind to klein, and a FLUX.1 dev one won't
                     bind to Kontext. Start around 0.6-0.8.

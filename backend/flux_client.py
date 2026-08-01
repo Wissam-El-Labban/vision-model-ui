@@ -545,27 +545,33 @@ def _dual_clip_node(name1: str, name2: str, kind: str) -> dict:
 
 
 def _with_lora(unet: str, loaders: dict) -> dict:
-    """Chain the model's selected LoRA onto its transformer, if it has one.
+    """Chain the model's selected LoRAs onto its transformer, one node per adapter.
 
     Every graph builder here refers to the model as `["unet", 0]`. Rather than teach
     each of them about adapters, the raw loader moves to `unet_base` and `unet`
-    becomes the *patched* output — so the whole pipeline picks the LoRA up with no
+    becomes the *patched* output — so the whole pipeline picks the LoRAs up with no
     other change, and a graph with no LoRA is byte-for-byte what it was before.
+    Multiple adapters chain: each `LoraLoaderModelOnly` patches the previous stage's
+    output, so stacking two is just two nodes in a row.
 
     LoraLoaderModelOnly rather than LoraLoader: FLUX adapters patch the transformer,
     and the CLIP-patching variant demands a `clip` input that would also have to be
     rewired into every text-encode node for no gain.
     """
-    pick = lora_for(unet)
-    if not pick:
+    picks = loras_for(unet)
+    if not picks:
         return loaders
     base = dict(loaders)
     base["unet_base"] = base.pop("unet")
-    base["unet"] = {
-        "class_type": "LoraLoaderModelOnly",
-        "inputs": {"model": ["unet_base", 0],
-                   "lora_name": pick["name"], "strength_model": pick["strength"]},
-    }
+    prev = ["unet_base", 0]
+    for i, pick in enumerate(picks):
+        key = "unet" if i == len(picks) - 1 else f"unet_lora_{i}"
+        base[key] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {"model": prev,
+                       "lora_name": pick["name"], "strength_model": pick["strength"]},
+        }
+        prev = [key, 0]
     return base
 
 
@@ -1569,7 +1575,7 @@ def list_unets() -> list[dict]:
                     "family": cat.family_of(p.name),
                     "size_gb": round(p.stat().st_size / 1e9, 2),
                     "encoder": encoder_for(p.name),
-                    "lora": lora_for(p.name),  # None when nothing is attached
+                    "loras": loras_for(p.name),  # [] when nothing is attached
                 })
     out.sort(key=lambda m: (cat.bundle_rank(m["name"]), m["name"].lower()))
     return out
@@ -2549,25 +2555,24 @@ def _takes_lora(unet: str) -> bool:
     return cat.family_of(unet) != cat.FAMILY_WAN
 
 
-def _lora_pick(model: str) -> dict | None:
-    """The stored LoRA choice for one transformer, or None for the "no LoRA" default.
+def _lora_picks(model: str) -> list[dict]:
+    """The stored LoRA choices for one transformer, in attach order.
 
-    A pick whose file has since been deleted reads as None rather than failing the
+    A pick whose file has since been deleted is dropped rather than failing the
     graph — the same fallback shape `clip_for` takes for a missing encoder.
     """
-    pick = settings.loras().get(model)
-    if not pick:
-        return None
-    name = os.path.basename(pick.get("name") or "")
-    if not name or not (cat.LORA_DIR / name).exists():
-        return None
-    return {"name": name, "strength": float(pick.get("strength", 1.0))}
+    out = []
+    for pick in settings.loras().get(model) or []:
+        name = os.path.basename(pick.get("name") or "")
+        if name and (cat.LORA_DIR / name).exists():
+            out.append({"name": name, "strength": float(pick.get("strength", 1.0))})
+    return out
 
 
-def lora_for(unet: str) -> dict | None:
-    """The LoRA `_with_lora` will chain onto this transformer, if any."""
+def loras_for(unet: str) -> list[dict]:
+    """The LoRAs `_with_lora` will chain onto this transformer, if any."""
     name = os.path.basename(unet)
-    return _lora_pick(name) if _takes_lora(name) else None
+    return _lora_picks(name) if _takes_lora(name) else []
 
 
 def list_loras() -> list[dict]:
@@ -2580,32 +2585,40 @@ def list_loras() -> list[dict]:
     return out
 
 
-def selected_loras() -> dict[str, dict | None]:
-    """What each installed transformer is set to load. None means no LoRA.
+def selected_loras() -> dict[str, list[dict]]:
+    """What each installed transformer is set to load. An empty list means no LoRA.
 
     Keyed the same way the picker is: one entry per selectable transformer, so the
     FLUX.1 bundle's dev and Kontext halves get a row each.
     """
-    return {m["name"]: _lora_pick(m["name"])
+    return {m["name"]: _lora_picks(m["name"])
             for m in list_unets() if _takes_lora(m["name"])}
 
 
-def set_lora(model: str, name: str, strength: float = 1.0) -> None:
-    """Attach a LoRA to one transformer, or detach it when `name` is empty."""
+def set_loras(model: str, picks: list[dict]) -> None:
+    """Replace the set of LoRAs attached to one transformer. An empty list detaches
+    everything."""
     target = os.path.basename(model or "")
     if not target or not (UNET_DIR / target).exists():
         raise ValueError(f"'{target}' isn't an installed model.")
-    if not _takes_lora(target):
+    if picks and not _takes_lora(target):
         raise ValueError(f"{label(target)} doesn't take a LoRA adapter.")
-    safe = os.path.basename(name or "")
-    if safe and not (cat.LORA_DIR / safe).exists():
-        raise FileNotFoundError(safe)
-    # ComfyUI accepts any float, but outside this range a LoRA either does nothing or
-    # overwhelms the base weights into noise. Clamp rather than reject: the slider
-    # can't produce an out-of-range value, so anything here came from a hand-made
-    # request and silently doing the sane thing beats a 400.
-    strength = max(-2.0, min(2.0, float(strength)))
-    settings.set_lora(target, safe, strength)
+    seen: dict[str, dict] = {}
+    for pick in picks:
+        safe = os.path.basename(pick.get("name") or "")
+        if not safe:
+            continue
+        if not (cat.LORA_DIR / safe).exists():
+            raise FileNotFoundError(safe)
+        # ComfyUI accepts any float, but outside this range a LoRA either does nothing
+        # or overwhelms the base weights into noise. Clamp rather than reject: the
+        # slider can't produce an out-of-range value, so anything here came from a
+        # hand-made request and silently doing the sane thing beats a 400.
+        strength = max(-2.0, min(2.0, float(pick.get("strength", 1.0))))
+        # Last write for a repeated name wins, but keeps its original position —
+        # attaching the same adapter twice is a no-op, not a stack of itself.
+        seen[safe] = {"name": safe, "strength": strength}
+    settings.set_loras(target, list(seen.values()))
 
 
 # Filenames that name the format rather than the adapter. Several popular repos call
@@ -2715,9 +2728,11 @@ def delete_lora(name: str) -> None:
     p = cat.LORA_DIR / safe
     if not p.exists():
         raise FileNotFoundError(safe)
-    for model, pick in list(settings.loras().items()):
-        if os.path.basename((pick or {}).get("name") or "") == safe:
-            settings.set_lora(model, "")
+    for model, picks in list(settings.loras().items()):
+        kept = [pick for pick in picks
+                if os.path.basename((pick or {}).get("name") or "") != safe]
+        if len(kept) != len(picks):
+            settings.set_loras(model, kept)
     p.unlink()
 
 

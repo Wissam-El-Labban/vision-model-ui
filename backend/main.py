@@ -433,16 +433,20 @@ def flux_lora_pull(req: LoraPullRequest):
     return _ndjson(work)
 
 
+class LoraPick(BaseModel):
+    name: str
+    strength: float = 1.0
+
+
 class LoraSelectRequest(BaseModel):
     model: str  # the transformer's filename — FLUX.1's dev and Kontext pick separately
-    name: str  # "" detaches — the "None" option
-    strength: float = 1.0
+    picks: list[LoraPick] = []  # [] detaches everything — the "None" option
 
 
 @app.put("/api/flux/loras/select")
 def flux_lora_select(req: LoraSelectRequest):
     try:
-        fx.set_lora(req.model, req.name, req.strength)
+        fx.set_loras(req.model, [p.dict() for p in req.picks])
         return {"ok": True, "selected": fx.selected_loras()}
     except ValueError as exc:  # not installed, or a model that takes no adapter
         raise HTTPException(status_code=400, detail=str(exc))

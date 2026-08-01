@@ -39,7 +39,11 @@ export default function GenModelPill({ op, picked, models, gen }: Props) {
       title={
         `${video ? "Video" : "Image"} model: ${model.label}\n` +
         `Text encoder: ${model.encoder || "—"}\n` +
-        `LoRA: ${model.lora ? `${model.lora.name} @ ${model.lora.strength}` : "none"}\n` +
+        `LoRA: ${
+          model.loras.length
+            ? model.loras.map((l) => `${l.name} @ ${l.strength}`).join(", ")
+            : "none"
+        }\n` +
         `Steps: ${gen.steps}\n` +
         `Guidance: ${gen.guidance}\n` +
         `Seed: ${gen.seed || "random"}`
@@ -53,12 +57,19 @@ export default function GenModelPill({ op, picked, models, gen }: Props) {
           <span className="gen-pill-enc">{shortEncoder(model.encoder)}</span>
         </>
       )}
-      {/* Only rendered when one is attached — "none" is the normal state and would
-          be noise on every generate. The weight is part of the identity: the same
-          adapter at 0.3 and at 1.2 are different pictures. */}
-      {model.lora && (
+      {/* Only rendered when at least one is attached — "none" is the normal state
+          and would be noise on every generate. The weight is part of the identity:
+          the same adapter at 0.3 and at 1.2 are different pictures. Past two, the
+          pill collapses to a count rather than overflowing — full detail is still
+          in the tooltip above. */}
+      {model.loras.length > 0 && (
         <span className="gen-pill-lora">
-          ⊕ {shortEncoder(model.lora.name)} @{model.lora.strength.toFixed(2)}
+          ⊕{" "}
+          {model.loras.length > 2
+            ? `${model.loras.length} LoRAs`
+            : model.loras
+                .map((l) => `${shortEncoder(l.name)}@${l.strength.toFixed(2)}`)
+                .join(", ")}
         </span>
       )}
       <span className="gen-pill-sep">·</span>
