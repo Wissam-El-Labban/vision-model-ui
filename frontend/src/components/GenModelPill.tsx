@@ -1,5 +1,5 @@
 import type { FluxModel } from "../api";
-import type { GenOp } from "../types";
+import type { GenOp, GenSettings } from "../types";
 import { resolveFlux, roleFor } from "../flux";
 
 /** Drop the extension — every encoder here is .safetensors or .gguf, so it's the
@@ -16,6 +16,7 @@ interface Props {
   op: GenOp;
   picked: string;
   models: FluxModel[];
+  gen: GenSettings;
 }
 
 /** What a generate would actually run right now: the transformer the current op
@@ -25,19 +26,23 @@ interface Props {
  * agree on — so the header can't advertise a model the dispatch wouldn't pick. The
  * encoder comes from the backend's `encoder_for`, which mirrors the graph builder,
  * for the same reason. */
-export default function GenModelPill({ op, picked, models }: Props) {
+export default function GenModelPill({ op, picked, models, gen }: Props) {
   const name = resolveFlux(picked, models, roleFor(op));
   const model = models.find((m) => m.name === name);
   if (!model) return null;
 
   const video = model.roles.includes("animate");
+  const seedLabel = gen.seed ? `seed ${gen.seed}` : "random seed";
   return (
     <span
       className="gen-pill"
       title={
         `${video ? "Video" : "Image"} model: ${model.label}\n` +
         `Text encoder: ${model.encoder || "—"}\n` +
-        `LoRA: ${model.lora ? `${model.lora.name} @ ${model.lora.strength}` : "none"}`
+        `LoRA: ${model.lora ? `${model.lora.name} @ ${model.lora.strength}` : "none"}\n` +
+        `Steps: ${gen.steps}\n` +
+        `Guidance: ${gen.guidance}\n` +
+        `Seed: ${gen.seed || "random"}`
       }
     >
       <span className="gen-pill-icon">{video ? "🎬" : "🎨"}</span>
@@ -56,6 +61,10 @@ export default function GenModelPill({ op, picked, models }: Props) {
           ⊕ {shortEncoder(model.lora.name)} @{model.lora.strength.toFixed(2)}
         </span>
       )}
+      <span className="gen-pill-sep">·</span>
+      <span className="gen-pill-settings">
+        {gen.steps} steps · {gen.guidance} cfg · {seedLabel}
+      </span>
     </span>
   );
 }

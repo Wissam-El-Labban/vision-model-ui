@@ -330,6 +330,16 @@ textarea {
   font-size: 11px;
 }
 
+/* Steps / guidance / seed — the settings the pill's model actually ran (or will
+   run) with, so a retune is visible without opening the gear popover. */
+.gen-pill-settings {
+  flex: none;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 /* One model's LoRA row: the picker, then its weight slider once attached. */
 .lora-row {
   display: flex;

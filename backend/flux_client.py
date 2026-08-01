@@ -70,8 +70,12 @@ ROLE_ANIMATE = cat.ROLE_ANIMATE
 
 # Quality-first defaults: 20 steps at Q8 is the sweet spot on this GPU; fewer
 # steps visibly degrades output, so that isn't the knob we turn for speed
-# (keeping models resident is).
+# (keeping models resident is). [klein] is the exception — a distilled model,
+# like Wan's Lightning LoRA path, converges in far fewer steps, so it defaults
+# lower and the floor drops to let it go lower still.
 DEFAULT_STEPS = 20
+KLEIN_STEPS = 8
+STEPS_MIN, STEPS_MAX = 4, 40
 # Guidance is mode- and family-specific. On FLUX.1, Kontext follows an instruction at
 # ~2.5 while dev needs a higher ~3.5 to bind a text-only prompt; feeding either the
 # other's value (or a stray SD-scale 7.5 from shared settings) blows out the image.
@@ -81,13 +85,12 @@ DEFAULT_STEPS = 20
 # instruction, returning the source unchanged (measured on a two-reference edit).
 #
 # FLUX.2 [dev] uses one value for both jobs (ComfyUI's own template ships 4.0).
-# [klein] is a distilled 9B variant sharing the family — like Kontext next to
-# dev, a distilled model overshoots at the full model's guidance, so it gets
-# its own lower value rather than inheriting FLUX2_GUIDANCE.
+# [klein] is a distilled 9B variant sharing the family, so it gets its own
+# value rather than inheriting FLUX2_GUIDANCE.
 KONTEXT_GUIDANCE = 2.5
 CREATE_GUIDANCE = 3.5
 FLUX2_GUIDANCE = 4.0
-KLEIN_GUIDANCE = 2.5
+KLEIN_GUIDANCE = 3.5
 GUIDANCE_MIN, GUIDANCE_MAX = 0.5, 10.0
 
 # How the model lays out multiple reference images. See `_conditioning`.
@@ -166,12 +169,12 @@ def _guidance(v, default: float) -> float:
     return g if GUIDANCE_MIN <= g <= GUIDANCE_MAX else default
 
 
-def _steps(v) -> int:
+def _steps(v, default: int = DEFAULT_STEPS) -> int:
     try:
         s = int(v)
     except (TypeError, ValueError):
-        return DEFAULT_STEPS
-    return s if 8 <= s <= 40 else DEFAULT_STEPS
+        return default
+    return s if STEPS_MIN <= s <= STEPS_MAX else default
 
 
 def _strength(v) -> float:
@@ -269,6 +272,14 @@ def _default_guidance(unet, role: str) -> float:
             return KLEIN_GUIDANCE
         return FLUX2_GUIDANCE
     return KONTEXT_GUIDANCE if role == ROLE_EDIT else CREATE_GUIDANCE
+
+
+def _default_steps(unet) -> int:
+    bundle = cat.bundle_of_unet(unet)
+    if bundle and bundle["id"] == "flux2-klein-9b":
+        return KLEIN_STEPS
+    return DEFAULT_STEPS
+
 
 _proc: subprocess.Popen | None = None  # the ComfyUI child, if we started it
 
@@ -1427,7 +1438,7 @@ def create(prompt, width=None, height=None, steps=None, guidance=None, seed=0,
     ensure_server(on_status=on_status)
     unet = _resolve_unet(model, ROLE_CREATE)
     w, h = _dim(width), _dim(height)
-    g = _txt2img_graph(_prompt_for(prompt, enhance), w, h, _steps(steps),
+    g = _txt2img_graph(_prompt_for(prompt, enhance), w, h, _steps(steps, _default_steps(unet)),
                        _guidance(guidance, _default_guidance(unet, ROLE_CREATE)),
                        int(seed), "flux_create", unet)
     if on_status:
@@ -1442,7 +1453,8 @@ def img2img(pil, prompt, strength=None, steps=None, guidance=None, seed=0,
     unet = _resolve_unet(model, ROLE_CREATE)
     name = _upload_image(pil, f"init_{uuid.uuid4().hex}.png")
     w, h = _source_resolution(unet, pil)
-    g = _img2img_graph(name, _prompt_for(prompt, enhance), _strength(strength), _steps(steps),
+    g = _img2img_graph(name, _prompt_for(prompt, enhance), _strength(strength),
+                       _steps(steps, _default_steps(unet)),
                        _guidance(guidance, _default_guidance(unet, ROLE_CREATE)),
                        int(seed), w, h, "flux_img2img", unet)
     if on_status:
@@ -1464,7 +1476,7 @@ def edit(pil, prompt, refs=(), steps=None, guidance=None, seed=0, model=None,
     scene = _upload_image(pil, f"edit_{tag}.png")
     ref_names = [_upload_image(p, f"editref{i}_{tag}.png") for i, p in enumerate(refs)]
     w, h = _source_resolution(unet, pil)
-    g = _edit_graph(scene, ref_names, prompt or "", _steps(steps),
+    g = _edit_graph(scene, ref_names, prompt or "", _steps(steps, _default_steps(unet)),
                     _guidance(guidance, _default_guidance(unet, ROLE_EDIT)),
                     int(seed), w, h, "flux_edit", unet)
     if on_status:
@@ -1482,7 +1494,7 @@ def compose(pils, prompt, steps=None, guidance=None, seed=0, model=None, on_prog
     names = [_upload_image(p, f"ref{i}_{tag}.png") for i, p in enumerate(pils)]
     # The new scene takes its shape from the first reference.
     width, height = _source_resolution(unet, pils[0])
-    g = _compose_graph(names, prompt or "", width, height, _steps(steps),
+    g = _compose_graph(names, prompt or "", width, height, _steps(steps, _default_steps(unet)),
                        _guidance(guidance, _default_guidance(unet, ROLE_EDIT)),
                        int(seed), "flux_compose", unet)
     if on_status:

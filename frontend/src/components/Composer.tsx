@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { fileToDataUrl } from "../fileUtils";
-import { resolveFlux, roleFor } from "../flux";
+import { guidanceFor, resolveFlux, roleFor, stepsFor } from "../flux";
 import type { GenSettings, GenOp } from "../types";
 import type { FluxModel } from "../api";
 
@@ -106,7 +106,16 @@ export default function Composer({
   // Bundled models carry a real label ("FLUX.2 [klein] 9B — …"); for a user-added
   // one the label *is* the filename, so keep stripping the extension.
   const prettyFlux = (name: string) => name.replace(/\.(gguf|safetensors|sft)$/i, "");
-  const pickFlux = (m: FluxModel) => patchGen({ fluxModel: m.name });
+  // Picking a model explicitly retunes it to that model's own defaults — steps
+  // and guidance both vary by model (see `stepsFor`/`guidanceFor`), and a seed
+  // hand-tuned for one model's output isn't meaningful for another's.
+  const pickFlux = (m: FluxModel) =>
+    patchGen({
+      fluxModel: m.name,
+      steps: stepsFor(genOp, fluxModels, m.name),
+      guidance: guidanceFor(genOp, fluxModels, m.name),
+      seed: "",
+    });
 
   // In create/edit the source is the attached image, else the first pinned-panel
   // image. create infers txt2img vs img2img from whether one is present.
@@ -421,7 +430,7 @@ export default function Composer({
                 )}
                 <div className="gen-grid">
                   <label>Steps
-                    <input type="number" min={8} max={40} value={gen.steps}
+                    <input type="number" min={4} max={40} value={gen.steps}
                       onChange={(e) => patchGen({ steps: +e.target.value })} />
                   </label>
                   <label>Guidance

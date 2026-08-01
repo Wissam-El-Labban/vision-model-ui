@@ -23,7 +23,7 @@ import {
   type Usage,
 } from "./api";
 import { fileToDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
-import { guidanceFor, imagesFor, modeFor, resolveFlux, roleFor } from "./flux";
+import { guidanceFor, imagesFor, modeFor, resolveFlux, roleFor, stepsFor } from "./flux";
 import { trimHistory } from "./context";
 import type {
   ChatMessage,
@@ -105,7 +105,11 @@ export default function App() {
         // tuned by hand doesn't get reset by a later install.
         if (!guidanceReady.current && r.models.length) {
           guidanceReady.current = true;
-          setGen((g) => ({ ...g, guidance: guidanceFor(genOp, r.models) }));
+          setGen((g) => ({
+            ...g,
+            guidance: guidanceFor(genOp, r.models),
+            steps: stepsFor(genOp, r.models),
+          }));
         }
       })
       .catch(() => {
@@ -128,7 +132,15 @@ export default function App() {
           (m) => m.name === g.fluxModel && m.roles.includes(roleFor(op))
         );
         const fluxModel = keep ? g.fluxModel : "";
-        return { ...g, fluxModel, guidance: guidanceFor(op, fluxModels, fluxModel) };
+        return {
+          ...g,
+          fluxModel,
+          guidance: guidanceFor(op, fluxModels, fluxModel),
+          // Steps aren't role-dependent for a given model, so a hand-tuned value
+          // survives a tab switch — unless the switch forced the model itself to
+          // change (`!keep`), in which case the new model's own default applies.
+          steps: keep ? g.steps : stepsFor(op, fluxModels, fluxModel),
+        };
       });
     },
     [fluxModels]
@@ -1017,7 +1029,7 @@ export default function App() {
           <div className="topbar-actions">
             {usage && <ContextMeter used={usage.used} numCtx={usage.num_ctx} />}
             {fluxAvailable && (
-              <GenModelPill op={genOp} picked={gen.fluxModel} models={fluxModels} />
+              <GenModelPill op={genOp} picked={gen.fluxModel} models={fluxModels} gen={gen} />
             )}
             {model && <span className="model-pill">{model}</span>}
             {messages.length > 0 && (

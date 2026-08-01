@@ -52,22 +52,33 @@ export function resolveFlux(picked: string, models: FluxModel[], role: FluxRole)
 /** The guidance a mode starts at, which depends on the model that will run it.
  *
  * FLUX.2 [dev] uses one value for every job; [klein], a distilled 9B variant
- * of the same family, overshoots at that value the same way Kontext overshoots
- * at dev's, so it gets Kontext's lower number instead. FLUX.1 is mode-scaled:
- * dev needs ~3.5 to bind a text-only prompt, while Kontext wants ~2.5 — at 3.5
- * it clings to the reference image and ignores the instruction. Wan's 3.5 is a
- * different quantity that happens to share the number: a real CFG scale over a
- * real negative branch, not FLUX's distilled guidance embedding. Mirrors the
- * backend's `_default_guidance`. Resolves through `resolveFlux` so the guidance
- * follows the model that will actually run, not whichever one happens to sort
- * first. */
+ * of the same family, gets its own value rather than inheriting dev's. FLUX.1
+ * is mode-scaled: dev needs ~3.5 to bind a text-only prompt, while Kontext
+ * wants ~2.5 — at 3.5 it clings to the reference image and ignores the
+ * instruction. Wan's 3.5 is a different quantity that happens to share the
+ * number: a real CFG scale over a real negative branch, not FLUX's distilled
+ * guidance embedding. Mirrors the backend's `_default_guidance`. Resolves
+ * through `resolveFlux` so the guidance follows the model that will actually
+ * run, not whichever one happens to sort first. */
 export function guidanceFor(op: GenOp, models: FluxModel[], picked = ""): number {
   const role = roleFor(op);
   const name = resolveFlux(picked, models, role);
   const pickedModel = models.find((m) => m.name === name);
   if (pickedModel?.family === "wan") return 3.5;
   if (pickedModel?.family === "flux2") {
-    return pickedModel.bundle === "flux2-klein-9b" ? 2.5 : 4.0;
+    return pickedModel.bundle === "flux2-klein-9b" ? 3.5 : 4.0;
   }
   return op === "create" ? 3.5 : 2.5;
+}
+
+/** The step count a mode starts at, which depends on the model that will run it.
+ *
+ * Every model defaults to 20 except [klein]: a distilled 9B variant that, like
+ * Wan's Lightning LoRA path, converges in far fewer steps. Mirrors the
+ * backend's `_default_steps`; resolves through `resolveFlux` for the same
+ * reason `guidanceFor` does. */
+export function stepsFor(op: GenOp, models: FluxModel[], picked = ""): number {
+  const name = resolveFlux(picked, models, roleFor(op));
+  const pickedModel = models.find((m) => m.name === name);
+  return pickedModel?.bundle === "flux2-klein-9b" ? 8 : 20;
 }
