@@ -60,7 +60,11 @@ export default function ImageModels({ models, onChanged }: Props) {
   }
 
   useEffect(() => {
-    if (open) void refresh();
+    // A download that finished while this panel was closed (or the page was
+    // reloaded) never ran the polling branch below, so the app's own model list
+    // — what the composer's picker actually reads — is still the old one.
+    // Reopening the panel is the one moment we know to double check it.
+    if (open) void refresh().then(() => onChanged());
   }, [open]);
 
   // A download keeps running on the server even if this page reloads mid-install. Adopt

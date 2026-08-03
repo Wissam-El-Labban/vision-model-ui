@@ -202,6 +202,36 @@ BUNDLES = [
         ],
     },
     {
+        "id": "flux1-krea-dev-bf16",
+        "label": "FLUX.1 Krea [dev] — full bf16",
+        "family": FAMILY_FLUX1,
+        "roles": [ROLE_CREATE],
+        "blurb": ("Unquantized FLUX.1 Krea [dev] straight from Black Forest Labs and "
+                  "Krea — a create-only variant tuned against the 'AI look' for more "
+                  "photographic results. Needs a licence acceptance on the repo and "
+                  "your HF token."),
+        # 23.8 (transformer) + 9.79 (T5 fp16) + 0.25 (CLIP-L) + 0.34 (VAE), read off the
+        # HuggingFace file listing rather than estimated.
+        "size_gb": 34.2,
+        "vram_gb": 32,
+        "gated": True,
+        "unet": "flux1-krea-dev.safetensors",
+        # "default" keeps the weights at the precision they shipped in — this is the
+        # full bf16 checkpoint, not a quantized one.
+        "weight_dtype": "default",
+        "clip": "t5xxl_fp16.safetensors",
+        "clip_l": "clip_l.safetensors",
+        "vae": "ae.safetensors",
+        "files": [
+            ("black-forest-labs/FLUX.1-Krea-dev", "flux1-krea-dev.safetensors", "unet"),
+            ("comfyanonymous/flux_text_encoders", "t5xxl_fp16.safetensors", "clip"),
+            ("comfyanonymous/flux_text_encoders", "clip_l.safetensors", "clip"),
+            # BFL's own VAE rather than a third-party mirror — the token is already
+            # required for the transformer, so the mirror bought nothing.
+            ("black-forest-labs/FLUX.1-Krea-dev", "ae.safetensors", "vae"),
+        ],
+    },
+    {
         "id": "wan22-i2v-a14b-fp16",
         "label": "Wan 2.2 I2V A14B — fp16",
         "family": FAMILY_WAN,
