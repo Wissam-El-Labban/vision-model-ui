@@ -66,19 +66,21 @@ export function guidanceFor(op: GenOp, models: FluxModel[], picked = ""): number
   const pickedModel = models.find((m) => m.name === name);
   if (pickedModel?.family === "wan") return 3.5;
   if (pickedModel?.family === "flux2") {
-    return pickedModel.bundle === "flux2-klein-9b" ? 3.5 : 4.0;
+    return pickedModel.bundle === "flux2-klein-9b" ? 3.5 : 2.5;
   }
   return op === "create" ? 3.5 : 2.5;
 }
 
 /** The step count a mode starts at, which depends on the model that will run it.
  *
- * Every model defaults to 20 except [klein]: a distilled 9B variant that, like
- * Wan's Lightning LoRA path, converges in far fewer steps. Mirrors the
- * backend's `_default_steps`; resolves through `resolveFlux` for the same
- * reason `guidanceFor` does. */
+ * Every model defaults to 20 except [klein] — a distilled 9B variant that, like
+ * Wan's Lightning LoRA path, converges in far fewer steps — and FLUX.2 [dev],
+ * which wants more to hit its ceiling. Mirrors the backend's `_default_steps`;
+ * resolves through `resolveFlux` for the same reason `guidanceFor` does. */
 export function stepsFor(op: GenOp, models: FluxModel[], picked = ""): number {
   const name = resolveFlux(picked, models, roleFor(op));
   const pickedModel = models.find((m) => m.name === name);
-  return pickedModel?.bundle === "flux2-klein-9b" ? 8 : 20;
+  if (pickedModel?.bundle === "flux2-klein-9b") return 8;
+  if (pickedModel?.family === "flux2") return 35;
+  return 20;
 }

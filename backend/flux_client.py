@@ -74,8 +74,9 @@ ROLE_ANIMATE = cat.ROLE_ANIMATE
 # like Wan's Lightning LoRA path, converges in far fewer steps, so it defaults
 # lower and the floor drops to let it go lower still.
 DEFAULT_STEPS = 20
+FLUX2_STEPS = 35
 KLEIN_STEPS = 8
-STEPS_MIN, STEPS_MAX = 4, 40
+STEPS_MIN, STEPS_MAX = 4, 60
 # Guidance is mode- and family-specific. On FLUX.1, Kontext follows an instruction at
 # ~2.5 while dev needs a higher ~3.5 to bind a text-only prompt; feeding either the
 # other's value (or a stray SD-scale 7.5 from shared settings) blows out the image.
@@ -84,12 +85,12 @@ STEPS_MIN, STEPS_MAX = 4, 40
 # At 3.5 the model clings to the reference image and silently ignores the
 # instruction, returning the source unchanged (measured on a two-reference edit).
 #
-# FLUX.2 [dev] uses one value for both jobs (ComfyUI's own template ships 4.0).
-# [klein] is a distilled 9B variant sharing the family, so it gets its own
-# value rather than inheriting FLUX2_GUIDANCE.
+# FLUX.2 [dev] uses one value for both jobs (ComfyUI's own template ships 4.0;
+# 2.5 is tuned lower for this GPU/workflow). [klein] is a distilled 9B variant
+# sharing the family, so it gets its own value rather than inheriting FLUX2_GUIDANCE.
 KONTEXT_GUIDANCE = 2.5
 CREATE_GUIDANCE = 3.5
-FLUX2_GUIDANCE = 4.0
+FLUX2_GUIDANCE = 2.5
 KLEIN_GUIDANCE = 3.5
 GUIDANCE_MIN, GUIDANCE_MAX = 0.5, 10.0
 
@@ -278,6 +279,8 @@ def _default_steps(unet) -> int:
     bundle = cat.bundle_of_unet(unet)
     if bundle and bundle["id"] == "flux2-klein-9b":
         return KLEIN_STEPS
+    if cat.family_of(unet) == cat.FAMILY_FLUX2:
+        return FLUX2_STEPS
     return DEFAULT_STEPS
 
 

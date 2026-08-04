@@ -452,7 +452,7 @@ export default function Composer({
                 )}
                 <div className="gen-grid">
                   <label>Steps
-                    <input type="number" min={4} max={40} value={gen.steps}
+                    <input type="number" min={4} max={60} value={gen.steps}
                       onChange={(e) => patchGen({ steps: +e.target.value })} />
                   </label>
                   <label>Guidance
