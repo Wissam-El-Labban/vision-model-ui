@@ -7,25 +7,19 @@ import ContextMeter from "./components/ContextMeter";
 import GenModelPill from "./components/GenModelPill";
 import {
   appendMessage,
-  createPreset,
   deleteChat,
-  deletePreset,
   enhancePrompt,
   generate,
   generateTitle,
   getChat,
   getFluxModels,
-  getLoras,
   getModels,
   listChats,
-  listPresets,
   putChat,
-  setLoraPicks,
   streamChat,
   uploadImages,
   urlToDataUrl,
   type FluxModel,
-  type GenPreset,
   type Usage,
 } from "./api";
 import { fileToDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
@@ -171,9 +165,6 @@ export default function App() {
     crypto.randomUUID()
   );
   const [chatExists, setChatExists] = useState(false);
-  // Saved generation-setting bundles (steps/guidance/size/model/LoRAs), named by
-  // the user — see `applyPreset`/`saveCurrentAsPreset` below.
-  const [presets, setPresets] = useState<GenPreset[]>([]);
   // data-URL -> content hash, so re-sent pinned images aren't re-uploaded.
   const hashCache = useRef<Map<string, string>>(new Map());
   // True while the pinned Images panel is "focused" (clicked). Pasted images are
@@ -223,99 +214,6 @@ export default function App() {
     }
   }, []);
 
-  const refreshPresets = useCallback(async () => {
-    try {
-      setPresets(await listPresets());
-    } catch {
-      /* leave the list as-is if the fetch fails */
-    }
-  }, []);
-
-  /** Restores everything a preset captured. Settings apply unconditionally; the
-   *  LoRA restore is separate and best-effort, so a since-deleted adapter can't
-   *  undo the steps/guidance/model that already landed. */
-  async function applyPreset(preset: GenPreset) {
-    // Set directly rather than through `changeOp`: that helper retunes guidance/
-    // steps/fluxModel to *defaults* for the new op, which the preset's own values
-    // below would just have to override again.
-    setGenOp(preset.gen_op);
-    setGen((g) => ({
-      ...g,
-      fluxModel: preset.flux_model,
-      steps: preset.steps,
-      guidance: preset.guidance,
-      strength: preset.strength,
-      width: preset.width,
-      height: preset.height,
-      // seed is left alone — a preset is a reusable style, not one fixed frame.
-    }));
-    try {
-      const catalog = await getLoras();
-      const installed = new Set(catalog.loras.map((l) => l.name));
-      const picks = preset.loras.filter((p) => installed.has(p.name));
-      await setLoraPicks(preset.flux_model, picks);
-      refreshFlux();
-    } catch {
-      /* the LoRA side of the preset didn't take — the rest of it already did */
-    }
-  }
-
-  /** The permanent "Default" entry in the presets list — not stored, not
-   *  deletable, always available. Unlike a saved preset it's computed live off
-   *  `stepsFor`/`guidanceFor`/`resolveFlux` with `""` (the same "no explicit pick"
-   *  those already use everywhere else), so it always means whichever model
-   *  actually resolves first for this mode rather than a name frozen at save time
-   *  — and unlike a saved preset, it also resets the seed and clears LoRAs, since
-   *  "default" means the clean state a fresh install starts in. */
-  async function applyDefault() {
-    setGen((g) => ({
-      ...g,
-      fluxModel: "",
-      steps: stepsFor(genOp, fluxModels, ""),
-      guidance: guidanceFor(genOp, fluxModels, ""),
-      seed: "",
-    }));
-    const resolved = resolveFlux("", fluxModels, roleFor(genOp));
-    if (!resolved) return;
-    try {
-      await setLoraPicks(resolved, []);
-      refreshFlux();
-    } catch {
-      /* LoRA clear didn't take — the rest of the reset already applied */
-    }
-  }
-
-  async function saveCurrentAsPreset(name: string) {
-    const role = roleFor(genOp);
-    const resolved = resolveFlux(gen.fluxModel, fluxModels, role);
-    const activeModel = fluxModels.find((m) => m.name === resolved);
-    try {
-      const created = await createPreset({
-        name,
-        gen_op: genOp,
-        flux_model: resolved,
-        steps: gen.steps,
-        guidance: gen.guidance,
-        strength: gen.strength,
-        width: gen.width,
-        height: gen.height,
-        loras: activeModel?.loras ?? [],
-      });
-      setPresets((p) => [...p, created]);
-    } catch {
-      /* leave the list as-is if the save fails */
-    }
-  }
-
-  async function removePresetById(id: string) {
-    try {
-      await deletePreset(id);
-      setPresets((p) => p.filter((x) => x.id !== id));
-    } catch {
-      /* leave the list as-is if the delete fails */
-    }
-  }
-
   async function addPinned(files: FileList | File[]) {
     const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
     // Keep the original bytes. The backend caps and resamples once, with a better
@@ -363,10 +261,6 @@ export default function App() {
   useEffect(() => {
     refreshChats();
   }, [refreshChats]);
-
-  useEffect(() => {
-    refreshPresets();
-  }, [refreshPresets]);
 
   // Probe the image-generation backend once.
   useEffect(() => {
@@ -1189,11 +1083,6 @@ export default function App() {
             fluxModels={fluxModels}
             gen={gen}
             setGen={setGen}
-            presets={presets}
-            onApplyPreset={applyPreset}
-            onApplyDefault={applyDefault}
-            onSavePreset={saveCurrentAsPreset}
-            onDeletePreset={removePresetById}
             enhancing={enhancing}
             pinnedCount={pinnedImages.length}
             pinnedInit={pinnedImages[0] ?? null}

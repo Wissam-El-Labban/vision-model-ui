@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { fileToDataUrl } from "../fileUtils";
 import { guidanceFor, resolveFlux, roleFor, stepsFor } from "../flux";
-import GenPresets from "./GenPresets";
 import type { GenSettings, GenOp } from "../types";
-import type { FluxModel, GenPreset } from "../api";
+import type { FluxModel } from "../api";
 
 interface Props {
   text: string;
@@ -37,12 +36,6 @@ interface Props {
   fluxModels: FluxModel[];
   gen: GenSettings;
   setGen: (v: GenSettings) => void;
-  /** Saved generation-setting bundles, shown at the top of the ⚙️ popover. */
-  presets: GenPreset[];
-  onApplyPreset: (p: GenPreset) => void;
-  onApplyDefault: () => void;
-  onSavePreset: (name: string) => void;
-  onDeletePreset: (id: string) => void;
   /** True while the settings-level auto-enhancer (sidebar) is rewriting the
    *  prompt for this submit — guards against a double-send during that gap.
    *  Verbose mode's rewrite itself isn't shown here: it's attached to the chat
@@ -81,11 +74,6 @@ export default function Composer({
   fluxModels,
   gen,
   setGen,
-  presets,
-  onApplyPreset,
-  onApplyDefault,
-  onSavePreset,
-  onDeletePreset,
   enhancing,
   pinnedCount,
   pinnedInit,
@@ -404,16 +392,6 @@ export default function Composer({
             {settingsOpen && (
               <div className="system-popover gen-popover">
                 <div className="popover-title">🎨 Generation settings</div>
-                {fluxAvailable && (
-                  <GenPresets
-                    presets={presets}
-                    onApply={onApplyPreset}
-                    onApplyDefault={onApplyDefault}
-                    onSave={onSavePreset}
-                    onDelete={onDeletePreset}
-                    disabled={streaming}
-                  />
-                )}
                 {!fluxAvailable && (
                   <div className="dl-box">
                     <p className="hint muted">

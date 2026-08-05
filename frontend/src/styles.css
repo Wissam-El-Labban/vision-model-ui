@@ -1674,17 +1674,6 @@ textarea {
   opacity: 1;
 }
 
-/* Presets sit above the model list in the same popover — a plain border/margin
-   rather than a wrapper widget, so it reads as a section of the popover, not a
-   separate box. */
-.gen-presets {
-  margin-bottom: 10px;
-}
-
-.gen-presets .row {
-  margin-top: 4px;
-}
-
 .flux-model-pick {
   flex: 1;
   display: flex;

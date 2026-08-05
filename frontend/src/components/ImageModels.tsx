@@ -279,9 +279,9 @@ export default function ImageModels({ models, onChanged }: Props) {
 
   // The currently-attached picks for a model come straight off the `models` prop
   // (`FluxModel.loras`), not a separately-fetched copy — that prop is App's single
-  // source of truth for a model's LoRAs, kept fresh by *anything* that changes them
-  // (this panel, or a preset applied elsewhere in the composer). A second, locally
-  // fetched copy would only stay in sync with mutations made from this panel itself.
+  // source of truth for a model's LoRAs, kept fresh by anything that changes them.
+  // A second, locally fetched copy would only stay in sync with mutations made from
+  // this panel itself.
   function currentPicks(model: string): { name: string; strength: number }[] {
     return models.find((m) => m.name === model)?.loras ?? [];
   }

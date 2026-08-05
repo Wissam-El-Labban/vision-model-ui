@@ -7,7 +7,6 @@ would rather not store it at all.
 """
 import json
 import os
-import uuid
 from pathlib import Path
 
 SETTINGS_PATH = Path(__file__).resolve().parent / "data" / "settings.json"
@@ -129,27 +128,3 @@ def set_loras(model: str, picks: list[dict]) -> None:
     _write(data)
 
 
-def presets() -> list[dict]:
-    """Saved generation-setting bundles — a named snapshot of steps/guidance/size,
-    which model to run, and that model's attached LoRAs, so a user can jump back to
-    a known-good combination without re-tuning everything (and re-attaching every
-    LoRA) by hand."""
-    return _read().get("presets") or []
-
-
-def save_preset(preset: dict) -> dict:
-    """Store a new preset under a server-minted id and return the stored row."""
-    data = _read()
-    all_presets = data.get("presets") or []
-    row = {"id": str(uuid.uuid4()), **preset}
-    all_presets.append(row)
-    data["presets"] = all_presets
-    _write(data)
-    return row
-
-
-def delete_preset(preset_id: str) -> None:
-    data = _read()
-    all_presets = [p for p in (data.get("presets") or []) if p.get("id") != preset_id]
-    data["presets"] = all_presets
-    _write(data)

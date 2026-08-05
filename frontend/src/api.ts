@@ -2,7 +2,6 @@ import type {
   ChatDetail,
   ChatMessage,
   ChatSummary,
-  GenOp,
   RunningModel,
   VersionInfo,
 } from "./types";
@@ -732,49 +731,4 @@ export async function upgradeOllama(
     throw new Error(detail.detail ?? `upgrade: ${res.status}`);
   }
   await readLines(res, onLine);
-}
-
-// --------------------------------------------------------------------------- #
-// Generation presets — a named snapshot of steps/guidance/size/model and that
-// model's attached LoRAs, so switching setups doesn't mean re-tuning every
-// slider and re-attaching every adapter by hand.
-// --------------------------------------------------------------------------- #
-export interface GenPreset {
-  id: string;
-  name: string;
-  gen_op: GenOp;
-  flux_model: string;
-  steps: number;
-  guidance: number;
-  strength: number;
-  width: number;
-  height: number;
-  loras: FluxLoraPick[];
-}
-
-export async function listPresets(): Promise<GenPreset[]> {
-  const res = await fetch("/api/presets");
-  if (!res.ok) throw new Error(`presets: ${res.status}`);
-  return (await res.json()).presets;
-}
-
-export async function createPreset(preset: Omit<GenPreset, "id">): Promise<GenPreset> {
-  const res = await fetch("/api/presets", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(preset),
-  });
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(detail.detail ?? `create preset: ${res.status}`);
-  }
-  return res.json();
-}
-
-export async function deletePreset(id: string): Promise<void> {
-  const res = await fetch(`/api/presets/${encodeURIComponent(id)}`, { method: "DELETE" });
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(detail.detail ?? `delete preset: ${res.status}`);
-  }
 }
