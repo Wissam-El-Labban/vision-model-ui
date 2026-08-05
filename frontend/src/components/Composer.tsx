@@ -487,7 +487,7 @@ export default function Composer({
                   {isAnimate
                     ? "Attach one image — it becomes the first frame. Describe the motion, not the scene; the frame already fixes that. Takes a few minutes."
                     : role === "edit"
-                      ? "Guidance ~2.5 follows the instruction closely; raise it if the subject isn't changing enough."
+                      ? "Guidance ~2.5 follows the instruction closely. If the source comes back unchanged, lower it — raising it makes the model cling to the reference instead of editing harder."
                       : genSubmode === "img2img"
                         ? "Image-to-image: strength controls how far from the attached image."
                         : "Text-to-image: guidance ~3.5. Attach an image above to switch to image-to-image."}

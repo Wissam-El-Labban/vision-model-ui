@@ -62,32 +62,11 @@ STAGING_DIR = MODELS_DIR / ".shards"
 # as `tekken_model` and which BFL's own repo doesn't carry.
 #
 # `unet`/`clip`/`vae` name the files the graphs load. `weight_dtype` is what UNETLoader
-# is told: FLUX.2's fp8mixed checkpoint is *already* quantized, so it loads as "default"
-# — casting it again to fp8_e4m3fn (which the size heuristic for user-added models would
-# do) degrades it.
+# is told, and it is per-bundle because the right answer differs: "default" keeps a
+# checkpoint at the precision it shipped in, which is what an already-quantized or
+# small-enough one wants — casting it again (as the size heuristic for user-added models
+# would) only degrades it. A checkpoint too big for the card says so explicitly instead.
 BUNDLES = [
-    {
-        "id": "flux2-dev-fp8",
-        "label": "FLUX.2 [dev] — fp8",
-        "family": FAMILY_FLUX2,
-        "roles": [ROLE_CREATE, ROLE_EDIT],
-        "blurb": ("Best photorealism that fits 48 GB. One model does create, edit and "
-                  "combine. Ungated — no HuggingFace token needed."),
-        "size_gb": 50.1,
-        "vram_gb": 48,
-        "gated": False,
-        "unet": "flux2_dev_fp8mixed.safetensors",
-        "weight_dtype": "default",
-        "clip": "mistral_3_small_flux2_fp8.safetensors",
-        "vae": "flux2-vae.safetensors",
-        "files": [
-            ("Comfy-Org/flux2-dev",
-             "split_files/diffusion_models/flux2_dev_fp8mixed.safetensors", "unet"),
-            ("Comfy-Org/flux2-dev",
-             "split_files/text_encoders/mistral_3_small_flux2_fp8.safetensors", "text_encoders"),
-            ("Comfy-Org/flux2-dev", "split_files/vae/flux2-vae.safetensors", "vae"),
-        ],
-    },
     {
         "id": "flux2-dev-bfl",
         "label": "FLUX.2 [dev] — from Black Forest Labs",
@@ -160,75 +139,6 @@ BUNDLES = [
                 # Qwen3's tokenizer ships inside ComfyUI, so nothing to embed.
                 "embed": None,
             },
-        ],
-    },
-    {
-        "id": "flux1-dev-kontext-bf16",
-        "label": "FLUX.1 dev + Kontext — full bf16",
-        "family": FAMILY_FLUX1,
-        "roles": [ROLE_CREATE, ROLE_EDIT],
-        "blurb": ("Unquantized FLUX.1 straight from Black Forest Labs. Two transformers "
-                  "(dev creates, Kontext edits) plus the fp16 T5. Needs a licence "
-                  "acceptance on both repos and your HF token."),
-        # 23.8 + 23.8 (transformers) + 9.79 (T5 fp16) + 0.25 (CLIP-L) + 0.34 (VAE),
-        # read off the HuggingFace file listings rather than estimated.
-        "size_gb": 58.0,
-        # The transformer alone is 23.8 GB at bf16 and the encoders sit beside it, so
-        # this wants more card than the Q8 build did. It still runs below this —
-        # ComfyUI offloads under pressure — it just stops being fast. Dropping
-        # `weight_dtype` to "fp8_e4m3fn" halves the transformer's resident size if a
-        # smaller card can't cope.
-        "vram_gb": 32,
-        # Both transformers come from Black Forest Labs' own gated repos: accept the
-        # licence on each, once, while signed in to the account the token belongs to.
-        "gated": True,
-        # Two UNets, split by role — the only bundle where that's true.
-        "unet": "flux1-dev.safetensors",
-        "unet_edit": "flux1-kontext-dev.safetensors",
-        # "default" keeps the weights at the precision they shipped in, which is the
-        # point of taking the full checkpoint over the Q8 one.
-        "weight_dtype": "default",
-        "clip": "t5xxl_fp16.safetensors",
-        "clip_l": "clip_l.safetensors",
-        "vae": "ae.safetensors",
-        "files": [
-            ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors", "unet"),
-            ("black-forest-labs/FLUX.1-Kontext-dev", "flux1-kontext-dev.safetensors", "unet"),
-            ("comfyanonymous/flux_text_encoders", "t5xxl_fp16.safetensors", "clip"),
-            ("comfyanonymous/flux_text_encoders", "clip_l.safetensors", "clip"),
-            # BFL's own VAE rather than a third-party mirror — the token is already
-            # required for the transformers, so the mirror bought nothing.
-            ("black-forest-labs/FLUX.1-dev", "ae.safetensors", "vae"),
-        ],
-    },
-    {
-        "id": "flux1-krea-dev-bf16",
-        "label": "FLUX.1 Krea [dev] — full bf16",
-        "family": FAMILY_FLUX1,
-        "roles": [ROLE_CREATE],
-        "blurb": ("Unquantized FLUX.1 Krea [dev] straight from Black Forest Labs and "
-                  "Krea — a create-only variant tuned against the 'AI look' for more "
-                  "photographic results. Needs a licence acceptance on the repo and "
-                  "your HF token."),
-        # 23.8 (transformer) + 9.79 (T5 fp16) + 0.25 (CLIP-L) + 0.34 (VAE), read off the
-        # HuggingFace file listing rather than estimated.
-        "size_gb": 34.2,
-        "vram_gb": 32,
-        "gated": True,
-        "unet": "flux1-krea-dev.safetensors",
-        # "default" keeps the weights at the precision they shipped in — this is the
-        # full bf16 checkpoint, not a quantized one.
-        "weight_dtype": "default",
-        "clip": "t5xxl_fp16.safetensors",
-        "clip_l": "clip_l.safetensors",
-        "vae": "ae.safetensors",
-        "files": [
-            ("black-forest-labs/FLUX.1-Krea-dev", "flux1-krea-dev.safetensors", "unet"),
-            ("comfyanonymous/flux_text_encoders", "t5xxl_fp16.safetensors", "clip"),
-            ("comfyanonymous/flux_text_encoders", "clip_l.safetensors", "clip"),
-            # BFL's own VAE rather than a third-party mirror — the token is already
-            # required for the transformer, so the mirror bought nothing.
-            ("black-forest-labs/FLUX.1-Krea-dev", "ae.safetensors", "vae"),
         ],
     },
     {
@@ -335,6 +245,25 @@ def bundle_of_unet(name: str) -> dict | None:
         if base in {b.get(k) for k in _EXPERT_KEYS}:
             return b
     return None
+
+
+def label_of_unet(name: str) -> str:
+    """The name to show for one transformer *file*.
+
+    A bundle's label names the install rather than a file, which is the same thing
+    only while a bundle ships one pickable transformer — as all of them currently do,
+    so the label is normally the answer. A bundle that ships two (FLUX.1 was one: dev
+    created, Kontext edited, and the picker listed them separately) can set
+    `unet_labels` to name them apart. Without it both entries rendered the same
+    string, and since the picker filters by role only one was ever on screen — so it
+    read as a single model that behaved differently per tab, and a status line naming
+    it said nothing about which file had actually run.
+    """
+    base = os.path.basename(name or "")
+    b = bundle_of_unet(base)
+    if not b:
+        return base or "FLUX"
+    return (b.get("unet_labels") or {}).get(base) or b["label"]
 
 
 def is_primary(name: str, bundle: dict | None = None) -> bool:

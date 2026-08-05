@@ -1435,10 +1435,9 @@ def static_enhance(prompt: str, mode: str) -> str:
 
 
 def _label(unet: str) -> str:
-    """A bundle's label, or the filename for a user-added model — the same rule
+    """This transformer's name, or the filename for a user-added model — the same rule
     `list_unets` labels by, so the UI and the status line agree on a model's name."""
-    b = cat.bundle_of_unet(unet)
-    return b["label"] if b else (os.path.basename(unet or "") or "FLUX")
+    return cat.label_of_unet(unet)
 
 
 def create(prompt, width=None, height=None, steps=None, guidance=None, seed=0,
@@ -1572,7 +1571,9 @@ def list_unets() -> list[dict]:
                     continue
                 out.append({
                     "name": p.name,
-                    "label": (b["label"] if b else p.name),
+                    # Through `_label`, not `b["label"]`: the FLUX.1 bundle's two
+                    # transformers are separate entries here and need separate names.
+                    "label": _label(p.name),
                     "roles": cat.roles_of(p.name),
                     "bundle": b["id"] if b else None,
                     "family": cat.family_of(p.name),
