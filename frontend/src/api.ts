@@ -275,6 +275,12 @@ export interface FluxTextEncoder {
   name: string;
   size_gb: number;
   default_for: string[]; // labels of the models that ship with this one
+  /** Bundle ids whose architecture this encoder matches — the only models it can
+   *  serve. Computed from the checkpoint's embedding shape, so a lighter quant of the
+   *  right architecture still fits and a different architecture never does. An
+   *  encoder whose architecture can't be read (a GGUF, say) fits everything rather
+   *  than nothing, so detection can't hide a working option. */
+  fits: string[];
 }
 
 export interface FluxTextEncoders {
@@ -349,6 +355,12 @@ export async function deleteTextEncoder(name: string): Promise<void> {
 export interface FluxLora {
   name: string;
   size_mb: number; // patches, not checkpoints — MB, not GB
+  /** Transformer filenames this adapter was trained against — the only ones it can
+   *  patch. An adapter for another base binds to almost none of the layers it names
+   *  and reads as one that barely works, rather than as a mistake, so it isn't
+   *  offered. Empty means nothing installed fits it; an adapter whose base can't be
+   *  determined fits everything rather than nothing. */
+  fits: string[];
 }
 
 /** One attached adapter and its weight. */

@@ -295,6 +295,17 @@ def bundle_rank(unet: str) -> int:
     return BUNDLES.index(b) if b else len(BUNDLES)
 
 
+def unets_of(bundle: dict) -> list[str]:
+    """Every transformer filename one bundle ships, in `_EXPERT_KEYS` order.
+
+    One name for most bundles; Wan's two experts, or a role-split pair, come back
+    together. Callers that need to act on a bundle's transformers — clearing the
+    add-ons attached to them, say — go through this rather than spelling the keys out,
+    which is how a third key once became visible to one lookup and not another.
+    """
+    return [bundle[k] for k in _EXPERT_KEYS if bundle.get(k)]
+
+
 def unets() -> dict[str, dict]:
     """Every UNet filename the catalog knows about -> its bundle."""
     out = {}

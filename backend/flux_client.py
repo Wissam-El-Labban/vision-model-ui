@@ -2304,7 +2304,15 @@ def install_bundle(bundle_id: str, on_status=None, on_progress=None) -> None:
 
 def delete_bundle(bundle_id: str) -> None:
     """Remove a model's files — but not any it shares with another installed bundle
-    (FLUX.1's VAE and encoders would otherwise be pulled out from under it)."""
+    (FLUX.1's VAE and encoders would otherwise be pulled out from under it).
+
+    Its add-on choices go with it. Both are keyed by a filename, so leaving them behind
+    left a removed model's LoRA stack and encoder override lying in wait: reinstalling
+    it later restored those picks silently, and the model came back subtly not being
+    the model it shipped as. Uninstalling is the one moment where "back to how it
+    arrived" is unambiguously what was meant, so a reinstall now starts clean and any
+    adapters are re-attached deliberately.
+    """
     b = cat.get(bundle_id)
     running = install_state()
     if running:
@@ -2325,6 +2333,12 @@ def delete_bundle(bundle_id: str) -> None:
         shutil.rmtree(cat.staging_dir(m), ignore_errors=True)
     if not removed:
         raise FileNotFoundError(bundle_id)
+    # After the files are gone, so a bundle that turned out not to be installed raises
+    # above and leaves the settings it isn't removing alone.
+    for name in cat.unets_of(b):
+        settings.set_loras(name, [])
+    if b["family"] == cat.FAMILY_FLUX2:
+        settings.set_text_encoder(bundle_id, "")
 
 
 # --------------------------------------------------------------------------- #
@@ -2364,20 +2378,196 @@ def encoder_for(unet: str) -> str:
     return f"{CLIP_L} + {T5}"
 
 
+# --------------------------------------------------------------------------- #
+# Add-on compatibility: which encoders and LoRAs a given transformer can load
+# --------------------------------------------------------------------------- #
+# Both kinds of add-on are silently base-specific, and "silently" is the problem: the
+# wrong encoder fails deep in the sampler (see `_check_encoder_layout`) and the wrong
+# LoRA binds to nothing and quietly does approximately nothing. Neither says so at the
+# point where the user picks it.
+#
+# Both are settled by a hidden width, but not the *same* width, which is the trap here.
+# A LoRA patches the transformer, so its down-projection has to take the transformer's
+# width: 6144 on FLUX.2 [dev], 4096 on [klein] 9B, 3072 on FLUX.1. An encoder never
+# touches those layers — its output is projected on the way in — so it is measured
+# against the encoder the bundle ships with instead. [dev] reads a 5120-wide Mistral
+# into a 6144-wide transformer; comparing an encoder to the transformer would reject
+# [dev]'s own default. Either way the number survives quantization, so a lighter quant
+# of the right checkpoint still fits — which is the swap the encoder panel exists for —
+# and the filter keys on architecture rather than on a filename or a metadata string
+# the author may never have set.
+#
+# Every reader below returns None for "couldn't tell", and `_fits` treats that as
+# compatible. Hiding a working add-on is worse than offering a broken one: the broken
+# one is still caught at load, while the hidden one leaves the user with no way to
+# choose it and no explanation.
+def _safetensors_header(path) -> dict | None:
+    """A safetensors file's header dict — tens of KB off the front, not the weights."""
+    try:
+        with open(path, "rb") as fh:
+            n = struct.unpack("<Q", fh.read(8))[0]
+            return json.loads(fh.read(n))
+    except (OSError, ValueError, struct.error):
+        return None
+
+
+# GGUF's value types, by the type tag that precedes each metadata value. Only the fixed
+# widths need naming; strings and arrays are length-prefixed and handled inline.
+_GGUF_SCALARS = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+
+
+def _gguf_metadata(path) -> dict | None:
+    """A GGUF file's metadata key/values, or None if it isn't one / can't be read.
+
+    Walks the key-value block at the head of the file. Values are read only when they
+    are the scalars and strings this needs; arrays are skipped by computing their
+    length, since the tokenizer's vocabulary is one of them and is enormous.
+    """
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(4) != b"GGUF":
+                return None
+            struct.unpack("<I", fh.read(4))  # format version
+            fh.read(8)                       # tensor count
+            n_kv = struct.unpack("<Q", fh.read(8))[0]
+
+            def read_str() -> str:
+                ln = struct.unpack("<Q", fh.read(8))[0]
+                return fh.read(ln).decode("utf-8", "replace")
+
+            def read_value(vtype: int):
+                if vtype == 8:                       # string
+                    return read_str()
+                if vtype == 9:                       # array: skip it
+                    itype = struct.unpack("<I", fh.read(4))[0]
+                    count = struct.unpack("<Q", fh.read(8))[0]
+                    if itype == 8:
+                        for _ in range(count):
+                            read_str()
+                    elif itype == 9:
+                        return None                  # nested arrays: give up cleanly
+                    else:
+                        fh.seek(_GGUF_SCALARS.get(itype, 0) * count, os.SEEK_CUR)
+                    return None
+                width = _GGUF_SCALARS.get(vtype)
+                if width is None:
+                    return None
+                raw = fh.read(width)
+                fmt = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i",
+                       6: "<f", 7: "<B", 10: "<Q", 11: "<q", 12: "<d"}[vtype]
+                return struct.unpack(fmt, raw)[0]
+
+            out = {}
+            for _ in range(n_kv):
+                key = read_str()
+                vtype = struct.unpack("<I", fh.read(4))[0]
+                out[key] = read_value(vtype)
+            return out
+    except (OSError, ValueError, struct.error, KeyError, UnicodeDecodeError):
+        return None
+
+
+def _encoder_width(name: str) -> int | None:
+    """The hidden width a text encoder emits — what the transformer has to consume.
+
+    Mistral-3 Small is 5120, Qwen3-8B is 4096. Read from the token embedding for a
+    safetensors checkpoint, and from `<arch>.embedding_length` for a GGUF, which is
+    where llama.cpp records the same number.
+    """
+    path = cat.TE_DIR / name
+    if not path.exists():
+        path = cat.CLIP_DIR / name
+    if not path.exists():
+        return None
+    if name.lower().endswith(".gguf"):
+        meta = _gguf_metadata(path)
+        if not meta:
+            return None
+        arch = meta.get("general.architecture")
+        width = meta.get(f"{arch}.embedding_length") if arch else None
+        return int(width) if isinstance(width, int) else None
+    header = _safetensors_header(path) or {}
+    for key in ("model.embed_tokens.weight", "language_model.model.embed_tokens.weight"):
+        shape = (header.get(key) or {}).get("shape")
+        if shape and len(shape) == 2:
+            return int(shape[1])
+    return None
+
+
+def _unet_width(unet: str) -> int | None:
+    """A transformer's hidden width, off its own header — the number both kinds of
+    add-on have to match."""
+    path = UNET_DIR / os.path.basename(unet or "")
+    if not path.exists() or path.suffix.lower() == ".gguf":
+        return None
+    header = _safetensors_header(path) or {}
+    for key, dim in (("double_blocks.0.img_attn.proj.weight", 1), ("img_in.weight", 0)):
+        shape = (header.get(key) or {}).get("shape")
+        if shape and len(shape) > dim:
+            return int(shape[dim])
+    return None
+
+
+def _lora_width(name: str) -> int | None:
+    """The hidden width a LoRA was trained against — the input dim of its
+    down-projection.
+
+    Covers both naming conventions in the wild: the `diffusion_model.…lora_A` layout
+    ai-toolkit writes, and kohya's `lora_unet_…lora_down`. A LoRA that patches only the
+    text encoder (`lora_te…`) has no transformer width to report and comes back None.
+    """
+    path = cat.LORA_DIR / os.path.basename(name or "")
+    if not path.exists() or path.suffix.lower() == ".pt":
+        return None
+    header = _safetensors_header(path) or {}
+    for key, info in header.items():
+        if key == "__metadata__" or "double_blocks" not in key:
+            continue
+        if not (key.endswith("lora_A.weight") or key.endswith("lora_down.weight")):
+            continue
+        shape = (info or {}).get("shape")
+        if shape and len(shape) == 2:
+            return int(shape[1])
+    return None
+
+
+def _fits(add_on: int | None, model: int | None) -> bool:
+    """Whether an add-on of this width can serve a model of that width. Fail-open on
+    either being unknown — see the note above `_safetensors_header`."""
+    return add_on is None or model is None or add_on == model
+
+
 def list_text_encoders() -> list[dict]:
-    """Every text encoder on disk, with the models each one is the default for."""
+    """Every text encoder on disk, with the models each one is the default for and the
+    ones it can actually serve.
+
+    `fits` is the bundle ids whose transformer this encoder's architecture matches. The
+    picker offers only those: a FLUX.2 model is trained against one encoder
+    architecture, and handing it another doesn't degrade the image, it fails deep in
+    the sampler (or silently builds a default CLIP-L — see `_check_encoder_layout`).
+    Both live FLUX.2 bundles take a *different* architecture from each other, so
+    offering every encoder for every model made a wrong pick the default-looking case.
+    """
     defaults: dict[str, list[str]] = {}
+    wanted: dict[str, int | None] = {}
     for b in cat.BUNDLES:
         if b["family"] == cat.FAMILY_FLUX2:
             defaults.setdefault(b["clip"], []).append(b["label"])
+            # Measured against the encoder the bundle ships with, *not* against the
+            # transformer: a projection sits between them and the two widths are not
+            # the same number. [dev] reads a 5120-wide Mistral into a 6144-wide
+            # transformer; [klein]'s 4096 matching on both sides is a coincidence.
+            wanted[b["id"]] = _encoder_width(b["clip"])
     out = []
     if cat.TE_DIR.is_dir():
         for p in sorted(cat.TE_DIR.iterdir()):
             if p.is_file() and p.suffix.lower() in (".safetensors", ".sft", ".gguf"):
+                width = _encoder_width(p.name)
                 out.append({
                     "name": p.name,
                     "size_gb": round(p.stat().st_size / 1e9, 2),
                     "default_for": defaults.get(p.name, []),
+                    "fits": [bid for bid, want in wanted.items() if _fits(width, want)],
                 })
     return out
 
@@ -2394,6 +2584,17 @@ def set_text_encoder(bundle_id: str, name: str) -> None:
     safe = os.path.basename(name or "")
     if safe and not (cat.TE_DIR / safe).exists():
         raise FileNotFoundError(safe)
+    # Checked here as well as filtered in the picker: the list the browser is choosing
+    # from can be stale (an encoder added or removed since it loaded), and this is the
+    # only path that writes the override. Fail-open on an undetectable architecture,
+    # like `list_text_encoders` — see `_encoder_arch`.
+    if safe and not _fits(_encoder_width(safe), _encoder_width(b["clip"])):
+        raise ValueError(
+            f"{safe} is a different text-encoder architecture than {b['label']} was "
+            f"trained against ({b['clip']}). It would fail at load rather than "
+            "generate badly — pick an encoder built for this model, or a lighter "
+            "quant of its own."
+        )
     settings.set_text_encoder(bundle_id, safe)
 
 
@@ -2580,12 +2781,24 @@ def loras_for(unet: str) -> list[dict]:
 
 
 def list_loras() -> list[dict]:
-    """Every LoRA on disk. Sizes are MB — these are patches, not checkpoints."""
+    """Every LoRA on disk, with the transformers each one can actually patch.
+
+    Sizes are MB — these are patches, not checkpoints. `fits` is the transformer
+    filenames whose hidden width this adapter was trained against; the picker offers
+    only those, because attaching a klein adapter to [dev] binds to nothing and looks
+    like a LoRA that simply does very little rather than like a mistake.
+    """
+    widths = {m["name"]: _unet_width(m["name"]) for m in list_unets() if _takes_lora(m["name"])}
     out = []
     if cat.LORA_DIR.is_dir():
         for p in sorted(cat.LORA_DIR.iterdir()):
             if p.is_file() and p.suffix.lower() in LORA_EXTS:
-                out.append({"name": p.name, "size_mb": round(p.stat().st_size / 1e6, 1)})
+                width = _lora_width(p.name)
+                out.append({
+                    "name": p.name,
+                    "size_mb": round(p.stat().st_size / 1e6, 1),
+                    "fits": [u for u, w in widths.items() if _fits(width, w)],
+                })
     return out
 
 
@@ -2614,6 +2827,14 @@ def set_loras(model: str, picks: list[dict]) -> None:
             continue
         if not (cat.LORA_DIR / safe).exists():
             raise FileNotFoundError(safe)
+        # Same guard, and for the same reason, as `set_text_encoder`'s: the browser's
+        # list can be stale, and this is the only path that writes the attachment.
+        if not _fits(_lora_width(safe), _unet_width(target)):
+            raise ValueError(
+                f"{safe} was trained against a different transformer than "
+                f"{label(target)}. It would bind to almost none of the layers it "
+                "names — attach an adapter built for this model."
+            )
         # ComfyUI accepts any float, but outside this range a LoRA either does nothing
         # or overwhelms the base weights into noise. Clamp rather than reject: the
         # slider can't produce an out-of-range value, so anything here came from a

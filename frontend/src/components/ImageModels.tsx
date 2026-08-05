@@ -473,18 +473,25 @@ export default function ImageModels({ models, onChanged }: Props) {
                         onChange={(e) => pickTextEncoder(b.id, e.target.value)}
                         disabled={busy !== null}
                       >
-                        {(tes?.encoders ?? []).map((e) => (
-                          <option key={e.name} value={e.name}>
-                            {e.name} ({e.size_gb} GB)
-                          </option>
-                        ))}
+                        {/* Only the encoders whose architecture this model can
+                            actually load — see `FluxTextEncoder.fits`. Offering the
+                            rest made a pick that fails at load look like a normal
+                            choice, and the two installed FLUX.2 models take different
+                            architectures, so half the list was always wrong. */}
+                        {(tes?.encoders ?? [])
+                          .filter((e) => e.fits.includes(b.id))
+                          .map((e) => (
+                            <option key={e.name} value={e.name}>
+                              {e.name} ({e.size_gb} GB)
+                            </option>
+                          ))}
                       </select>
                     </div>
                   ))}
                   <div className="muted small">
-                    A model loads the encoder it was trained against. Another checkpoint of
-                    the same architecture works too — a smaller quant, say. The wrong
-                    architecture fails at load rather than generating badly.
+                    A model loads the encoder it was trained against, so each list holds
+                    only the encoders that fit that model. Another checkpoint of the same
+                    architecture works too — a smaller quant, say.
                   </div>
                   {(tes?.encoders ?? []).map((e) => (
                     <div key={e.name} className="row extra-model">
@@ -545,7 +552,13 @@ export default function ImageModels({ models, onChanged }: Props) {
                   {loraModels.map((m) => {
                     const picks = m.loras;
                     const attached = new Set(picks.map((p) => p.name));
-                    const available = (loras?.loras ?? []).filter((l) => !attached.has(l.name));
+                    // Only adapters trained against *this* transformer, and not
+                    // already on it — see `FluxLora.fits`. A klein adapter offered
+                    // for [dev] was the same trap the encoder list had: the pick
+                    // succeeds, then quietly patches almost nothing.
+                    const available = (loras?.loras ?? []).filter(
+                      (l) => !attached.has(l.name) && l.fits.includes(m.name)
+                    );
                     return (
                       <div key={m.name} className="lora-row">
                         {/* The role leads and never truncates: FLUX.1's two rows
