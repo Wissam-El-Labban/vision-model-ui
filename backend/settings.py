@@ -1,9 +1,10 @@
 """Server-side settings that outlive a browser session.
 
-Right now that's just the HuggingFace token, which the model installer needs for
-gated repos. It's a credential, so: written 0600, never returned to the browser (the
-API reports only whether one is present), and read from the environment if the user
-would rather not store it at all.
+Two of them are credentials — the HuggingFace token the model installer needs for
+gated repos, and the CivitAI key most LoRA downloads there now require. Both are
+handled the same way: written 0600, never returned to the browser (the API reports
+only whether one is present), and read from the environment if the user would rather
+not store them at all.
 """
 import json
 import os
@@ -12,6 +13,9 @@ from pathlib import Path
 SETTINGS_PATH = Path(__file__).resolve().parent / "data" / "settings.json"
 
 ENV_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")
+# CivitAI's own docs call it an API key; both spellings are in circulation in people's
+# shells, so accept either rather than silently ignoring the one they exported.
+CIVITAI_ENV_VARS = ("CIVITAI_TOKEN", "CIVITAI_API_KEY")
 
 
 def _read() -> dict:
@@ -71,6 +75,46 @@ def set_hf_token(token: str) -> None:
 def clear_hf_token() -> None:
     data = _read()
     data.pop("hf_token", None)
+    _write(data)
+
+
+def civitai_token() -> str:
+    """The saved CivitAI key, or one from the environment. Empty string if neither.
+
+    Optional in a way `hf_token` isn't for gated repos: some adapters download
+    anonymously. CivitAI requires a key for most of them, and answers a missing one
+    with a redirect to its login page rather than a 401 — see `pull_lora_civitai`.
+    """
+    saved = _read().get("civitai_token") or ""
+    if saved:
+        return saved
+    for var in CIVITAI_ENV_VARS:
+        if os.environ.get(var):
+            return os.environ[var]
+    return ""
+
+
+def civitai_token_source() -> str | None:
+    """Where the CivitAI key came from — for the UI, which never sees the value."""
+    if _read().get("civitai_token"):
+        return "saved"
+    if any(os.environ.get(v) for v in CIVITAI_ENV_VARS):
+        return "env"
+    return None
+
+
+def set_civitai_token(token: str) -> None:
+    """Save a CivitAI key, replacing any previous one. Empty clears it.
+
+    Same one-token-only guarantee as `set_hf_token`: `_write` truncates, so the old
+    value leaves the disk rather than sitting beside the new one.
+    """
+    data = _read()
+    tok = (token or "").strip()
+    if tok:
+        data["civitai_token"] = tok
+    else:
+        data.pop("civitai_token", None)
     _write(data)
 
 

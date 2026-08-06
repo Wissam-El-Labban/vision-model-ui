@@ -1780,8 +1780,10 @@ import json, os, struct, sys, time, urllib.request
 from urllib.error import HTTPError, URLError
 
 EXTS = (".gguf", ".safetensors", ".sft")
+ADAPTER_EXTS = EXTS + (".pt",)
 MAX_HEADER = 64 << 20  # a safetensors header is KBs; larger means it isn't one
 TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or ""
+CIVITAI_TOKEN = os.environ.get("CIVITAI_TOKEN") or ""
 
 def _api():
     # `token=False` (not None) so huggingface_hub uses the token the parent handed us
@@ -1891,10 +1893,105 @@ def fetch(repo, filename, dest_dir, out_name=""):
     emit(size, size)
     print("DONE " + base, flush=True)
 
+def _civitai_open(url):
+    headers = {"User-Agent": "vision-model-ui"}
+    if CIVITAI_TOKEN:
+        headers["Authorization"] = "Bearer " + CIVITAI_TOKEN
+    return urllib.request.urlopen(urllib.request.Request(url, headers=headers))
+
+def _civitai_version(ref):
+    # A bare id is ambiguous — people paste both the model id and the version id out of
+    # the same URL — so try it as a version, then as a model whose newest version we
+    # take. Resolving it here rather than in the parent keeps every CivitAI call in the
+    # one process that is allowed to make them.
+    try:
+        with _civitai_open("https://civitai.com/api/v1/model-versions/%s" % ref) as r:
+            return json.load(r)
+    except HTTPError as e:
+        if e.code != 404:
+            raise
+    with _civitai_open("https://civitai.com/api/v1/models/%s" % ref) as r:
+        versions = (json.load(r) or {}).get("modelVersions") or []
+    if not versions:
+        raise RuntimeError("CivitAI model %s has no downloadable versions." % ref)
+    with _civitai_open("https://civitai.com/api/v1/model-versions/%s"
+                       % versions[0]["id"]) as r:
+        return json.load(r)
+
+def civitai(ref, dest_dir, out_name=""):
+    meta = _civitai_version(ref)
+    files = [f for f in (meta.get("files") or [])
+             if str(f.get("name") or "").lower().endswith(ADAPTER_EXTS)]
+    if not files:
+        raise RuntimeError("that CivitAI version has no adapter file attached.")
+    # `primary` is CivitAI's own answer to "which file is the model" — a version often
+    # also carries a config or a VAE, and picking by order would sometimes take those.
+    pick = ([f for f in files if f.get("primary")] or files)[0]
+    base = out_name or os.path.basename(str(pick.get("name") or "lora.safetensors"))
+    out = os.path.join(dest_dir, base)
+    if os.path.exists(out):
+        raise RuntimeError("a LoRA named %s already exists." % base)
+    if not os.path.isdir(dest_dir):
+        os.makedirs(dest_dir)
+    trained = meta.get("baseModel") or "?"
+    name = (meta.get("model") or {}).get("name") or ref
+    print("Found %s (%s), trained on %s." % (name, meta.get("name") or "?", trained),
+          flush=True)
+
+    url = pick.get("downloadUrl") or ("https://civitai.com/api/download/models/%s"
+                                      % meta.get("id"))
+    tmp = out + ".part"
+    print("Downloading %s from CivitAI…" % base, flush=True)
+    with _civitai_open(url) as r:
+        # Without a key CivitAI does not 401 — it 200s with its sign-in page, which
+        # would otherwise land on disk as a .safetensors full of HTML and fail much
+        # later as an unreadable checkpoint.
+        ctype = (r.headers.get("Content-Type") or "").lower()
+        if "text/html" in ctype:
+            raise RuntimeError(
+                "CivitAI returned its login page instead of the file. That adapter "
+                "needs an API key — add one in the Models panel (civitai.com > "
+                "Account settings > API Keys).")
+        total = int(r.headers.get("Content-Length") or 0) or int(
+            float(pick.get("sizeKB") or 0) * 1024)
+        done = 0
+        last = 0.0
+        with open(tmp, "wb") as fh:
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                done += len(chunk)
+                if time.time() - last > 0.5:
+                    print("PROGRESS " + json.dumps(
+                        {"file": base, "done": done, "total": total,
+                         "pct": (100 * done // total) if total else 0}), flush=True)
+                    last = time.time()
+    os.replace(tmp, out)
+    size = os.path.getsize(out)
+    print("PROGRESS " + json.dumps({"file": base, "done": size, "total": size,
+                                    "pct": 100}), flush=True)
+    print("DONE " + base, flush=True)
+
 try:
     {"whoami": whoami, "probe": probe, "listing": listing, "inspect": inspect,
-     "fetch": fetch}[sys.argv[1]](*sys.argv[2:])
+     "fetch": fetch, "civitai": civitai}[sys.argv[1]](*sys.argv[2:])
 except HTTPError as e:
+    if sys.argv[1] == "civitai":
+        if e.code in (401, 403):
+            print("ERROR: CivitAI refused that download. Most adapters there need an "
+                  "API key — add one in the Models panel, and check the key hasn't "
+                  "expired.", flush=True)
+        elif e.code in (400, 404):
+            # 400 is what a malformed id gets, 404 a well-formed one that doesn't
+            # exist. Same cause from where the user is standing: wrong number.
+            print("ERROR: CivitAI has no model or version %s — paste the page URL "
+                  "(civitai.com/models/…) or the version id." % sys.argv[2], flush=True)
+        else:
+            print("ERROR: civitai.com returned %s for %s" % (e.code, sys.argv[2]),
+                  flush=True)
+        sys.exit(1)
     # A gated repo (black-forest-labs' own among them) lists its files to anyone but
     # serves the weights only to an accepted license, so this is the common failure,
     # not a typo.
@@ -1930,7 +2027,8 @@ except Exception as e:
         print("ERROR: %s while fetching from %s: %s" % (name, repo, e), flush=True)
     sys.exit(1)
 except URLError as e:
-    print("ERROR: could not reach huggingface.co (%s)" % e, flush=True); sys.exit(1)
+    host = "civitai.com" if sys.argv[1] == "civitai" else "huggingface.co"
+    print("ERROR: could not reach %s (%s)" % (host, e), flush=True); sys.exit(1)
 except Exception as e:
     # huggingface_hub raises its own requests-based errors (GatedRepoError and the like),
     # not urllib's, so the gated case reaches this branch on the fetch path. Read the
@@ -1949,18 +2047,21 @@ def _run_child(args: list[str], on_status=None, on_progress=None, token=None) ->
     """Run one `_HF_CHILD` mode, streaming its stdout, and return the lines it printed.
 
     The offline flags are dropped for the child alone, so the serving process itself
-    never gains network access. The HuggingFace token is handed over the same way —
-    only this child ever sees it.
+    never gains network access. A token is handed over the same way — only this child
+    ever sees it — and only the one its mode actually needs: a CivitAI download talks
+    to a third-party host, so the HuggingFace credential stays out of that process
+    entirely, and vice versa.
 
     `PROGRESS {...}` lines carry structured download progress; everything else is a
     human status line.
     """
     import sys  # PLC0415
 
+    mode = args[0] if args else ""
     # `token` is an unsaved one being validated; otherwise use whatever is configured
     # (the saved token, else one from the environment). Resolved before the scrub below,
     # which only touches the child's copy of the environment.
-    tok = (token or settings.hf_token()).strip()
+    tok = "" if mode == "civitai" else (token or settings.hf_token()).strip()
 
     env = {**os.environ}
     env.pop("HF_HUB_OFFLINE", None)
@@ -1975,6 +2076,16 @@ def _run_child(args: list[str], on_status=None, on_progress=None, token=None) ->
         env.pop(var, None)
     if tok:
         env["HF_TOKEN"] = tok
+    # The CivitAI key travels the same way and under the same rule: scrub whatever the
+    # server inherited, then set only what's configured now, so a stale key exported in
+    # the shell can't outlive the one the user saved. Set only for the mode that uses
+    # it, so an HF download never carries it either.
+    for var in settings.CIVITAI_ENV_VARS:
+        env.pop(var, None)
+    if mode == "civitai":
+        civitai = settings.civitai_token().strip()
+        if civitai:
+            env["CIVITAI_TOKEN"] = civitai
 
     proc = subprocess.Popen(
         [sys.executable, "-c", _HF_CHILD, *args],
@@ -2940,6 +3051,54 @@ def pull_lora(repo: str, on_status=None, on_progress=None) -> None:
         raise ValueError(
             f"{repo_id} holds {len(shown)} LoRAs — name the one you want:\n{listed}{more}")
     raise ValueError(f"No LoRA found in {repo_id}. Use owner/repo:file to name one.")
+
+
+def _parse_civitai(ref: str) -> str:
+    """The id in a CivitAI reference, however it was pasted.
+
+    Every shape the site hands out reduces to one number: the page URL, the API
+    download URL, the AIR identifier its API returns, or a bare id copied out of any of
+    them. Which *kind* of number it is can't be told by looking, so the child tries it
+    as a version and falls back to treating it as a model — see `_civitai_version`.
+    """
+    text = (ref or "").strip()
+    if not text:
+        raise ValueError("Paste a CivitAI model URL or id.")
+    # An explicit version wins over the model id in the same URL: someone who picked a
+    # specific version on the page means that one, and both numbers are present there.
+    m = re.search(r"modelVersionId=(\d+)", text, re.I) or re.search(r"@(\d+)", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"/(?:api/download/)?models/(\d+)", text, re.I)
+    if m:
+        return m.group(1)
+    if text.isdigit():
+        return text
+    raise ValueError(
+        f"'{text}' doesn't look like a CivitAI model. Paste the page URL "
+        "(civitai.com/models/…) or the id from it.")
+
+
+def pull_lora_civitai(ref: str, on_status=None, on_progress=None) -> None:
+    """Add a LoRA from CivitAI, given a page URL, a download URL, an AIR, or an id.
+
+    CivitAI is where most FLUX adapters actually live, and unlike HuggingFace it serves
+    the file directly rather than through a repo listing — so there's no probe step and
+    nothing to disambiguate: a version names its own primary file. What it does need is
+    an API key for most downloads, and it signals a missing one by serving its login
+    page with a 200 rather than refusing, which the child checks for explicitly.
+
+    The adapter lands in the same directory as a HuggingFace one and is read back by
+    `list_loras`, so its base model is detected from the file itself — CivitAI's own
+    `baseModel` string is reported in the status line but never trusted for that.
+    """
+    version = _parse_civitai(ref)
+    cat.LORA_DIR.mkdir(parents=True, exist_ok=True)
+    say = on_status or (lambda _m: None)
+    say(f"Resolving CivitAI {version}…")
+    _run_child(["civitai", version, str(cat.LORA_DIR)],
+               on_status=say, on_progress=on_progress or (lambda _p: None))
+    say("Download complete.")
 
 
 def delete_lora(name: str) -> None:

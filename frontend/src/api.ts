@@ -385,15 +385,20 @@ export async function getLoras(): Promise<FluxLoras> {
 
 /** Add one from HuggingFace (owner/repo:file, or a repo holding exactly one).
  *  Streams progress like the other pulls, though a LoRA is MBs not GBs. */
+/** Where a LoRA is being installed from. HuggingFace wants `owner/repo[:file]`;
+ *  CivitAI wants a page URL, a download URL, an AIR, or the id out of any of them. */
+export type LoraSource = "huggingface" | "civitai";
+
 export async function pullLora(
   repo: string,
+  source: LoraSource,
   onStatus: (message: string) => void,
   onProgress: (p: FluxProgress) => void
 ): Promise<void> {
   const res = await fetch("/api/flux/loras/pull", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ repo }),
+    body: JSON.stringify({ repo, source }),
   });
   if (!res.ok) {
     const detail = await res.json().catch(() => ({ detail: res.statusText }));
@@ -465,6 +470,26 @@ export async function setHfToken(token: string): Promise<string> {
 export async function clearHfToken(): Promise<void> {
   const res = await fetch("/api/settings/hf-token", { method: "DELETE" });
   if (!res.ok) throw new Error(`hf token: ${res.status}`);
+}
+
+/** The CivitAI API key, stored and reported exactly like the HuggingFace token —
+ *  set or cleared here, never read back. Not validated on save: CivitAI has no cheap
+ *  whoami, so a bad key surfaces on the next download instead. */
+export async function getCivitaiToken(): Promise<HfTokenSource> {
+  const res = await fetch("/api/settings/civitai-token");
+  if (!res.ok) throw new Error(`civitai token: ${res.status}`);
+  return (await res.json()).source;
+}
+
+export async function setCivitaiToken(token: string): Promise<HfTokenSource> {
+  const res = await fetch("/api/settings/civitai-token", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  const body = await res.json().catch(() => ({ detail: res.statusText }));
+  if (!res.ok) throw new Error(body.detail ?? `civitai token: ${res.status}`);
+  return body.source as HfTokenSource;
 }
 
 /** Download an extra FLUX UNet from a HuggingFace repo (owner/name or

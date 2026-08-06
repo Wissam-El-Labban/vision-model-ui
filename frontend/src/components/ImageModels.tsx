@@ -5,6 +5,7 @@ import {
   deleteFluxModel,
   deleteLora,
   deleteTextEncoder,
+  getCivitaiToken,
   getFluxCatalog,
   getLoras,
   getTextEncoders,
@@ -12,11 +13,19 @@ import {
   pullFluxModel,
   pullLora,
   pullTextEncoder,
+  setCivitaiToken,
   setLoraPicks,
   selectTextEncoder,
   setHfToken,
 } from "../api";
-import type { FluxCatalog, FluxLoras, FluxModel, FluxTextEncoders } from "../api";
+import type {
+  FluxCatalog,
+  FluxLoras,
+  FluxModel,
+  FluxTextEncoders,
+  HfTokenSource,
+  LoraSource,
+} from "../api";
 
 interface Props {
   models: FluxModel[]; // installed transformers, incl. user-added ones
@@ -44,7 +53,13 @@ export default function ImageModels({ models, onChanged }: Props) {
   const [teStatus, setTeStatus] = useState<string | null>(null);
   const [loras, setLoras] = useState<FluxLoras | null>(null);
   const [loraRepo, setLoraRepo] = useState("");
+  const [loraSource, setLoraSource] = useState<LoraSource>("huggingface");
   const [loraStatus, setLoraStatus] = useState<string | null>(null);
+  // The key itself only ever travels browser -> server. `civitaiSource` is all that
+  // comes back — whether one is saved, inherited from the environment, or absent —
+  // which is what the field's placeholder reports.
+  const [civitaiKey, setCivitaiKey] = useState("");
+  const [civitaiSource, setCivitaiSource] = useState<HfTokenSource>(null);
 
   async function refresh() {
     try {
@@ -52,6 +67,7 @@ export default function ImageModels({ models, onChanged }: Props) {
       setCat(c);
       setTes(await getTextEncoders().catch(() => null));
       setLoras(await getLoras().catch(() => null));
+      setCivitaiSource(await getCivitaiToken().catch(() => null));
       return c;
     } catch {
       setCat(null);
@@ -234,6 +250,24 @@ export default function ImageModels({ models, onChanged }: Props) {
     }
   }
 
+  /** Saved on its own rather than as part of the download, so a key pasted once is
+   *  there for every later adapter — and so a wrong one can be corrected without
+   *  re-typing the model reference beside it. */
+  async function saveCivitaiKey() {
+    if (!civitaiKey.trim()) return;
+    setBusy("lora");
+    setLoraStatus("saving key…");
+    try {
+      setCivitaiSource(await setCivitaiToken(civitaiKey.trim()));
+      setCivitaiKey("");
+      setLoraStatus("✓ CivitAI key saved");
+    } catch (e) {
+      setLoraStatus(`✗ ${(e as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function addLora() {
     if (!loraRepo.trim()) return;
     setBusy("lora");
@@ -242,6 +276,7 @@ export default function ImageModels({ models, onChanged }: Props) {
     try {
       await pullLora(
         loraRepo.trim(),
+        loraSource,
         (m) => setLoraStatus(m),
         (p) => {
           // MB, not GB like the encoders — a LoRA that reported "0.0/0.2 GB" the
@@ -651,10 +686,25 @@ export default function ImageModels({ models, onChanged }: Props) {
                     </div>
                   ))}
                   <div className="row">
+                    <select
+                      className="lora-source"
+                      value={loraSource}
+                      onChange={(e) => setLoraSource(e.target.value as LoraSource)}
+                      disabled={busy !== null}
+                      title="Where to install this adapter from"
+                    >
+                      <option value="huggingface">HuggingFace</option>
+                      <option value="civitai">CivitAI</option>
+                    </select>
                     <input
                       value={loraRepo}
                       onChange={(e) => setLoraRepo(e.target.value)}
-                      placeholder="owner/repo:file.safetensors (HuggingFace)"
+                      placeholder={
+                        loraSource === "civitai"
+                          ? "civitai.com/models/… or the id"
+                          : "owner/repo:file.safetensors"
+                      }
+                      onKeyDown={(e) => e.key === "Enter" && addLora()}
                     />
                     <button className="btn" onClick={addLora} disabled={busy !== null}>
                       {busy === "lora" ? "Adding…" : "⬇ Add"}
@@ -671,12 +721,46 @@ export default function ImageModels({ models, onChanged }: Props) {
                   {busy !== "lora" && loraStatus && (
                     <div className="muted small note te-status">{loraStatus}</div>
                   )}
+                  {loraSource === "civitai" && (
+                    <div className="row">
+                      <input
+                        type="password"
+                        value={civitaiKey}
+                        onChange={(e) => setCivitaiKey(e.target.value)}
+                        placeholder={
+                          civitaiSource === "saved"
+                            ? "API key saved — paste a new one to replace it"
+                            : civitaiSource === "env"
+                              ? "Using CIVITAI_TOKEN from the environment"
+                              : "CivitAI API key (most downloads need one)"
+                        }
+                        onKeyDown={(e) => e.key === "Enter" && saveCivitaiKey()}
+                      />
+                      <button
+                        className="btn"
+                        onClick={saveCivitaiKey}
+                        disabled={busy !== null || !civitaiKey.trim()}
+                      >
+                        Save
+                      </button>
+                    </div>
+                  )}
                   <div className="muted small">
-                    Most FLUX.2 adapters are published on Civitai rather than
-                    HuggingFace — those download in the browser, so drop the{" "}
-                    <code>.safetensors</code> into{" "}
-                    <code>flux_runtime/ComfyUI/models/loras/</code> and it shows up in
-                    the list above.
+                    {loraSource === "civitai" ? (
+                      <>
+                        Paste the adapter's page URL — a <code>?modelVersionId=</code> in
+                        it picks that exact version, otherwise the newest one is taken.
+                        Most CivitAI downloads need an API key (civitai.com → Account
+                        settings → API Keys); it's stored server-side and never sent back
+                        to the browser.
+                      </>
+                    ) : (
+                      <>
+                        <code>owner/repo</code> on its own works when the repo holds
+                        exactly one adapter; name the file otherwise. Most FLUX.2
+                        adapters are published on CivitAI — switch the source above.
+                      </>
+                    )}
                   </div>
                 </>
               )}

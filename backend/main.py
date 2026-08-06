@@ -415,16 +415,23 @@ def flux_loras():
 
 class LoraPullRequest(BaseModel):
     repo: str
+    # Defaulted rather than required so an older client (or a saved request) keeps
+    # meaning what it used to mean.
+    source: str = "huggingface"  # huggingface | civitai
 
 
 @app.post("/api/flux/loras/pull")
 def flux_lora_pull(req: LoraPullRequest):
-    """Add a LoRA from HuggingFace. owner/repo:file, or owner/repo holding exactly one."""
+    """Add a LoRA. HuggingFace takes owner/repo:file (or owner/repo holding exactly
+    one); CivitAI takes a page URL, a download URL, an AIR, or a bare id."""
     if not fx.runtime_ready():
         raise HTTPException(status_code=503, detail="The image engine isn't installed.")
+    if req.source not in ("huggingface", "civitai"):
+        raise HTTPException(status_code=400, detail=f"Unknown source '{req.source}'.")
 
     def work(emit):
-        fx.pull_lora(
+        pull = fx.pull_lora_civitai if req.source == "civitai" else fx.pull_lora
+        pull(
             req.repo,
             on_status=lambda m: emit({"type": "status", "message": m}),
             on_progress=lambda p: emit({"type": "progress", **p}),
@@ -492,6 +499,34 @@ def hf_token_put(req: HfTokenRequest):
 def hf_token_delete():
     settings.clear_hf_token()
     return {"source": settings.hf_token_source()}
+
+
+# --------------------------------------------------------------------------- #
+# CivitAI API key — needed for most LoRA downloads there. Same storage and same
+# silence as the HuggingFace token: 0600 on disk, only its presence reported back.
+# Unlike HuggingFace's there's no validation call before saving — CivitAI has no
+# cheap whoami endpoint, and a bad key surfaces on the next download with a message
+# that says so.
+# --------------------------------------------------------------------------- #
+class CivitaiTokenRequest(BaseModel):
+    token: str
+
+
+@app.get("/api/settings/civitai-token")
+def civitai_token_get():
+    return {"source": settings.civitai_token_source()}
+
+
+@app.put("/api/settings/civitai-token")
+def civitai_token_put(req: CivitaiTokenRequest):
+    settings.set_civitai_token(req.token)
+    return {"source": settings.civitai_token_source()}
+
+
+@app.delete("/api/settings/civitai-token")
+def civitai_token_delete():
+    settings.set_civitai_token("")
+    return {"source": settings.civitai_token_source()}
 
 
 @app.post("/api/generate")

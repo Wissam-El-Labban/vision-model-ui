@@ -349,6 +349,14 @@ textarea {
   padding-bottom: 8px;
 }
 
+/* The install row's source picker. Sized to its content so the reference field beside
+   it keeps the rest of the row — that field holds a URL and is the one that needs the
+   space. */
+.lora-source {
+  flex: 0 0 auto;
+  width: auto;
+}
+
 /* One attached adapter within a model's stack — its own name, delete button and
    weight slider. A left rule separates it from its neighbors once there's more
    than one, the same way a nested list reads as belonging to its parent. */
