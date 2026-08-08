@@ -96,6 +96,12 @@ export interface GenSettings {
    *  constrains; lower starts from the source image so its geometry survives. The
    *  dial that decides whether a pose is suggested or held. */
   structureLock: number;
+  /** control: with a studio pose, whether the first attachment is the scene the
+   *  figures are posed *into* rather than a subject reference. Off, a studio pose
+   *  is the whole signal and every attachment describes who is in it; on, the
+   *  photo becomes the source image — which is what re-enables the structure
+   *  lock, and what lets maps derived from the photo stack with the studio's. */
+  studioSource: boolean;
   /** control: scales the model's control-adapter LoRA for this generation. */
   controlStrength: number;
   /** control: Canny edge thresholds. Lower low = more edges kept. */

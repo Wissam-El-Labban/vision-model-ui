@@ -102,6 +102,7 @@ export default function App() {
     // reaches for once the maps alone haven't landed the pose.
     controlKinds: ["depth"],
     structureLock: 1,
+    studioSource: false,
     controlStrength: 1,
     cannyLow: 0.3,
     cannyHigh: 0.4,
@@ -116,6 +117,12 @@ export default function App() {
   // They're already control maps, not images to derive one from, and mixing the
   // two lists would make "is this the source or the map?" ambiguous per image.
   const [studioMaps, setStudioMaps] = useState<ControlMap[]>([]);
+  // What those maps contain. Held separately because it isn't in the pixels the
+  // enhancer is allowed to look at — a control map is the one image its brief
+  // forbids describing, so the figure count has to arrive as a number.
+  const [studioMeta, setStudioMeta] = useState<{ subjects: number; contact: boolean } | null>(
+    null
+  );
   const [studioOpen, setStudioOpen] = useState(false);
   const guidanceReady = useRef(false);
   const refreshFlux = useCallback(() => {
@@ -689,15 +696,19 @@ export default function App() {
       // map from: it *is* the map. It goes to `control_map_hashes` instead, which is
       // both the re-roll path (pin the map the last run emitted) and how a skeleton
       // posed in Blender or PoseMy.Art gets in without being re-analysed.
+      //
+      // Studio maps were authored as maps too, so nothing is derived from them
+      // either. What they leave open is what an *attachment* then means, and the
+      // two answers produce completely different images: a subject reference lends
+      // a face and clothing, while a scene is the photograph the figures are posed
+      // into and survives the generation. `studioSource` is that choice.
       const isCompose = op === "compose";
       const isControl = op === "control";
-      // Studio maps win outright: they were authored as maps, so there is nothing
-      // to derive and no source image involved. Otherwise, with no control type
-      // selected the first attachment *is* the map — that's the re-roll path (pin
-      // the map the last run emitted) and how a skeleton drawn elsewhere gets in.
       const usingStudio = isControl && studioMaps.length > 0;
+      const studioScene = usingStudio && gen.studioSource && images.length > 0;
       const controlAsMap = isControl && !usingStudio && gen.controlKinds.length === 0;
-      const initUrl = isCompose || controlAsMap || usingStudio ? null : images[0] ?? null;
+      const initUrl =
+        isCompose || controlAsMap || (usingStudio && !studioScene) ? null : images[0] ?? null;
       const mapUrls = usingStudio
         ? studioMaps.map((m) => m.url)
         : controlAsMap && images.length
@@ -706,7 +717,11 @@ export default function App() {
       const refUrls = isCompose
         ? images
         : usingStudio
-          ? images // nothing is the source, so every attachment is a subject reference
+          ? // With no scene, nothing is the source and every attachment describes
+            // who is in the pose.
+            studioScene
+            ? images.slice(1)
+            : images
           : op === "edit" || isControl
             ? images.slice(1)
             : [];
@@ -812,9 +827,11 @@ export default function App() {
             // not knowing about them.
             ...(isControl
               ? {
-                  // Studio maps are finished maps; asking the backend to derive
-                  // more from a source that doesn't exist would just error.
-                  control_kinds: usingStudio ? [] : gen.controlKinds,
+                  // Studio maps are finished maps. With no scene photo there is
+                  // no source to derive more from, and asking would just error;
+                  // with one, derived maps stack with the studio's on the
+                  // backend, which is how a photo's own depth joins the pose.
+                  control_kinds: usingStudio && !studioScene ? [] : gen.controlKinds,
                   control_map_hashes: mapHashes,
                   structure_lock: gen.structureLock,
                   control_strength: gen.controlStrength,
@@ -1023,6 +1040,8 @@ export default function App() {
         model: effectiveEnhanceModel,
         image_hashes: await ensureHashes(seen),
         ollama_url: ollamaUrl,
+        // Only meaningful for a studio pose; the backend ignores it elsewhere.
+        ...(op === "control" && studioMaps.length > 0 && studioMeta ? studioMeta : {}),
       });
       if (rewritten && rewritten !== prompt) {
         return {
@@ -1086,9 +1105,9 @@ export default function App() {
             );
             return;
           }
-        } else if (gen.structureLock < 1) {
+        } else if (gen.structureLock < 1 && !(gen.studioSource && attached.length > 0)) {
           setError(
-            "A studio pose has no source image to lock onto — the maps are the whole signal. Set the structure lock back to 1."
+            "A studio pose on its own has no source image to lock onto — the maps are the whole signal. Attach the scene photo and tick “use it as the scene”, or set the structure lock back to 1."
           );
           return;
         }
@@ -1200,8 +1219,12 @@ export default function App() {
             pinnedInit={pinnedImages[0] ?? null}
             preprocessors={preprocessors}
             studioMaps={studioMaps}
+            studioMeta={studioMeta}
             onOpenStudio={() => setStudioOpen(true)}
-            onClearStudioMaps={() => setStudioMaps([])}
+            onClearStudioMaps={() => {
+              setStudioMaps([]);
+              setStudioMeta(null);
+            }}
           />
         </div>
       </main>
@@ -1211,8 +1234,10 @@ export default function App() {
         >
           <PoseStudio
             onClose={() => setStudioOpen(false)}
-            onUse={(maps) => {
+            sceneImage={composerImages[0] ?? pinnedImages[0] ?? null}
+            onUse={(maps, meta) => {
               setStudioMaps(maps);
+              setStudioMeta(meta);
               // Posing is only meaningful in the Control tab, and arriving there
               // is what the user was doing — don't make them find the tab too.
               setGenMode(true);

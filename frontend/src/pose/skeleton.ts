@@ -71,9 +71,15 @@ export const HANDLES = [
   "thighL", "shinL", "footL",
 ] as const;
 
-/** Handles that drive a two-bone IK chain instead of aiming a single bone.
- *  Dragging a wrist and having the elbow solve itself is the difference between
- *  "put the hand on the floor" taking one drag or five. */
+/** The two-bone chains, used to solve a limb onto a contact point.
+ *
+ * This is *not* the drag path. Dragging a wrist used to run IK, which solves the
+ * elbow for you — convenient for "put the hand on the floor", and wrong for
+ * everything else, because the shoulder and elbow both move and a pose you had
+ * already settled comes apart when you nudge a hand. Drags now aim one bone and
+ * leave the joint above it exactly where it was. IK survives here for the one job
+ * a user can't do by hand: `GROUND_REACH`, which plants a preset's limbs on the
+ * floor at load time. */
 export const IK_CHAINS: Record<string, { root: string; mid: string; end: string }> = {
   handR: { root: "upperArmR", mid: "foreArmR", end: "handR" },
   handL: { root: "upperArmL", mid: "foreArmL", end: "handL" },
@@ -89,6 +95,35 @@ export const POLE_HINTS: Record<string, [number, number, number]> = {
   handL: [0, -0.3, -1],
   footR: [0, -0.3, 1],
   footL: [0, -0.3, 1],
+};
+
+/** What dragging a handle rotates: the bone above it, aimed so that this handle's
+ *  own joint follows the cursor.
+ *
+ * A handle sits at its bone's origin, so moving that origin means rotating the
+ * bone *above* it — grabbing the elbow and pulling swings the upper arm rather
+ * than spinning the forearm about its own origin. `child` is spelled out rather
+ * than derived because two bones have more than one child: `hips` has the spine
+ * and both thighs, and defaulting to the first-declared one made the R/L hip
+ * handles swing the entire torso. `hips` itself is absent — it places the figure
+ * instead of rotating anything. */
+export const HANDLE_AIM: Record<string, { bone: string; child: string }> = {
+  spine: { bone: "hips", child: "spine" },
+  chest: { bone: "spine", child: "chest" },
+  neck: { bone: "chest", child: "neck" },
+  head: { bone: "neck", child: "head" },
+  upperArmR: { bone: "clavicleR", child: "upperArmR" },
+  foreArmR: { bone: "upperArmR", child: "foreArmR" },
+  handR: { bone: "foreArmR", child: "handR" },
+  upperArmL: { bone: "clavicleL", child: "upperArmL" },
+  foreArmL: { bone: "upperArmL", child: "foreArmL" },
+  handL: { bone: "foreArmL", child: "handL" },
+  thighR: { bone: "hips", child: "thighR" },
+  shinR: { bone: "thighR", child: "shinR" },
+  footR: { bone: "shinR", child: "footR" },
+  thighL: { bone: "hips", child: "thighL" },
+  shinL: { bone: "thighL", child: "shinL" },
+  footL: { bone: "shinL", child: "footL" },
 };
 
 /** Human names for the handles, for the picker and the status line. */
@@ -154,17 +189,46 @@ export const POSE_COLORS: [number, number, number][] = [
   [170, 0, 255], [255, 0, 255], [255, 0, 170], [255, 0, 85],
 ];
 
-/** A saved pose: every bone's local rotation as a quaternion, plus the figure's
- *  placement and the props around it. Quaternions rather than Euler angles so a
- *  reloaded pose can't gimbal-lock into a different pose than the one saved. */
-export interface PoseFile {
-  version: 1;
-  name: string;
+/** One figure's pose: every bone's local rotation as a quaternion, plus where it
+ *  stands. Quaternions rather than Euler angles so a reloaded pose can't
+ *  gimbal-lock into a different pose than the one saved. */
+export interface FigurePose {
   /** bone name -> [x, y, z, w] */
   rotations: Record<string, [number, number, number, number]>;
   rootPosition: [number, number, number];
   rootRotationY: number;
+}
+
+/** The original single-figure save format. Still in users' localStorage, so it is
+ *  read (and migrated) rather than deleted. */
+export interface PoseFileV1 extends FigurePose {
+  version: 1;
+  name: string;
   props: PropDef[];
+}
+
+/** A saved scene: every figure in it, and the props they're arranged around. */
+export interface PoseFileV2 {
+  version: 2;
+  name: string;
+  figures: FigurePose[];
+  props: PropDef[];
+}
+
+export type PoseFile = PoseFileV1 | PoseFileV2;
+
+/** Read any saved pose as the current format. Anything that isn't explicitly v2
+ *  is treated as v1 — a record written by a build old enough to predate the
+ *  version field is still a single-figure pose. */
+export function normalizePoseFile(file: PoseFile): PoseFileV2 {
+  if (file.version === 2) return file;
+  const { rotations, rootPosition, rootRotationY } = file;
+  return {
+    version: 2,
+    name: file.name,
+    figures: [{ rotations, rootPosition, rootRotationY }],
+    props: file.props ?? [],
+  };
 }
 
 /** A block of scenery. Deliberately primitive: the point is not to model a chair,

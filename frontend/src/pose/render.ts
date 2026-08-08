@@ -138,6 +138,20 @@ export function renderDepth(
   return url;
 }
 
+/** Project the 18 keypoints to pixel coordinates, against the camera exactly as
+ *  it stands. The caller owns the aspect — see `projectKeypoints`. */
+function projectRig(
+  rig: Rig,
+  camera: THREE.PerspectiveCamera,
+  width: number,
+  height: number
+): { x: number; y: number }[] {
+  return openposeWorld(rig).map((p) => {
+    const v = p.clone().project(camera);
+    return { x: ((v.x + 1) / 2) * width, y: ((1 - v.y) / 2) * height };
+  });
+}
+
 /** Project the 18 keypoints to pixel coordinates for a `width`x`height` frame. */
 export function projectKeypoints(
   rig: Rig,
@@ -149,12 +163,7 @@ export function projectKeypoints(
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
   camera.updateMatrixWorld();
-
-  const pts = openposeWorld(rig).map((p) => {
-    const v = p.clone().project(camera);
-    return { x: ((v.x + 1) / 2) * width, y: ((1 - v.y) / 2) * height };
-  });
-
+  const pts = projectRig(rig, camera, width, height);
   camera.aspect = prevAspect;
   camera.updateProjectionMatrix();
   return pts;
@@ -162,13 +171,21 @@ export function projectKeypoints(
 
 const rgb = (c: [number, number, number]) => `rgb(${c[0]},${c[1]},${c[2]})`;
 
-/** Draw an OpenPose BODY_18 skeleton and return it as a PNG data-URL.
+/** Draw every figure's OpenPose BODY_18 skeleton onto one frame, and return it as
+ *  a PNG data-URL.
  *
  * Limbs are ellipses rather than lines because that is what OpenPose renders and
  * what the pose adapters were trained on: a limb has width, and the width carries
- * scale information a 1-pixel line doesn't. */
+ * scale information a 1-pixel line doesn't.
+ *
+ * Several people go on one canvas, each in the *same* palette, drawn opaque —
+ * which is what ComfyUI's `SDPoseDrawKeypoints` does (it loops the frame's people
+ * onto a shared canvas, colours by limb index, and fills without blending). A
+ * per-person tint would be a different signal to the adapter, not a clearer one.
+ * The only ordering rule is back-to-front, so the nearer figure overdraws the
+ * further one the way an occlusion actually looks. */
 export function renderPose(
-  rig: Rig,
+  rigs: Rig[],
   camera: THREE.PerspectiveCamera,
   width: number,
   height: number
@@ -182,39 +199,57 @@ export function renderPose(
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, width, height);
 
-  const pts = projectKeypoints(rig, camera, width, height);
   // Scale the stick width with the frame, so a 1216px render doesn't come out
-  // looking like a wire diagram of the same pose.
+  // looking like a wire diagram of the same pose. Global, not per figure: DWPose
+  // draws every person at one width, and a thinner skeleton would read as a
+  // smaller person rather than a further one.
   const stick = Math.max(Math.round(Math.min(width, height) / 190), 2);
-
   const limbs = [...BODY_LIMBS, ...HEAD_LIMBS];
-  limbs.forEach(([i, j], edge) => {
-    const a = pts[i];
-    const b = pts[j];
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    const len = Math.hypot(dx, dy);
-    if (len < 1) return;
-    ctx.fillStyle = rgb(POSE_COLORS[edge % POSE_COLORS.length]);
-    ctx.beginPath();
-    ctx.ellipse(
-      (a.x + b.x) / 2,
-      (a.y + b.y) / 2,
-      len / 2,
-      stick,
-      Math.atan2(dy, dx),
-      0,
-      Math.PI * 2
-    );
-    ctx.fill();
-  });
 
-  pts.forEach((p, i) => {
-    ctx.fillStyle = rgb(POSE_COLORS[i % POSE_COLORS.length]);
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, stick, 0, Math.PI * 2);
-    ctx.fill();
-  });
+  const prevAspect = camera.aspect;
+  camera.aspect = width / height;
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld();
 
+  const ordered = [...rigs].sort(
+    (a, b) =>
+      camera.position.distanceToSquared(b.root.getWorldPosition(new THREE.Vector3())) -
+      camera.position.distanceToSquared(a.root.getWorldPosition(new THREE.Vector3()))
+  );
+
+  for (const rig of ordered) {
+    const pts = projectRig(rig, camera, width, height);
+
+    limbs.forEach(([i, j], edge) => {
+      const a = pts[i];
+      const b = pts[j];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 1) return;
+      ctx.fillStyle = rgb(POSE_COLORS[edge % POSE_COLORS.length]);
+      ctx.beginPath();
+      ctx.ellipse(
+        (a.x + b.x) / 2,
+        (a.y + b.y) / 2,
+        len / 2,
+        stick,
+        Math.atan2(dy, dx),
+        0,
+        Math.PI * 2
+      );
+      ctx.fill();
+    });
+
+    pts.forEach((p, i) => {
+      ctx.fillStyle = rgb(POSE_COLORS[i % POSE_COLORS.length]);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, stick, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  camera.aspect = prevAspect;
+  camera.updateProjectionMatrix();
   return canvas.toDataURL("image/png");
 }

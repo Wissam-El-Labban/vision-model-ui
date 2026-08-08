@@ -612,6 +612,11 @@ export async function enhancePrompt(params: {
   model: string;
   image_hashes?: string[];
   ollama_url: string;
+  /** control only: how many figures the studio pose holds, and whether they
+   *  touch. The maps aren't sent to the vision model, so without this a
+   *  two-person pose is briefed as a one-person scene. */
+  subjects?: number;
+  contact?: boolean;
 }): Promise<{ prompt: string; source: "vlm" | "template" }> {
   const res = await fetch("/api/flux/enhance", {
     method: "POST",

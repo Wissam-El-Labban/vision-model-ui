@@ -68,6 +68,9 @@ interface Props {
   preprocessors: FluxPreprocessor[];
   /** Maps posed in the studio, waiting to be generated from. */
   studioMaps: { kind: ControlKind; url: string }[];
+  /** What those maps contain. The enhancer is off by default, so for most runs
+   *  this is only useful said out loud to the user. */
+  studioMeta: { subjects: number; contact: boolean } | null;
   onOpenStudio: () => void;
   onClearStudioMaps: () => void;
 }
@@ -103,6 +106,7 @@ export default function Composer({
   pinnedInit,
   preprocessors,
   studioMaps,
+  studioMeta,
   onOpenStudio,
   onClearStudioMaps,
 }: Props) {
@@ -174,6 +178,28 @@ export default function Composer({
   // Without a source there is nothing to derive a map from and nothing to lock to.
   // The maps the user attached directly still work — that's the re-roll path.
   const hasControlSource = !!initPreview;
+  // A studio pose changes what an attachment *means*: by default it's a subject
+  // reference and there is no source at all, so the lock has nothing to hold onto
+  // even though an image is present. Ticking "use as the scene" is what promotes
+  // it back to a source. Everything that keys off "is there a source" has to ask
+  // this rather than `hasControlSource`, or the lock offers itself for a run the
+  // backend will reject.
+  const hasStudioMaps = studioMaps.length > 0;
+  const studioScene = hasStudioMaps && gen.studioSource && !!initPreview;
+  const controlSourceActive = hasStudioMaps ? studioScene : hasControlSource;
+
+  /** What the backend will do with attachment `i`, in one word. Mirrors the split
+   *  in `generateImage`; "" where the mode gives every image the same job. */
+  function imageRole(i: number): string {
+    if (isCompose) return "";
+    if (isControl) {
+      if (hasStudioMaps) return studioScene && i === 0 ? "scene" : "subject ref";
+      if (i > 0) return "subject ref";
+      return gen.controlKinds.length === 0 ? "control map" : "structure";
+    }
+    if (isEdit) return i === 0 ? "scene" : "subject ref";
+    return "";
+  }
   // Whether the model that will run has an adapter flagged as its control adapter.
   // Without one, FLUX.2 treats a control map as an image to *emulate* rather than a
   // structure to follow — the classic symptom being a result that comes back looking
@@ -409,7 +435,7 @@ export default function Composer({
         </div>
       )}
 
-      {genMode && isControl && studioMaps.length > 0 && (
+      {genMode && isControl && hasStudioMaps && (
         <div className="init-hint">
           <div className="studio-maps">
             {studioMaps.map((m) => (
@@ -418,18 +444,55 @@ export default function Composer({
                 <figcaption>{m.kind}</figcaption>
               </figure>
             ))}
+            {/* The scene photo sits in the same strip once it's been promoted to
+                a source, because at that point it is part of the same signal —
+                keeping it in the attachment row below implied it was a reference. */}
+            {studioScene && initPreview && (
+              <figure>
+                <img src={initPreview} alt="scene" />
+                <figcaption>scene</figcaption>
+              </figure>
+            )}
           </div>
           <span>
-            Posed in the studio — generating on {studioMaps.map((m) => m.kind).join(" + ")}.
-            Describe the image you want built on this pose.{" "}
+            Posed in the studio — generating on {studioMaps.map((m) => m.kind).join(" + ")}
+            {studioMeta && studioMeta.subjects > 1 ? (
+              <>
+                , <strong>{studioMeta.subjects} figures</strong>
+                {studioMeta.contact ? " in contact" : ""}
+              </>
+            ) : null}
+            . Describe the image you want built on this pose
+            {studioMeta && studioMeta.subjects > 1
+              ? " — say there are " +
+                studioMeta.subjects +
+                " people and what each is doing, or the model will render one."
+              : "."}{" "}
             <button className="link-btn" onClick={onOpenStudio}>Edit pose</button>
             {" · "}
             <button className="link-btn" onClick={onClearStudioMaps}>Clear</button>
+            {initPreview && (
+              <>
+                <br />
+                <label className="studio-scene-toggle">
+                  <input
+                    type="checkbox"
+                    checked={gen.studioSource}
+                    onChange={(e) => patchGen({ studioSource: e.target.checked })}
+                  />
+                  Use the {initSource === "attached" ? "attached" : "pinned"} image as the{" "}
+                  <em>scene</em> to pose into
+                </label>{" "}
+                {studioScene
+                  ? "— it's the source now, so the structure lock is live and any control types you pick are derived from it and stacked with the studio's maps."
+                  : "— off, it's a subject reference: it lends a face and clothing, not a place."}
+              </>
+            )}
           </span>
         </div>
       )}
 
-      {genMode && isControl && studioMaps.length === 0 && (
+      {genMode && isControl && !hasStudioMaps && (
         <div className="init-hint">
           {initPreview && (
             <img className="init-thumb" src={initPreview} alt="control source" />
@@ -469,6 +532,11 @@ export default function Composer({
             {images.map((src, i) => (
               <div className="thumb" key={i}>
                 <img src={src} alt={`attachment ${i + 1}`} />
+                {/* An attachment's job has always been decided by its position in
+                    this list, and nothing said so. It matters most here, where a
+                    photo is either the place the scene happens or the person in
+                    it, and the two produce completely different images. */}
+                {genMode && imageRole(i) && <span className="thumb-role">{imageRole(i)}</span>}
                 <div className="thumb-actions">
                   <button title="Rotate" onClick={() => onRotateImage(i)}>
                     ↻
@@ -667,13 +735,15 @@ export default function Composer({
                       className="control-slider"
                       type="range" min={0.4} max={1} step={0.05}
                       value={gen.structureLock}
-                      disabled={!hasControlSource}
+                      disabled={!controlSourceActive}
                       onChange={(e) => patchGen({ structureLock: +e.target.value })}
                     />
                     <p className="hint muted">
-                      {hasControlSource
+                      {controlSourceActive
                         ? "This is the dial that decides whether the pose is suggested or held. At 1 the maps only guide; lower it and generation starts from the source image itself, so its geometry survives. Below ~0.6 the source's own appearance starts coming through as well — sweep down until the pose lands, then back off."
-                        : "Needs a source image — there's nothing to lock onto yet."}
+                        : hasStudioMaps
+                          ? "A studio pose is the whole signal on its own — there's no source image to lock onto. Attach the photo you want the figures posed into and tick “use it as the scene”."
+                          : "Needs a source image — there's nothing to lock onto yet."}
                     </p>
 
                     <label className="lbl">

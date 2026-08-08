@@ -16,9 +16,19 @@ const _v = new THREE.Vector3();
  *
  * Twist is not preserved — a mannequin limb is rotationally symmetric, so there
  * is nothing to preserve, and the shortest-arc rotation is the one that feels
- * like dragging the limb rather than winding it. */
-export function aimBone(rig: Rig, bone: string, worldDir: THREE.Vector3): void {
-  const child = CHILD_OF[bone];
+ * like dragging the limb rather than winding it.
+ *
+ * `child` names which of the bone's children is the one being aimed. It defaults
+ * to `CHILD_OF`, which is "whichever child was declared first" — right for every
+ * bone with one child, and wrong for the two that have several: aiming `hips`
+ * would swing the *spine* when what the user grabbed was a thigh. Callers that
+ * know which child they mean pass it. */
+export function aimBone(
+  rig: Rig,
+  bone: string,
+  worldDir: THREE.Vector3,
+  child: string | undefined = CHILD_OF[bone]
+): void {
   if (!child) return;
   const rest = OFFSETS[child];
   if (!rest || rest.lengthSq() < 1e-8) return;

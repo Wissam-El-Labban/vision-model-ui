@@ -97,10 +97,15 @@ MAX_ENHANCE_IMAGES = 4
 
 class EnhanceRequest(BaseModel):
     prompt: str
-    mode: str = "txt2img"  # txt2img | img2img | edit | compose
+    mode: str = "txt2img"  # txt2img | img2img | edit | compose | control | animate
     model: str  # the Ollama vision model to rewrite with
     image_hashes: list[str] = []
     ollama_url: str = oc.DEFAULT_URL
+    # What a pose built in the Pose Studio contains. The control maps themselves
+    # are never sent here (the control brief forbids describing them), so this is
+    # the only way the rewrite can know it is briefing a two-person scene.
+    subjects: int = 1
+    contact: bool = False
 
 
 class GenerateRequest(BaseModel):
@@ -277,7 +282,10 @@ def flux_enhance(req: EnhanceRequest):
                 # endpoint's contract is that it never fails, so drop it and let the
                 # model rewrite from whatever else it was given.
                 pass
-        text = oc.enhance_prompt(req.ollama_url, req.model, req.prompt, req.mode, imgs)
+        text = oc.enhance_prompt(
+            req.ollama_url, req.model, req.prompt, req.mode, imgs,
+            subjects=req.subjects, contact=req.contact,
+        )
         if text:
             return {"prompt": text, "source": "vlm"}
     # No vision model installed, or Ollama couldn't answer.

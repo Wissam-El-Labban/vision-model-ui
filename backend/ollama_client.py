@@ -221,6 +221,35 @@ _ENHANCE_SYSTEM = {
 _ENHANCE_MODE = {"txt2img": "create", "img2img": "create", "edit": "edit",
                  "compose": "compose", "control": "control", "animate": "animate"}
 
+# What the control brief cannot work out for itself.
+#
+# The maps are never sent to the vision model — a control map is the one image the
+# control brief explicitly forbids describing, so showing it invites the exact
+# failure the brief exists to prevent. That leaves the model with no way to know
+# how many people the pose holds, and a two-figure pose described as one person
+# comes back with one person and a spare set of limbs. The studio counts them and
+# says so in words instead.
+_SUBJECT_BRIEF = (
+    "The pose contains {n} people. Describe all {n} of them individually — each "
+    "one's appearance and clothing — and keep them in the exact arrangement and "
+    "relative position the pose specifies. Never describe fewer than {n}."
+)
+_CONTACT_BRIEF = (
+    "They are in physical contact. Say so explicitly and describe how they touch "
+    "(holding, leaning on, carrying, hands clasped) — the contact is the point of "
+    "the picture, and a prompt that omits it produces two people standing apart."
+)
+
+
+def _subject_note(subjects: int, contact: bool) -> str:
+    if subjects < 2:
+        return ""
+    note = "\n" + _SUBJECT_BRIEF.format(n=subjects)
+    if contact:
+        note += "\n" + _CONTACT_BRIEF
+    return note
+
+
 _PREAMBLE = re.compile(r"^\s*(here'?s|here is|sure[,!]?|prompt:)[^\n]*:\s*", re.I)
 
 
@@ -233,7 +262,7 @@ def _clean_prompt(text: str) -> str:
     return t
 
 
-def enhance_prompt(url, model, prompt, mode, images_b64=()):
+def enhance_prompt(url, model, prompt, mode, images_b64=(), subjects=1, contact=False):
     """Rewrite a FLUX prompt with a vision model that can see the references.
 
     The identity-preserving work is done by the reference latents, not by this text
@@ -241,10 +270,17 @@ def enhance_prompt(url, model, prompt, mode, images_b64=()):
     composition and phrasing the text encoder actually responds to, so the user
     isn't rewriting the same prompt five times by hand.
 
+    `subjects`/`contact` describe a pose built in the studio. They are appended to
+    the control brief and nowhere else: no other mode conditions on a pose, so a
+    figure count would be noise in them.
+
     Fails soft (returns "") exactly like `generate_title`; the caller falls back to
     the static template.
     """
-    system = _ENHANCE_SYSTEM[_ENHANCE_MODE.get(mode, "create")]
+    template = _ENHANCE_MODE.get(mode, "create")
+    system = _ENHANCE_SYSTEM[template]
+    if template == "control":
+        system += _subject_note(subjects, contact)
     user = {"role": "user", "content": prompt}
     if images_b64:
         user["images"] = list(images_b64)

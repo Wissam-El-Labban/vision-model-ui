@@ -8,6 +8,7 @@
  */
 import * as THREE from "three";
 import {
+  BODY_LIMBS,
   BONES,
   OPENPOSE_BONES,
   type PropDef,
@@ -106,6 +107,26 @@ export function buildRig(): Rig {
   return { root, bones, meshes };
 }
 
+/** Release a rig's GPU resources and detach it from the scene.
+ *
+ * `buildRig` allocates a geometry per bone and a material per rig, none of which
+ * three.js frees when the object is removed. A studio session that adds, deletes
+ * and undoes figures builds rigs continuously, so without this the leak is not
+ * theoretical. */
+export function disposeRig(rig: Rig): void {
+  rig.root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    mesh.geometry.dispose();
+    // dispose() is idempotent, which matters: every capsule in a rig shares one
+    // material, so this runs once per mesh on the same object.
+    for (const mat of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+      mat.dispose();
+    }
+  });
+  rig.root.removeFromParent();
+}
+
 /** Reset every bone to the rest pose the rig was built in. */
 export function resetRig(rig: Rig): void {
   for (const def of BONES) {
@@ -147,6 +168,78 @@ export function openposeWorld(rig: Rig): THREE.Vector3[] {
   pts[16] = face.clone().addScaledVector(fwd, 0.005).addScaledVector(right, -0.075); // R ear
   pts[17] = face.clone().addScaledVector(fwd, 0.005).addScaledVector(right, 0.075); // L ear
   return pts;
+}
+
+// --------------------------------------------------------------------------- #
+// Contact between figures
+// --------------------------------------------------------------------------- #
+const clamp01 = (v: number) => Math.min(Math.max(v, 0), 1);
+
+/** Shortest distance between two line segments (Ericson, *Real-Time Collision
+ *  Detection* §5.1.9). Degenerate segments fall out of the same branches. */
+function segmentDistance(
+  p1: THREE.Vector3, q1: THREE.Vector3,
+  p2: THREE.Vector3, q2: THREE.Vector3
+): number {
+  const d1 = q1.clone().sub(p1);
+  const d2 = q2.clone().sub(p2);
+  const r = p1.clone().sub(p2);
+  const a = d1.dot(d1);
+  const e = d2.dot(d2);
+  const f = d2.dot(r);
+  const EPS = 1e-8;
+  let s: number;
+  let t: number;
+
+  if (a <= EPS && e <= EPS) return r.length();
+  if (a <= EPS) {
+    s = 0;
+    t = clamp01(f / e);
+  } else {
+    const c = d1.dot(r);
+    if (e <= EPS) {
+      t = 0;
+      s = clamp01(-c / a);
+    } else {
+      const b = d1.dot(d2);
+      const denom = a * e - b * b;
+      s = denom !== 0 ? clamp01((b * f - c * e) / denom) : 0;
+      t = (b * s + f) / e;
+      if (t < 0) {
+        t = 0;
+        s = clamp01(-c / a);
+      } else if (t > 1) {
+        t = 1;
+        s = clamp01((b - c) / a);
+      }
+    }
+  }
+  return p1.clone().addScaledVector(d1, s).distanceTo(p2.clone().addScaledVector(d2, t));
+}
+
+/** Whether any two figures are touching.
+ *
+ * Measured limb-to-limb rather than keypoint-to-keypoint: a hand resting on
+ * someone's forearm leaves the nearest *keypoints* about 0.2 m apart while the
+ * surfaces are in contact, so a keypoint test reports two people standing near
+ * each other. 12 body limbs per figure makes this 144 segment pairs per pair of
+ * figures — nothing, and it runs once, when the maps are handed over. */
+export function figuresInContact(rigs: Rig[], threshold = 0.12): boolean {
+  if (rigs.length < 2) return false;
+  const limbs = rigs.map((rig) => {
+    const pts = openposeWorld(rig);
+    return BODY_LIMBS.map(([i, j]) => [pts[i], pts[j]] as const);
+  });
+  for (let a = 0; a < limbs.length; a++) {
+    for (let b = a + 1; b < limbs.length; b++) {
+      for (const [p1, q1] of limbs[a]) {
+        for (const [p2, q2] of limbs[b]) {
+          if (segmentDistance(p1, q1, p2, q2) < threshold) return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 /** Serialise the rig's rotations, for save/load. */
