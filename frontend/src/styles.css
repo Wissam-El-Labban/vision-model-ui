@@ -656,6 +656,41 @@ textarea {
   z-index: 0;
 }
 
+/* Joint names, laid over the canvas at the same rect and moved imperatively by
+   the animation loop. `overflow: hidden` keeps a label for a joint that has been
+   dragged off-frame from spilling into the panel. */
+.studio-labels {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.studio-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* Offsets, not transform: the transform slot is the joint's position. Sits to
+     the right of its handle, vertically centred on it. */
+  margin: -7px 0 0 11px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(20, 23, 28, 0.72);
+  color: #c7ccd6;
+  font-size: 10px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.studio-label.on {
+  background: rgba(255, 180, 84, 0.9);
+  color: #14171c;
+  font-weight: 600;
+}
+
 /* Now the same rect as the canvas — kept as a separate element for the label. */
 .studio-guide {
   position: absolute;

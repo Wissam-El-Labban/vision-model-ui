@@ -135,6 +135,33 @@ export const HANDLE_LABELS: Record<string, string> = {
   thighL: "L hip", shinL: "L knee", footL: "L foot",
 };
 
+/** What dragging each handle actually does.
+ *
+ * Worth spelling out per joint, because the rule is not the one people expect: a
+ * handle rotates the bone *above* it, so grabbing the elbow swings the upper arm
+ * (and the elbow travels), while grabbing the hand bends the elbow (and the elbow
+ * stays put). Which end moves is the whole difference between the two, and the
+ * only way to know without being told is to try it and undo. */
+export const HANDLE_MOTION: Record<string, string> = {
+  hips: "slides this figure across the floor — it doesn't rotate anything",
+  spine: "bends at the waist: lean the whole torso forward, back or to the side",
+  chest: "bends the upper back, from the waist up",
+  neck: "tilts the neck, carrying the head with it",
+  head: "turns and tilts the head — where the face points",
+  upperArmR: "moves the right shoulder itself: shrug it up, or roll it forward",
+  foreArmR: "swings the whole right arm from the shoulder; the elbow travels with it",
+  handR: "bends the right elbow — the hand swings around it and the elbow holds still",
+  upperArmL: "moves the left shoulder itself: shrug it up, or roll it forward",
+  foreArmL: "swings the whole left arm from the shoulder; the elbow travels with it",
+  handL: "bends the left elbow — the hand swings around it and the elbow holds still",
+  thighR: "swivels the pelvis so the right hip leads",
+  shinR: "swings the right thigh from the hip; the knee travels with it",
+  footR: "bends the right knee — the foot swings around it and the knee holds still",
+  thighL: "swivels the pelvis so the left hip leads",
+  shinL: "swings the left thigh from the hip; the knee travels with it",
+  footL: "bends the left knee — the foot swings around it and the knee holds still",
+};
+
 // --------------------------------------------------------------------------- #
 // OpenPose BODY_18
 // --------------------------------------------------------------------------- #

@@ -26,6 +26,7 @@ import {
   HANDLES,
   HANDLE_AIM,
   HANDLE_LABELS,
+  HANDLE_MOTION,
   IK_CHAINS,
   POLE_HINTS,
   normalizePoseFile,
@@ -65,6 +66,15 @@ const ASPECTS: Frame[] = [
 const STORE_KEY = "poseStudio.saved";
 /** How far apart a newly added figure stands from the last one. */
 const FIGURE_GAP = 0.7;
+
+/** Where the camera looks and from how far, for framing part of a figure. Heights
+ *  are above the figure's own root, so this follows a figure that's been lifted or
+ *  sat down rather than aiming at where a standing one would have been. */
+const VIEWS: { label: string; height: number; radius: number; hint: string }[] = [
+  { label: "Whole figure", height: 0.95, radius: 3.6, hint: "Head to feet." },
+  { label: "Upper body", height: 1.35, radius: 2.0, hint: "Waist up — for arms, hands and shoulders." },
+  { label: "Head", height: 1.62, radius: 1.1, hint: "Close in on the head and neck." },
+];
 const HISTORY_LIMIT = 50;
 /** How long two edits of the same control collapse into one undo step. */
 const COALESCE_MS = 700;
@@ -180,10 +190,15 @@ export default function PoseStudio({ onClose, onUse, sceneImage }: Props) {
   const [saveName, setSaveName] = useState("");
   const [preview, setPreview] = useState<{ kind: ControlKind; url: string }[]>([]);
   const [viewSize, setViewSize] = useState({ w: 1, h: 1 });
-  const [backdrop, setBackdrop] = useState<string | null>(sceneImage ?? null);
+  // Opt-in, never automatic. The composer's first attachment is just as often the
+  // *subject* — a photo of the person being posed — and quietly painting that
+  // behind the mannequin says "stand here" when the user meant "look like this".
+  const [backdrop, setBackdrop] = useState<string | null>(null);
   const [backdropFrame, setBackdropFrame] = useState<Frame | null>(null);
   const [backdropOpacity, setBackdropOpacity] = useState(0.55);
   const [historyDepth, setHistoryDepth] = useState(0);
+  const [showLabels, setShowLabels] = useState(true);
+  const [viewHeight, setViewHeight] = useState(0.95);
 
   const aspects = useMemo(
     () => (backdropFrame ? [...ASPECTS, backdropFrame] : ASPECTS),
@@ -205,6 +220,11 @@ export default function PoseStudio({ onClose, onUse, sceneImage }: Props) {
   const outAspectRef = useRef(frame.w / frame.h);
   outAspectRef.current = frame.w / frame.h;
   const resizeRef = useRef<() => void>(() => {});
+  // The joint labels are repositioned every frame, which is far too often to go
+  // through React. The spans are rendered once and moved imperatively.
+  const labelEls = useRef<Record<string, HTMLSpanElement | null>>({});
+  const labelsOnRef = useRef(showLabels);
+  labelsOnRef.current = showLabels;
 
   // ------------------------------------------------------------------ history
   const historyRef = useRef<{ snap: StudioSnapshot; tag?: string; at: number }[]>([]);
@@ -434,6 +454,31 @@ export default function PoseStudio({ onClose, onUse, sceneImage }: Props) {
         mesh.material =
           mesh.userData.figureId === activeRef.current ? ctx.handleMat : ctx.handleDimMat;
       }
+
+      // Name every joint on the figure being posed. Only that one: seventeen
+      // labels is already a lot, and two figures' worth is unreadable.
+      const named = rigs.get(activeRef.current);
+      const labelled = labelsOnRef.current && named;
+      const cw = renderer.domElement.clientWidth;
+      const ch = renderer.domElement.clientHeight;
+      for (const bone of HANDLES) {
+        const el = labelEls.current[bone];
+        if (!el) continue;
+        if (!labelled) {
+          el.style.display = "none";
+          continue;
+        }
+        const p = named.bones[bone].getWorldPosition(world).project(camera);
+        // z > 1 is behind the camera, where the projection flips and the label
+        // would appear on the wrong side of the screen.
+        if (p.z > 1) {
+          el.style.display = "none";
+          continue;
+        }
+        el.style.display = "";
+        el.style.transform = `translate(${((p.x + 1) / 2) * cw}px, ${((1 - p.y) / 2) * ch}px)`;
+      }
+
       renderer.render(scene, camera);
       raf = requestAnimationFrame(tick);
     };
@@ -499,7 +544,7 @@ export default function PoseStudio({ onClose, onUse, sceneImage }: Props) {
     const el = ctx?.renderer.domElement;
     if (!ctx || !el) return;
 
-    let mode: "none" | "orbit" | "bone" | "prop" = "none";
+    let mode: "none" | "orbit" | "pan" | "bone" | "prop" = "none";
     let boneName: string | null = null;
     let dragFigure: string | null = null;
     let propId: string | null = null;
@@ -563,7 +608,10 @@ export default function PoseStudio({ onClose, onUse, sceneImage }: Props) {
         setSelected(null);
         return;
       }
-      mode = "orbit";
+      // Shift (or the middle button) slides the view instead of swinging it —
+      // which is what you want to look at one part of a figure up close, since
+      // orbiting always keeps the same point in the middle of the screen.
+      mode = e.shiftKey || e.button === 1 ? "pan" : "orbit";
     };
 
     const onMove = (e: PointerEvent) => {
@@ -576,6 +624,17 @@ export default function PoseStudio({ onClose, onUse, sceneImage }: Props) {
       if (mode === "orbit") {
         ctx.orbit.theta -= dx * 0.007;
         ctx.orbit.phi = Math.min(Math.max(ctx.orbit.phi - dy * 0.007, 0.12), Math.PI - 0.12);
+        return;
+      }
+
+      if (mode === "pan") {
+        // Along the screen's own axes, so the view follows the cursor whatever
+        // angle the camera is at. Scaled by distance so the drag covers the same
+        // amount of *screen* whether you're zoomed in on a hand or out on a room.
+        const right = new THREE.Vector3().setFromMatrixColumn(ctx.camera.matrix, 0);
+        const up = new THREE.Vector3().setFromMatrixColumn(ctx.camera.matrix, 1);
+        const k = ctx.orbit.radius * 0.0016;
+        ctx.orbit.target.addScaledVector(right, -dx * k).addScaledVector(up, dy * k);
         return;
       }
 
@@ -635,6 +694,9 @@ export default function PoseStudio({ onClose, onUse, sceneImage }: Props) {
 
     const onUp = (e: PointerEvent) => {
       el.releasePointerCapture(e.pointerId);
+      // The slider mirrors the camera height, and panning moves it — but not per
+      // frame, which would be a re-render for every pixel of the drag.
+      if (mode === "pan") setViewHeight(ctx.orbit.target.y);
       mode = "none";
       boneName = null;
       dragFigure = null;
@@ -644,6 +706,14 @@ export default function PoseStudio({ onClose, onUse, sceneImage }: Props) {
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      // Shift scrolls *up and down the figure* rather than in and out of it —
+      // the second thing a wheel is for here, and the one that lets you work on
+      // the head without losing the framing you set.
+      if (e.shiftKey) {
+        ctx.orbit.target.y -= Math.sign(e.deltaY) * ctx.orbit.radius * 0.06;
+        setViewHeight(ctx.orbit.target.y);
+        return;
+      }
       ctx.orbit.radius = Math.min(Math.max(ctx.orbit.radius * (1 + Math.sign(e.deltaY) * 0.09), 0.9), 14);
     };
 
@@ -893,6 +963,25 @@ export default function PoseStudio({ onClose, onUse, sceneImage }: Props) {
     setBackdrop(await fileToDataUrl(files[0]));
   }
 
+  /** Point the camera at part of the active figure. Framed on that figure rather
+   *  than on the origin, so "Head" means *this* figure's head when there are two
+   *  of them standing apart. */
+  function frameView(view: (typeof VIEWS)[number]) {
+    const ctx = sceneRef.current;
+    if (!ctx) return;
+    const base = activeFigure()?.rig.root.position ?? new THREE.Vector3();
+    ctx.orbit.target.set(base.x, base.y + view.height, base.z);
+    ctx.orbit.radius = view.radius;
+    setViewHeight(ctx.orbit.target.y);
+  }
+
+  function setViewHeightTo(y: number) {
+    const ctx = sceneRef.current;
+    if (!ctx) return;
+    ctx.orbit.target.y = y;
+    setViewHeight(y);
+  }
+
   const prop = props.find((p) => p.id === selectedProp) ?? null;
 
   return (
@@ -902,7 +991,8 @@ export default function PoseStudio({ onClose, onUse, sceneImage }: Props) {
           <strong>🧍 Pose Studio</strong>
           <span className="muted small">
             Drag a joint to aim it · drag the hips to move a figure · drag the background
-            to orbit · scroll to zoom
+            to orbit · shift-drag to slide the view · scroll to zoom · shift-scroll to
+            move up and down the figure
           </span>
           <button className="btn ghost icon" onClick={onClose} title="Close">
             ✕
@@ -920,6 +1010,22 @@ export default function PoseStudio({ onClose, onUse, sceneImage }: Props) {
               />
             )}
             <div className="studio-canvas" ref={mountRef} />
+            {/* Sized and centred exactly like the canvas, so a projected point
+                maps straight onto it without knowing where the canvas sits. */}
+            <div className="studio-labels" style={{ width: viewSize.w, height: viewSize.h }}>
+              {HANDLES.map((bone) => (
+                <span
+                  key={bone}
+                  ref={(el) => {
+                    labelEls.current[bone] = el;
+                  }}
+                  className={`studio-label ${selected === bone ? "on" : ""}`}
+                  style={{ display: "none" }}
+                >
+                  {HANDLE_LABELS[bone] ?? bone}
+                </span>
+              ))}
+            </div>
             <div
               className="studio-guide"
               style={{ width: viewSize.w, height: viewSize.h }}
@@ -931,14 +1037,17 @@ export default function PoseStudio({ onClose, onUse, sceneImage }: Props) {
           <div className="studio-panel">
             <div className="lbl">Figures</div>
             <div className="studio-row">
+              {/* Named in full rather than numbered: clicking a handle switches
+                  figures too, but with two bodies overlapping that's a coin toss,
+                  and this is the way that always works. */}
               {figureIds.map((id, i) => (
                 <button
                   key={id}
                   className={`control-chip ${id === active ? "on" : ""}`}
                   onClick={() => selectFigure(id)}
-                  title={`Select figure ${i + 1}`}
+                  title={`Pose figure ${i + 1}. Presets, Turn, Reset and Lift all apply to the selected figure.`}
                 >
-                  {i + 1}
+                  Figure {i + 1}
                 </button>
               ))}
               <button className="btn small" onClick={addFigure} title="Add another figure">
@@ -978,22 +1087,59 @@ export default function PoseStudio({ onClose, onUse, sceneImage }: Props) {
               ))}
             </div>
 
+            <div className="lbl">View</div>
+            <div className="studio-row">
+              {VIEWS.map((v) => (
+                <button
+                  key={v.label}
+                  className="control-chip"
+                  title={v.hint}
+                  onClick={() => frameView(v)}
+                >
+                  {v.label}
+                </button>
+              ))}
+              <button
+                className={`control-chip ${showLabels ? "on" : ""}`}
+                onClick={() => setShowLabels((v) => !v)}
+                title="Name each joint of the selected figure in the view."
+              >
+                {showLabels ? "✓ " : ""}labels
+              </button>
+            </div>
+            <label className="studio-field">
+              Height
+              <input
+                type="range" min={-0.5} max={2.6} step={0.02}
+                value={viewHeight}
+                onChange={(e) => setViewHeightTo(+e.target.value)}
+              />
+              <span className="studio-num">{viewHeight.toFixed(2)}m</span>
+            </label>
+            <div className="muted small">
+              Moves the camera up and down the figure without turning it — the same as
+              shift-scrolling in the view. Zoom in on a hand and this is how you get to
+              the other one.
+            </div>
+
             <div className="lbl">Selected joint</div>
             <div className="muted small">
               {selected ? (
                 <>
-                  <strong>{HANDLE_LABELS[selected] ?? selected}</strong>
-                  {selected === "hips"
-                    ? " — drag to slide this figure across the floor."
-                    : " — drag to aim it; everything below follows, and the joint above holds still."}
+                  <strong>{HANDLE_LABELS[selected] ?? selected}</strong> — dragging it{" "}
+                  {HANDLE_MOTION[selected] ?? "aims it; everything below follows"}.
                 </>
               ) : (
-                "Click a joint handle in the view."
+                "Click a joint handle in the view. Every joint is named on the figure while “labels” is on."
               )}
             </div>
             <div className="studio-row">
-              <button className="btn small" onClick={() => turnFigure(-30)}>↺ Turn</button>
-              <button className="btn small" onClick={() => turnFigure(30)}>Turn ↻</button>
+              <button className="btn small" onClick={() => turnFigure(-30)} title="Turn the whole figure 30° anticlockwise, on the spot">
+                ↺ Turn figure
+              </button>
+              <button className="btn small" onClick={() => turnFigure(30)} title="Turn the whole figure 30° clockwise, on the spot">
+                Turn figure ↻
+              </button>
               <button className="btn small" onClick={resetFigure}>Reset pose</button>
               <button
                 className="btn small"
@@ -1070,14 +1216,26 @@ export default function PoseStudio({ onClose, onUse, sceneImage }: Props) {
 
             <div className="lbl">Scene photo</div>
             <div className="muted small">
-              Lay the photo you're generating into behind the figures, to pose them against
-              its perspective. It is a guide only — it never reaches the control maps.
+              Optional. Lay the photo you're generating <em>into</em> behind the figures,
+              to pose them against its perspective — it's a guide only and never reaches
+              the control maps. Skip it if your attached image is the subject rather than
+              the place: a photo of the person you're posing belongs in the composer, not
+              behind the mannequin.
             </div>
             <div className="studio-row">
               <label className="btn small studio-file">
                 {backdrop ? "Replace…" : "Load image…"}
                 <input type="file" accept="image/*" onChange={(e) => loadBackdrop(e.target.files)} />
               </label>
+              {sceneImage && sceneImage !== backdrop && (
+                <button
+                  className="btn small"
+                  onClick={() => setBackdrop(sceneImage)}
+                  title="Use the image attached in the composer"
+                >
+                  Use attached
+                </button>
+              )}
               {backdrop && (
                 <button className="btn small" onClick={() => setBackdrop(null)}>Clear</button>
               )}
