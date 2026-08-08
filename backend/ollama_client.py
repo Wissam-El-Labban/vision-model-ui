@@ -173,6 +173,26 @@ _ENHANCE_SYSTEM = {
         "open.\n"
         "Return the prompt only: no preamble, no quotes, no commentary."
     ),
+    "control": (
+        "You are a prompt engineer for the FLUX.2 image model. It is conditioned by a "
+        "large language model and follows long, natural prose. Never write "
+        "comma-separated tag lists — they degrade this model.\n"
+        "The attached image is a CONTROL MAP — a depth render, an edge trace or an "
+        "OpenPose skeleton. It is not content and must never be described. It exists "
+        "only to fix the pose and the layout.\n"
+        "The user often writes an instruction ('make him clap his hands', 'do a "
+        "T-pose'). That is the wrong shape here and produces a greyscale copy of the "
+        "map, because an instruction gives the model nothing to render and imitating "
+        "the reference is all that is left. Convert it into a description of the "
+        "FINISHED PHOTOGRAPH, in which the subject is already in that pose.\n"
+        "Describe the subject, their clothing, the setting, the lighting and the "
+        "style, as a single vivid paragraph. Say it is a photograph.\n"
+        "Never mention depth maps, skeletons, greyscale, silhouettes, poses maps or "
+        "the control image itself.\n"
+        "Keep every concrete detail the user specified. Invent only what they left "
+        "open.\n"
+        "Return the prompt only: no preamble, no quotes, no commentary."
+    ),
     "animate": (
         "You are a prompt engineer for the Wan 2.2 image-to-video model.\n"
         "The attached image is the video's FIRST FRAME. It already fixes the subject, "
@@ -194,9 +214,12 @@ _ENHANCE_SYSTEM = {
 # Which system prompt a generate mode gets. img2img is a partial denoise toward a
 # described scene, so it reads as a description, not an instruction. animate is the
 # odd one out: its image isn't a reference to describe, it's the frame the video
-# starts from, so the brief is about motion rather than about the picture.
+# starts from, so the brief is about motion rather than about the picture. control
+# is the opposite of edit and gets its own brief for that reason: its attachment is
+# a control map to be obeyed and never described, and an instruction-shaped prompt
+# there returns a greyscale copy of the map (measured, not theorised).
 _ENHANCE_MODE = {"txt2img": "create", "img2img": "create", "edit": "edit",
-                 "compose": "compose", "animate": "animate"}
+                 "compose": "compose", "control": "control", "animate": "animate"}
 
 _PREAMBLE = re.compile(r"^\s*(here'?s|here is|sure[,!]?|prompt:)[^\n]*:\s*", re.I)
 

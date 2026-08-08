@@ -3256,12 +3256,20 @@ def _lora_picks(model: str) -> list[dict]:
 
     A pick whose file has since been deleted is dropped rather than failing the
     graph — the same fallback shape `clip_for` takes for a missing encoder.
+
+    The rebuild is deliberate (it sanitises the name and coerces the strength), but
+    it must carry every field a pick can hold: `control` used to be dropped here,
+    so the flag was written to settings.json and then lost by every reader. The
+    checkbox appeared to do nothing and `_with_lora` never saw an adapter to scale.
     """
     out = []
     for pick in settings.loras().get(model) or []:
         name = os.path.basename(pick.get("name") or "")
         if name and (cat.LORA_DIR / name).exists():
-            out.append({"name": name, "strength": float(pick.get("strength", 1.0))})
+            entry = {"name": name, "strength": float(pick.get("strength", 1.0))}
+            if pick.get("control"):
+                entry["control"] = True
+            out.append(entry)
     return out
 
 

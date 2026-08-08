@@ -796,6 +796,21 @@ textarea {
   text-decoration: none;
 }
 
+.init-hint.warn {
+  border-left: 2px solid var(--amber);
+  padding-left: 8px;
+}
+
+/* The one action the Control tab has that isn't shared with any other mode, so it
+   carries the accent rather than sitting anonymously beside the paperclip. */
+.btn.studio-btn {
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--panel-2));
+}
+
+.btn.studio-btn:hover {
+  border-color: var(--amber);
+}
+
 .ctx-meter {
   display: flex;
   align-items: center;

@@ -650,10 +650,6 @@ def generate(req: GenerateRequest):
                 logging.exception("recording %s turn in chat %s failed", turn, req.chat_id)
 
         def worker():
-            # Control maps derived during this job. Recorded on the assistant turn
-            # beside the image, so a reloaded turn shows what the generation actually
-            # conditioned on rather than only what it produced.
-            control_hashes: list[str] = []
             try:
                 events.put({"type": "status", "message": "Freeing VRAM (unloading vision model)…"})
                 try:
@@ -744,11 +740,18 @@ def generate(req: GenerateRequest):
                     # when a pose comes out wrong — a bad map and an ignored map look
                     # identical from the result alone — and each is a normal stored
                     # image, so the user can pin one and re-feed it on the next roll.
+                    #
+                    # Deliberately *not* recorded onto the chat turn. A stored message
+                    # is a flat list of image hashes with no notion of which one is the
+                    # result, so a recorded map came back after a reload rendered at
+                    # full size beside the image it merely conditioned — two pictures
+                    # of equal weight, one of which is a greyscale depth render. The
+                    # turn is the finished image; the maps are working material and
+                    # live only in the session that produced them.
                     for kind, map_pil in built:
                         mh = db.save_image(
                             images.pil_to_data_url(map_pil),
                             images.pil_to_data_url(map_pil, max_size=64, fmt="JPEG"))
-                        control_hashes.append(mh)
                         events.put({"type": "control", "kind": kind, "hash": mh,
                                     "url": db.image_url(mh)})
                 elif req.mode == "img2img":
@@ -766,7 +769,7 @@ def generate(req: GenerateRequest):
                 full = images.pil_to_data_url(image)
                 thumb = images.pil_to_data_url(image, max_size=64, fmt="JPEG")
                 h = db.save_image(full, thumb)
-                record("assistant", "", label, [h] + control_hashes)
+                record("assistant", "", label, [h])
                 events.put(
                     {
                         "type": "image",

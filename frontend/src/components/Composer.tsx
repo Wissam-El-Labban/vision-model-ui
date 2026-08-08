@@ -174,6 +174,19 @@ export default function Composer({
   // Without a source there is nothing to derive a map from and nothing to lock to.
   // The maps the user attached directly still work — that's the re-roll path.
   const hasControlSource = !!initPreview;
+  // Whether the model that will run has an adapter flagged as its control adapter.
+  // Without one, FLUX.2 treats a control map as an image to *emulate* rather than a
+  // structure to follow — the classic symptom being a result that comes back looking
+  // like the greyscale depth map itself. Worth saying in the tab, not in a status
+  // line that scrolls away before the image lands.
+  const controlAdapter = fluxModels.find((m) => m.name === activeFlux)?.loras?.some((l) => l.control);
+  // Instruction-shaped prompts are the single most common way this mode is misused,
+  // and the failure is silent: the image comes back looking like the control map and
+  // nothing says why. A crude opener test catches nearly all of them and can only
+  // ever produce a hint, never a block.
+  const instructionPrompt =
+    /^\s*(make|have|turn|change|put|move|give|let|pose|set|adjust|fix|edit|redo|add|remove)\b/i.test(text) &&
+    text.trim().length > 0;
 
   // Close the system-prompt popover on any click outside it (parity with the
   // native model <select>, which closes itself).
@@ -367,6 +380,35 @@ export default function Composer({
         </div>
       )}
 
+      {/* Two independent notices. They were one, which was a mistake: flagging a
+          control adapter made the prompt advice disappear along with it, and the
+          prompt is the part that actually decides whether you get a photograph or a
+          greyscale copy of the map. */}
+      {genMode && isControl && instructionPrompt && (
+        <div className="init-hint warn">
+          <span>
+            ⚠️ That reads like an <strong>edit instruction</strong>. Control mode can't
+            change a pose — it copies the one in the map — and an instruction gives the
+            model nothing to render, so it falls back on imitating the map and returns a
+            greyscale image. Describe the <em>finished picture</em> instead: “a man in a
+            black shirt standing with both arms straight out, aviation museum,
+            photorealistic”. To change a pose in your own photo, use{" "}
+            <button className="link-btn" onClick={() => setGenOp("edit")}>✏️ Edit</button>.
+          </span>
+        </div>
+      )}
+
+      {genMode && isControl && !controlAdapter && (
+        <div className="init-hint warn">
+          <span>
+            ⚠️ <strong>{prettyFlux(activeFlux) || "This model"}</strong> has no control
+            adapter flagged, so the map will guide only loosely. Tick{" "}
+            <em>control adapter</em> on a pose/control LoRA under{" "}
+            <strong>🖼️ Image Models</strong>.
+          </span>
+        </div>
+      )}
+
       {genMode && isControl && studioMaps.length > 0 && (
         <div className="init-hint">
           <div className="studio-maps">
@@ -400,7 +442,11 @@ export default function Composer({
                   <>, with the other {controlRefCount} as subject reference{controlRefCount > 1 ? "s" : ""}</>
                 ) : null}
                 . Describe the image you want <em>built on that structure</em> — the pose comes
-                from the picture, everything else from your prompt.
+                from the picture, everything else from your prompt. This copies the pose that
+                is already in the photo; to build a different one,{" "}
+                <button className="link-btn" onClick={onOpenStudio}>
+                  🧍 open the Pose Studio
+                </button>.
               </>
             ) : (
               <>
@@ -674,6 +720,20 @@ export default function Composer({
               </div>
             )}
           </div>
+        )}
+
+        {/* Sits in the composer row, beside the attach button, for every control
+            generation — not only when nothing is attached. It used to appear solely
+            in the empty-state hint and inside the ⚙️ popover, so attaching a photo
+            hid the studio entirely and there was no visible way back to it. */}
+        {genMode && isControl && (
+          <button
+            className={`btn icon studio-btn ${studioMaps.length ? "has-dot" : ""}`}
+            title="Pose Studio — build a pose in 3-D"
+            onClick={onOpenStudio}
+          >
+            🧍{studioMaps.length > 0 && <span className="dot" />}
+          </button>
         )}
 
         <button
