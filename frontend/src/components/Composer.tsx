@@ -1,8 +1,24 @@
 import { useEffect, useRef, useState } from "react";
 import { fileToDataUrl } from "../fileUtils";
 import { guidanceFor, resolveFlux, roleFor, stepsFor } from "../flux";
-import type { GenSettings, GenOp } from "../types";
-import type { FluxModel } from "../api";
+import type { ControlKind, GenSettings, GenOp } from "../types";
+import type { FluxModel, FluxPreprocessor } from "../api";
+
+/** The control maps the Control tab offers, in the order they're worth reaching for.
+ *
+ * Depth first because it is the one that answers the question a skeleton can't: a
+ * pose that interacts with something — sitting on a chair, standing on a closet, a
+ * hand pressed into a mat — needs the *scene* in the control signal, and only depth
+ * carries it. Pose is listed last not because it's weak but because alone it is
+ * ambiguous exactly where hard poses break: it can't say which arm is in front. */
+const CONTROL_KINDS: { kind: ControlKind; label: string; hint: string }[] = [
+  { kind: "depth", label: "Depth",
+    hint: "3-D shape of the whole scene — the chair, the floor, which limb is in front. Best for a pose that touches something." },
+  { kind: "canny", label: "Edges",
+    hint: "Every outline in the source. Tightest hold on layout, but it carries the source's style across too." },
+  { kind: "pose", label: "Pose",
+    hint: "An OpenPose skeleton: limb positions only, nothing about the scene. Stack it with Depth." },
+];
 
 interface Props {
   text: string;
@@ -46,6 +62,14 @@ interface Props {
   /** First pinned-panel image, used as the img2img source when nothing is
    *  attached to the message. `null` when the panel is empty. */
   pinnedInit: string | null;
+  /** Which control maps can be built right now. A kind whose model isn't installed
+   *  is offered but not selectable — hiding it would leave the user wondering why
+   *  the app can't do the thing every ControlNet guide says it should. */
+  preprocessors: FluxPreprocessor[];
+  /** Maps posed in the studio, waiting to be generated from. */
+  studioMaps: { kind: ControlKind; url: string }[];
+  onOpenStudio: () => void;
+  onClearStudioMaps: () => void;
 }
 
 export default function Composer({
@@ -77,6 +101,10 @@ export default function Composer({
   enhancing,
   pinnedCount,
   pinnedInit,
+  preprocessors,
+  studioMaps,
+  onOpenStudio,
+  onClearStudioMaps,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const sysRef = useRef<HTMLDivElement>(null);
@@ -94,6 +122,7 @@ export default function Composer({
   const isEdit = genOp === "edit";
   const isCompose = genOp === "compose";
   const isAnimate = genOp === "animate";
+  const isControl = genOp === "control";
   // A FLUX.2 model serves both roles; on FLUX.1 the sets are disjoint, because
   // edit/compose need a Kontext transformer that conditions on the source image.
   const role = roleFor(genOp);
@@ -124,12 +153,27 @@ export default function Composer({
   // source image: left in, it would read as img2img and offer the strength slider,
   // which Wan has no equivalent of.
   const genSubmode =
-    genMode && !isEdit && !isCompose && !isAnimate && initSource ? "img2img" : "txt2img";
+    genMode && !isEdit && !isCompose && !isAnimate && !isControl && initSource
+      ? "img2img"
+      : "txt2img";
   const initPreview = images.length > 0 ? images[0] : pinnedInit;
   // compose blends every attached image, else every pinned one.
   const composeCount = images.length > 0 ? images.length : pinnedCount;
   // edit: everything after the first source image is a subject reference.
   const editRefCount = Math.max((images.length > 0 ? images.length : pinnedCount) - 1, 0);
+
+  // control: the same first-is-the-source split edit uses.
+  const controlRefCount = editRefCount;
+  const readyKinds = new Set(preprocessors.filter((p) => p.installed).map((p) => p.kind));
+  const toggleKind = (kind: ControlKind) =>
+    patchGen({
+      controlKinds: gen.controlKinds.includes(kind)
+        ? gen.controlKinds.filter((k) => k !== kind)
+        : [...gen.controlKinds, kind],
+    });
+  // Without a source there is nothing to derive a map from and nothing to lock to.
+  // The maps the user attached directly still work — that's the re-roll path.
+  const hasControlSource = !!initPreview;
 
   // Close the system-prompt popover on any click outside it (parity with the
   // native model <select>, which closes itself).
@@ -253,6 +297,15 @@ export default function Composer({
           </button>
           <button
             role="tab"
+            aria-selected={genOp === "control"}
+            className={`mode-tab ${genOp === "control" ? "active" : ""}`}
+            onClick={() => setGenOp("control")}
+            title="Copy the pose or layout of a reference image into a new one"
+          >
+            🕹️ Control
+          </button>
+          <button
+            role="tab"
             aria-selected={genOp === "animate"}
             className={`mode-tab ${genOp === "animate" ? "active" : ""}`}
             onClick={() => setGenOp("animate")}
@@ -309,6 +362,56 @@ export default function Composer({
               ({images.length > 0 ? "attached" : "from panel"}) into one new image guided by your prompt.</>
             ) : (
               <>Attach or pin the images you want to combine, then describe the result.</>
+            )}
+          </span>
+        </div>
+      )}
+
+      {genMode && isControl && studioMaps.length > 0 && (
+        <div className="init-hint">
+          <div className="studio-maps">
+            {studioMaps.map((m) => (
+              <figure key={m.kind}>
+                <img src={m.url} alt={`${m.kind} map`} />
+                <figcaption>{m.kind}</figcaption>
+              </figure>
+            ))}
+          </div>
+          <span>
+            Posed in the studio — generating on {studioMaps.map((m) => m.kind).join(" + ")}.
+            Describe the image you want built on this pose.{" "}
+            <button className="link-btn" onClick={onOpenStudio}>Edit pose</button>
+            {" · "}
+            <button className="link-btn" onClick={onClearStudioMaps}>Clear</button>
+          </span>
+        </div>
+      )}
+
+      {genMode && isControl && studioMaps.length === 0 && (
+        <div className="init-hint">
+          {initPreview && (
+            <img className="init-thumb" src={initPreview} alt="control source" />
+          )}
+          <span>
+            {hasControlSource ? (
+              <>
+                Copying the structure of this image ({initSource === "attached" ? "attached" : "from panel"})
+                {controlRefCount > 0 ? (
+                  <>, with the other {controlRefCount} as subject reference{controlRefCount > 1 ? "s" : ""}</>
+                ) : null}
+                . Describe the image you want <em>built on that structure</em> — the pose comes
+                from the picture, everything else from your prompt.
+              </>
+            ) : (
+              <>
+                <button className="link-btn strong" onClick={onOpenStudio}>
+                  🧍 Open the Pose Studio
+                </button>{" "}
+                to build the pose in 3-D — that's the way to get a pose you can't
+                photograph. Or attach an image whose <em>pose or layout</em> you want copied;
+                it has to already contain whatever the subject is touching, since a bare
+                skeleton can't say “on a chair”.
+              </>
             )}
           </span>
         </div>
@@ -403,7 +506,7 @@ export default function Composer({
                 {fluxAvailable && (
                   <div className="flux-models">
                     <label className="lbl">
-                      Model ({role === "edit" ? "edit / combine" : "create"})
+                      Model ({role === "edit" ? "edit / combine / control" : "create"})
                     </label>
                     <ul className="flux-model-list">
                       {roleModels.map((m) => (
@@ -437,7 +540,10 @@ export default function Composer({
                     <input type="number" min={0.5} max={10} step={0.5} value={gen.guidance}
                       onChange={(e) => patchGen({ guidance: +e.target.value })} />
                   </label>
-                  {genOp === "create" && (
+                  {/* Size is only the user's to set when nothing else fixes it. A
+                      locked control run starts from the source's latent, which decides
+                      the shape the way img2img's does. */}
+                  {(genOp === "create" || (isControl && gen.structureLock >= 1)) && (
                     <>
                       <label>Width
                         <input type="number" min={256} max={1536} step={64} value={gen.width}
@@ -447,13 +553,15 @@ export default function Composer({
                         <input type="number" min={256} max={1536} step={64} value={gen.height}
                           onChange={(e) => patchGen({ height: +e.target.value })} />
                       </label>
-                      <label className={genSubmode === "img2img" ? "" : "muted-field"}>
-                        Strength
-                        <input type="number" min={0} max={1} step={0.05} value={gen.strength}
-                          disabled={genSubmode !== "img2img"}
-                          onChange={(e) => patchGen({ strength: +e.target.value })} />
-                      </label>
                     </>
+                  )}
+                  {genOp === "create" && (
+                    <label className={genSubmode === "img2img" ? "" : "muted-field"}>
+                      Strength
+                      <input type="number" min={0} max={1} step={0.05} value={gen.strength}
+                        disabled={genSubmode !== "img2img"}
+                        onChange={(e) => patchGen({ strength: +e.target.value })} />
+                    </label>
                   )}
                   <label>Seed
                     <input type="text" inputMode="numeric" value={gen.seed}
@@ -461,9 +569,102 @@ export default function Composer({
                       onChange={(e) => patchGen({ seed: e.target.value.replace(/[^0-9]/g, "") })} />
                   </label>
                 </div>
+
+                {isControl && (
+                  <div className="control-settings">
+                    <button className="btn studio-open" onClick={onOpenStudio}>
+                      🧍 Pose Studio — build a pose in 3-D
+                    </button>
+                    <p className="hint muted">
+                      Pose a figure, put a box where the chair is, and it renders its own
+                      depth and OpenPose maps. This is the route for a pose you can't find a
+                      photo of.
+                    </p>
+
+                    <label className="lbl">Or derive maps from a source image</label>
+                    <div className="control-kinds">
+                      {CONTROL_KINDS.map(({ kind, label, hint }) => {
+                        const ready = readyKinds.has(kind);
+                        const on = gen.controlKinds.includes(kind);
+                        return (
+                          <button
+                            key={kind}
+                            type="button"
+                            className={`control-chip ${on ? "on" : ""} ${ready ? "" : "unavailable"}`}
+                            disabled={!ready}
+                            title={ready ? hint : `${hint}\n\nNot installed — add it under 🖼️ Image Models → Control preprocessors.`}
+                            onClick={() => toggleKind(kind)}
+                          >
+                            {on ? "✓ " : ""}{label}
+                            {!ready && <span className="chip-badge">install</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="hint muted">
+                      Depth is the one to reach for first, and Depth + Pose together is the
+                      pair that holds a hard pose: depth carries the scene and the contact,
+                      pose pins which limb is which. Select none to use a control map you
+                      attached as-is.
+                    </p>
+
+                    <label className="lbl">
+                      Structure lock — {gen.structureLock >= 1
+                        ? "off (composition is free)"
+                        : gen.structureLock >= 0.8
+                          ? `${gen.structureLock.toFixed(2)} · loose`
+                          : gen.structureLock >= 0.6
+                            ? `${gen.structureLock.toFixed(2)} · firm`
+                            : `${gen.structureLock.toFixed(2)} · pinned`}
+                    </label>
+                    <input
+                      className="control-slider"
+                      type="range" min={0.4} max={1} step={0.05}
+                      value={gen.structureLock}
+                      disabled={!hasControlSource}
+                      onChange={(e) => patchGen({ structureLock: +e.target.value })}
+                    />
+                    <p className="hint muted">
+                      {hasControlSource
+                        ? "This is the dial that decides whether the pose is suggested or held. At 1 the maps only guide; lower it and generation starts from the source image itself, so its geometry survives. Below ~0.6 the source's own appearance starts coming through as well — sweep down until the pose lands, then back off."
+                        : "Needs a source image — there's nothing to lock onto yet."}
+                    </p>
+
+                    <label className="lbl">
+                      Control adapter strength — {gen.controlStrength.toFixed(2)}
+                    </label>
+                    <input
+                      className="control-slider"
+                      type="range" min={0} max={1.5} step={0.05}
+                      value={gen.controlStrength}
+                      onChange={(e) => patchGen({ controlStrength: +e.target.value })}
+                    />
+                    <p className="hint muted">
+                      Weight of the LoRA you flagged as this model's control adapter, for this
+                      generation only. Does nothing if none is flagged.
+                    </p>
+
+                    {gen.controlKinds.includes("canny") && (
+                      <div className="gen-grid">
+                        <label>Edge low
+                          <input type="number" min={0.01} max={0.99} step={0.05}
+                            value={gen.cannyLow}
+                            onChange={(e) => patchGen({ cannyLow: +e.target.value })} />
+                        </label>
+                        <label>Edge high
+                          <input type="number" min={0.01} max={0.99} step={0.05}
+                            value={gen.cannyHigh}
+                            onChange={(e) => patchGen({ cannyHigh: +e.target.value })} />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                )}
                 <p className="hint muted">
                   {isAnimate
                     ? "Attach one image — it becomes the first frame. Describe the motion, not the scene; the frame already fixes that. Takes a few minutes."
+                    : isControl
+                    ? "The control maps are built first and shown with the result, so you can see whether a miss was the map's fault or the model's."
                     : role === "edit"
                       ? "Guidance ~2.5 follows the instruction closely. If the source comes back unchanged, lower it — raising it makes the model cling to the reference instead of editing harder."
                       : genSubmode === "img2img"
@@ -502,6 +703,8 @@ export default function Composer({
             genMode
               ? isAnimate
                 ? "Describe the motion… e.g. “she turns to look at the camera, slow push in”"
+                : isControl
+                ? "Describe the image to build on this pose… e.g. “a woman in a red sari, on a beach at sunrise”"
                 : isEdit
                 ? "Instruction to apply… e.g. “make the cat eat the broccoli”"
                 : isCompose

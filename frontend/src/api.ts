@@ -2,6 +2,7 @@ import type {
   ChatDetail,
   ChatMessage,
   ChatSummary,
+  ControlKind,
   RunningModel,
   VersionInfo,
 } from "./types";
@@ -367,6 +368,11 @@ export interface FluxLora {
 export interface FluxLoraPick {
   name: string;
   strength: number;
+  /** Whether this is the model's *control* adapter — the one that teaches it to obey
+   *  a control map, and so the one the Control tab's strength dial scales. Flagged by
+   *  the user rather than guessed from the filename: an adapter's name is a hint and
+   *  its job is something only the person who installed it knows. */
+  control?: boolean;
 }
 
 export interface FluxLoras {
@@ -440,6 +446,69 @@ export async function deleteLora(name: string): Promise<void> {
   if (!res.ok) {
     const detail = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(detail.detail ?? `delete lora: ${res.status}`);
+  }
+}
+
+// --------------------------------------------------------------------------- #
+// Control preprocessors — the models that turn a source image into a control map.
+// Not transformers: they never appear in the model picker and are named by the
+// control kind a generation asks for, not chosen per generation.
+// --------------------------------------------------------------------------- #
+export interface FluxPreprocessor {
+  kind: ControlKind;
+  /** Install id, or null for one that needs no weights (canny). */
+  id: string | null;
+  installed: boolean;
+  /** True when the control kind is a built-in filter rather than a downloaded model,
+   *  so the panel offers no install or delete for it. */
+  builtin: boolean;
+  label: string;
+  note: string;
+  /** Download size before install, on-disk size after. 0 for a built-in. */
+  size_gb: number;
+}
+
+export async function getPreprocessors(): Promise<FluxPreprocessor[]> {
+  const res = await fetch("/api/flux/preprocessors");
+  if (!res.ok) throw new Error(`preprocessors: ${res.status}`);
+  return (await res.json()).preprocessors ?? [];
+}
+
+export async function installPreprocessor(
+  id: string,
+  onStatus: (message: string) => void,
+  onProgress: (p: FluxProgress) => void
+): Promise<void> {
+  const res = await fetch("/api/flux/preprocessors/install", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `preprocessor install: ${res.status}`);
+  }
+  let failure: string | null = null;
+  await readLines(res, (line) => {
+    try {
+      const ev = JSON.parse(line);
+      if (ev.type === "status") onStatus(ev.message as string);
+      else if (ev.type === "progress") onProgress(ev as FluxProgress);
+      else if (ev.type === "error") failure = ev.message as string;
+    } catch {
+      /* ignore keepalives */
+    }
+  });
+  if (failure) throw new Error(failure);
+}
+
+export async function deletePreprocessor(id: string): Promise<void> {
+  const res = await fetch(`/api/flux/preprocessors/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `delete preprocessor: ${res.status}`);
   }
 }
 
@@ -532,7 +601,7 @@ export async function deleteFluxModel(name: string): Promise<void> {
   }
 }
 
-export type GenMode = "txt2img" | "img2img" | "edit" | "compose" | "animate";
+export type GenMode = "txt2img" | "img2img" | "edit" | "compose" | "control" | "animate";
 
 /** Rewrite a prompt with a local vision model that can see the attached images.
  *  Always resolves: if Ollama is unreachable the backend falls back to its static
@@ -568,7 +637,7 @@ export interface GenerateParams {
   // it — recorded to chat history in its place so a reload shows what was shown
   // live. Omit when they're the same.
   display_prompt?: string | null;
-  init_image_hash?: string | null; // img2img / edit: the source image
+  init_image_hash?: string | null; // img2img / edit: the source image; control: the structure source
   ref_image_hashes?: string[]; // compose: reference images to fuse
   steps?: number | null;
   guidance?: number | null;
@@ -577,8 +646,23 @@ export interface GenerateParams {
   width: number;
   height: number;
   seconds?: number | null; // animate: clip length (capped at 5s)
+  // control. All optional — a client that predates control sends none of them and
+  // gets exactly the behaviour it always did.
+  control_kinds?: ControlKind[]; // maps to derive from init_image_hash
+  control_map_hashes?: string[]; // maps to use as-is (a re-roll, or one drawn elsewhere)
+  structure_lock?: number; // 1 = maps guide only; lower starts from the source's geometry
+  control_strength?: number | null; // scales the model's control-adapter LoRA
+  canny_low?: number | null;
+  canny_high?: number | null;
   seed?: number | null;
   ollama_url: string;
+}
+
+/** A `control` event: one derived control map, emitted before the final image. */
+export interface GeneratedControlMap {
+  kind: ControlKind;
+  hash: string;
+  url: string;
 }
 
 /** The final `image` event. `url` and `model_label` are what the backend actually
@@ -616,6 +700,8 @@ interface GenerateHandlers {
   onStatus?: (message: string) => void;
   onProgress?: (p: GenProgressEvent) => void;
   onImage: (r: GeneratedImage) => void;
+  /** A control map, emitted before the image it conditioned. Zero or more. */
+  onControlMap?: (m: GeneratedControlMap) => void;
   onError?: (message: string) => void;
 }
 
@@ -652,6 +738,8 @@ export async function generate(
         total: (ev.total as number) ?? 0,
       });
     else if (ev.type === "image") handlers.onImage(ev as unknown as GeneratedImage);
+    else if (ev.type === "control")
+      handlers.onControlMap?.(ev as unknown as GeneratedControlMap);
     else if (ev.type === "error") handlers.onError?.(ev.message as string);
   });
 }

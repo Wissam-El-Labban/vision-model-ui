@@ -151,6 +151,12 @@ def loras() -> dict:
     against one specific base, and one bundle can carry two: FLUX.1 pairs dev with
     Kontext, whose adapter ecosystems are entirely disjoint. Keying by bundle would
     chain a dev adapter onto Kontext whenever you edited.
+
+    A pick may also carry `"control": True`, marking it as this transformer's *control
+    adapter* — the one that teaches the model to obey a control map, and therefore the
+    one the Control tab's strength dial scales. Flagged rather than detected from the
+    filename: an adapter's name is a guess and its role is a fact the user knows. An
+    absent flag means False, so nothing needs migrating.
     """
     raw = _read().get("loras") or {}
     # Pre-multi-LoRA settings.json files store one {"name", "strength"} object per

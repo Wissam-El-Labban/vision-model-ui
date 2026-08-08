@@ -6,6 +6,9 @@ import type { GenOp } from "./types";
  *  `animate` is disjoint from all of them — only a video model can serve it. */
 export function roleFor(op: GenOp): FluxRole {
   if (op === "animate") return "animate";
+  // `control` is an edit-role op: it conditions on ReferenceLatent, which is what
+  // that role means, even though what comes out is a new image. Mirrors the
+  // backend's `role_for_mode`.
   return op === "create" ? "create" : "edit";
 }
 
@@ -19,6 +22,7 @@ export function modeFor(op: GenOp, images: string[]): GenMode {
   if (op === "animate") return "animate";
   if (op === "edit") return "edit";
   if (op === "compose") return "compose";
+  if (op === "control") return "control";
   return images.length ? "img2img" : "txt2img";
 }
 
@@ -26,7 +30,8 @@ export function modeFor(op: GenOp, images: string[]): GenMode {
  *  all of them; edit changes the first and draws subjects from the rest; create
  *  takes a single source (or none, for txt2img); animate takes exactly one — Wan
  *  I2V has a single start frame, and a second attachment would be dropped
- *  silently rather than used. */
+ *  silently rather than used. control reads the first as the structure source and
+ *  the rest as subject references, the same split edit uses. */
 export function imagesFor(op: GenOp, images: string[]): string[] {
   return op === "create" || op === "animate" ? images.slice(0, 1) : images;
 }

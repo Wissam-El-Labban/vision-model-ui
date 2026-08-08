@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Sidebar from "./components/Sidebar";
 import Chat from "./components/Chat";
 import Composer from "./components/Composer";
 import ImageBar from "./components/ImageBar";
 import ContextMeter from "./components/ContextMeter";
 import GenModelPill from "./components/GenModelPill";
+// Lazily loaded: the studio pulls in three.js, which is bigger than the rest of
+// the app put together. Nobody who isn't posing a figure should pay for it.
+const PoseStudio = lazy(() => import("./components/PoseStudio"));
 import {
   appendMessage,
   deleteChat,
@@ -14,12 +17,14 @@ import {
   getChat,
   getFluxModels,
   getModels,
+  getPreprocessors,
   listChats,
   putChat,
   streamChat,
   uploadImages,
   urlToDataUrl,
   type FluxModel,
+  type FluxPreprocessor,
   type Usage,
 } from "./api";
 import { fileToDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
@@ -28,6 +33,7 @@ import { trimHistory } from "./context";
 import type {
   ChatMessage,
   ChatSummary,
+  ControlMap,
   GenProgress,
   GenSettings,
   GenOp,
@@ -90,12 +96,34 @@ export default function App() {
     width: 1024, // FLUX is trained at ~1 megapixel
     height: 1024,
     seed: "",
+    // control. Depth alone by default: it's the map that carries the scene, so it's
+    // the one that answers the pose the user couldn't get with words. The lock
+    // starts off — it changes the output a lot, and it should be something the user
+    // reaches for once the maps alone haven't landed the pose.
+    controlKinds: ["depth"],
+    structureLock: 1,
+    controlStrength: 1,
+    cannyLow: 0.3,
+    cannyHigh: 0.4,
   });
   // Installed image models. Refreshed after an install/removal so the composer's
   // picker stays in sync with the sidebar's Image Models panel.
   const [fluxModels, setFluxModels] = useState<FluxModel[]>([]);
+  // Which control maps can be built. Refreshed alongside the model list, since
+  // installing one is done in the same sidebar panel.
+  const [preprocessors, setPreprocessors] = useState<FluxPreprocessor[]>([]);
+  // Maps posed in the Pose Studio, held apart from the composer's attachments.
+  // They're already control maps, not images to derive one from, and mixing the
+  // two lists would make "is this the source or the map?" ambiguous per image.
+  const [studioMaps, setStudioMaps] = useState<ControlMap[]>([]);
+  const [studioOpen, setStudioOpen] = useState(false);
   const guidanceReady = useRef(false);
   const refreshFlux = useCallback(() => {
+    getPreprocessors()
+      .then(setPreprocessors)
+      .catch(() => {
+        /* backend predates control preprocessors — the Control tab offers canny only */
+      });
     getFluxModels()
       .then((r) => {
         setFluxAvailable(r.available);
@@ -653,18 +681,44 @@ export default function App() {
       // scene being changed and the rest as subject references. create uses one
       // source image, and infers txt2img vs img2img from its presence.
       // animate takes one source image, like create's img2img, and no references.
+      // control reads the first image as the structure source and the rest as
+      // subject references — the same split edit uses, for the same reason: one
+      // image says *how it is arranged*, the others say *what is in it*.
+      //
+      // With no control type selected, that first image is not a source to derive a
+      // map from: it *is* the map. It goes to `control_map_hashes` instead, which is
+      // both the re-roll path (pin the map the last run emitted) and how a skeleton
+      // posed in Blender or PoseMy.Art gets in without being re-analysed.
       const isCompose = op === "compose";
-      const initUrl = isCompose ? null : images[0] ?? null;
-      const refUrls = isCompose ? images : op === "edit" ? images.slice(1) : [];
+      const isControl = op === "control";
+      // Studio maps win outright: they were authored as maps, so there is nothing
+      // to derive and no source image involved. Otherwise, with no control type
+      // selected the first attachment *is* the map — that's the re-roll path (pin
+      // the map the last run emitted) and how a skeleton drawn elsewhere gets in.
+      const usingStudio = isControl && studioMaps.length > 0;
+      const controlAsMap = isControl && !usingStudio && gen.controlKinds.length === 0;
+      const initUrl = isCompose || controlAsMap || usingStudio ? null : images[0] ?? null;
+      const mapUrls = usingStudio
+        ? studioMaps.map((m) => m.url)
+        : controlAsMap && images.length
+          ? [images[0]]
+          : [];
+      const refUrls = isCompose
+        ? images
+        : usingStudio
+          ? images // nothing is the source, so every attachment is a subject reference
+          : op === "edit" || isControl
+            ? images.slice(1)
+            : [];
       // Shared with the prompt enhancer, so both brief the model on the same job.
       const mode = modeFor(op, images);
       // Every image the job conditions on, in the order the backend receives them.
       // edit has two kinds — the scene in `initUrl` and the subject references after
       // it — and showing only the first made the references invisible in the turn
       // that used them. compose has no init, so the spread covers it too.
-      const conditioning = [...(initUrl ? [initUrl] : []), ...refUrls];
+      const conditioning = [...(initUrl ? [initUrl] : []), ...mapUrls, ...refUrls];
       const shownImages = conditioning.length ? conditioning : undefined;
-      const icon = op === "animate" ? "🎬" : "🎨";
+      const icon = op === "animate" ? "🎬" : op === "control" ? "🕹️" : "🎨";
 
       // Show the prompt as a user turn, then an assistant placeholder we fill
       // with progress text and finally the generated image.
@@ -704,9 +758,14 @@ export default function App() {
       let resultDataUrl: string | null = null;
       // Starts as this client's prediction; the backend's echo replaces it.
       let resultLabel = modelId;
+      // Control maps arrive one event at a time, before the image. Accumulated here
+      // rather than read back off the message, because `setAssistant` is a state
+      // update and the next map can land before it has applied.
+      let controlMaps: ControlMap[] = [];
       try {
         const initHash = initUrl ? (await ensureHashes([initUrl]))[0] : null;
         const refHashes = refUrls.length ? await ensureHashes(refUrls) : [];
+        const mapHashes = mapUrls.length ? await ensureHashes(mapUrls) : [];
 
         // Create the chat before sampling, so the backend has a row to record the
         // turns against — it writes them from a thread that outlives this page,
@@ -748,6 +807,21 @@ export default function App() {
             enhance: enhanceTemplate && sendPrompt === prompt,
             width: gen.width,
             height: gen.height,
+            // Only sent for control, so no other mode's request changes shape. The
+            // backend defaults every one of these, so omitting them is the same as
+            // not knowing about them.
+            ...(isControl
+              ? {
+                  // Studio maps are finished maps; asking the backend to derive
+                  // more from a source that doesn't exist would just error.
+                  control_kinds: usingStudio ? [] : gen.controlKinds,
+                  control_map_hashes: mapHashes,
+                  structure_lock: gen.structureLock,
+                  control_strength: gen.controlStrength,
+                  canny_low: gen.cannyLow,
+                  canny_high: gen.cannyHigh,
+                }
+              : {}),
             seed: gen.seed ? parseInt(gen.seed, 10) : null,
             ollama_url: ollamaUrl,
           },
@@ -774,6 +848,20 @@ export default function App() {
                   ? { ...cur, ...p, updatedAt: live ? Date.now() : cur.updatedAt }
                   : cur
               );
+            },
+            onControlMap: async (m) => {
+              // Fetched back as a data-URL like a generated image is, so a map can
+              // be pinned and re-fed on the next roll without a round trip — that's
+              // how you iterate on a prompt while holding one pose fixed.
+              let url = m.url;
+              try {
+                url = await urlToDataUrl(m.url);
+                hashCache.current.set(url, m.hash);
+              } catch {
+                /* fall back to the URL */
+              }
+              controlMaps = [...controlMaps, { kind: m.kind, url }];
+              setAssistant({ controlMaps });
             },
             onImage: async (r) => {
               resultHash = r.hash;
@@ -982,6 +1070,30 @@ export default function App() {
         }
         op = "edit";
         imgs = attached;
+      } else if (genOp === "control") {
+        // Three ways in: a pose built in the studio, an image to derive maps from,
+        // or a finished map attached directly. Only the middle one has a "source".
+        if (studioMaps.length === 0) {
+          if (attached.length === 0) {
+            setError(
+              "Control needs a pose. Open the Pose Studio to build one, or attach an image whose pose you want copied."
+            );
+            return;
+          }
+          if (gen.controlKinds.length === 0 && gen.structureLock < 1) {
+            setError(
+              "With no control type selected the attached image is used as a finished control map — there's no source image left to lock onto. Pick a control type, or set the structure lock back to 1."
+            );
+            return;
+          }
+        } else if (gen.structureLock < 1) {
+          setError(
+            "A studio pose has no source image to lock onto — the maps are the whole signal. Set the structure lock back to 1."
+          );
+          return;
+        }
+        op = "control";
+        imgs = attached;
       } else {
         // create: txt2img, or img2img from a single source image.
         op = "create";
@@ -1086,9 +1198,29 @@ export default function App() {
             enhancing={enhancing}
             pinnedCount={pinnedImages.length}
             pinnedInit={pinnedImages[0] ?? null}
+            preprocessors={preprocessors}
+            studioMaps={studioMaps}
+            onOpenStudio={() => setStudioOpen(true)}
+            onClearStudioMaps={() => setStudioMaps([])}
           />
         </div>
       </main>
+      {studioOpen && (
+        <Suspense
+          fallback={<div className="studio-backdrop"><div className="studio-loading">Loading the Pose Studio…</div></div>}
+        >
+          <PoseStudio
+            onClose={() => setStudioOpen(false)}
+            onUse={(maps) => {
+              setStudioMaps(maps);
+              // Posing is only meaningful in the Control tab, and arriving there
+              // is what the user was doing — don't make them find the tab too.
+              setGenMode(true);
+              if (genOp !== "control") changeOp("control");
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

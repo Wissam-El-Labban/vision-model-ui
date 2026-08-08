@@ -32,7 +32,13 @@ export default function GenModelPill({ op, picked, models, gen }: Props) {
   if (!model) return null;
 
   const video = model.roles.includes("animate");
+  const control = op === "control";
   const seedLabel = gen.seed ? `seed ${gen.seed}` : "random seed";
+  // The lock and the maps change the output as much as the model does, so they
+  // belong on the pill for the same reason everything else here is: nothing that
+  // decides what comes out should be invisible at generate time.
+  const lockLabel = gen.structureLock >= 1 ? "no lock" : `lock ${gen.structureLock.toFixed(2)}`;
+  const kindsLabel = gen.controlKinds.length ? gen.controlKinds.join("+") : "attached map";
   return (
     <span
       className="gen-pill"
@@ -41,15 +47,22 @@ export default function GenModelPill({ op, picked, models, gen }: Props) {
         `Text encoder: ${model.encoder || "—"}\n` +
         `LoRA: ${
           model.loras.length
-            ? model.loras.map((l) => `${l.name} @ ${l.strength}`).join(", ")
+            ? model.loras
+                .map((l) => `${l.name} @ ${l.strength}${l.control ? " (control)" : ""}`)
+                .join(", ")
             : "none"
         }\n` +
+        (control
+          ? `Control: ${kindsLabel}\n` +
+            `Structure lock: ${gen.structureLock >= 1 ? "off" : gen.structureLock}\n` +
+            `Control adapter strength: ${gen.controlStrength}\n`
+          : "") +
         `Steps: ${gen.steps}\n` +
         `Guidance: ${gen.guidance}\n` +
         `Seed: ${gen.seed || "random"}`
       }
     >
-      <span className="gen-pill-icon">{video ? "🎬" : "🎨"}</span>
+      <span className="gen-pill-icon">{control ? "🕹️" : video ? "🎬" : "🎨"}</span>
       <span className="gen-pill-model">{model.label}</span>
       {model.encoder && (
         <>
@@ -70,6 +83,11 @@ export default function GenModelPill({ op, picked, models, gen }: Props) {
             : model.loras
                 .map((l) => `${shortEncoder(l.name)}@${l.strength.toFixed(2)}`)
                 .join(", ")}
+        </span>
+      )}
+      {control && (
+        <span className="gen-pill-control">
+          🕹 {kindsLabel} · {lockLabel}
         </span>
       )}
       <span className="gen-pill-sep">·</span>

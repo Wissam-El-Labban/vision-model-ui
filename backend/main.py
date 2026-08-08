@@ -109,7 +109,7 @@ class GenerateRequest(BaseModel):
     # negative branch at all. `animate` runs on Wan, which does use a real negative at
     # cfg~3.5 — but it's a fixed quality string the model was tuned against, not a knob
     # (see flux_client.WAN_NEGATIVE), so it stays out of the API.
-    mode: str = "txt2img"  # txt2img | img2img | edit | compose | animate
+    mode: str = "txt2img"  # txt2img | img2img | edit | compose | control | animate
     prompt: str = ""
     # What actually generated the image — may be a settings-level auto-enhancer's
     # rewrite of what the user typed. `display_prompt`, if set, is recorded to chat
@@ -127,6 +127,20 @@ class GenerateRequest(BaseModel):
     width: int = 1024  # FLUX is trained at ~1 megapixel
     height: int = 1024
     seconds: float | None = None  # animate: clip length (capped at 5s)
+    # control: which maps to derive from `init_image_hash` ("depth" | "canny" | "pose",
+    # stackable), plus maps the client already has and wants used as-is — a re-roll, or
+    # a skeleton posed in some other tool. All defaulted, so a client that predates
+    # control sends exactly what it used to and gets exactly what it used to.
+    control_kinds: list[str] = []
+    control_map_hashes: list[str] = []
+    # How far down the schedule a control run starts. 1.0 = the maps guide and nothing
+    # constrains; below that the sampler starts from the source image and its geometry
+    # survives. Distinct from `strength` above, which is img2img's denoise: the two
+    # modes are tuned separately and overloading one field would tie them together.
+    structure_lock: float = 1.0
+    control_strength: float | None = None  # scales the model's control-adapter LoRA
+    canny_low: float | None = None
+    canny_high: float | None = None
     seed: int | None = None
     ollama_url: str = oc.DEFAULT_URL
     # The chat to record this generation in. The worker that runs the job outlives
@@ -443,6 +457,10 @@ def flux_lora_pull(req: LoraPullRequest):
 class LoraPick(BaseModel):
     name: str
     strength: float = 1.0
+    # Whether this adapter is the model's *control* adapter — the one the Control tab's
+    # strength dial scales. Defaulted, so a client that predates control still round-
+    # trips a model's picks without clearing the flag.
+    control: bool = False
 
 
 class LoraSelectRequest(BaseModel):
@@ -468,6 +486,46 @@ def flux_lora_delete(name: str):
         return {"ok": True, "selected": fx.selected_loras()}
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="LoRA not found.")
+
+
+# --------------------------------------------------------------------------- #
+# Control preprocessors — the models that turn a source image into a control map.
+# Not transformers and never pickable as one: they live in their own ComfyUI folders
+# and are named by the control kind a generate asks for.
+# --------------------------------------------------------------------------- #
+@app.get("/api/flux/preprocessors")
+def flux_preprocessors():
+    return {"preprocessors": fx.list_preprocessors()}
+
+
+class PreprocessorRequest(BaseModel):
+    id: str
+
+
+@app.post("/api/flux/preprocessors/install")
+def flux_preprocessor_install(req: PreprocessorRequest):
+    if not fx.runtime_ready():
+        raise HTTPException(status_code=503, detail="The image engine isn't installed.")
+
+    def work(emit):
+        fx.install_preprocessor(
+            req.id,
+            on_status=lambda m: emit({"type": "status", "message": m}),
+            on_progress=lambda p: emit({"type": "progress", **p}),
+        )
+
+    return _ndjson(work)
+
+
+@app.delete("/api/flux/preprocessors/{pid}")
+def flux_preprocessor_delete(pid: str):
+    try:
+        fx.delete_preprocessor(pid)
+        return {"ok": True, "preprocessors": fx.list_preprocessors()}
+    except ValueError as exc:  # unknown id
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="That preprocessor isn't installed.")
 
 
 # --------------------------------------------------------------------------- #
@@ -572,6 +630,7 @@ def generate(req: GenerateRequest):
 
     init_image = _resolve(req.init_image_hash) if req.init_image_hash else None
     ref_images = [_resolve(h) for h in req.ref_image_hashes]
+    control_maps = [_resolve(h) for h in req.control_map_hashes]
 
     def gen():
         events: queue.Queue = queue.Queue()
@@ -591,6 +650,10 @@ def generate(req: GenerateRequest):
                 logging.exception("recording %s turn in chat %s failed", turn, req.chat_id)
 
         def worker():
+            # Control maps derived during this job. Recorded on the assistant turn
+            # beside the image, so a reloaded turn shows what the generation actually
+            # conditioned on rather than only what it produced.
+            control_hashes: list[str] = []
             try:
                 events.put({"type": "status", "message": "Freeing VRAM (unloading vision model)…"})
                 try:
@@ -629,7 +692,7 @@ def generate(req: GenerateRequest):
                 # expression covers every mode.
                 record("user", req.display_prompt or req.prompt, label,
                        [h for h in (req.init_image_hash,) if h]
-                       + list(req.ref_image_hashes))
+                       + list(req.ref_image_hashes) + list(req.control_map_hashes))
 
                 seed = req.seed if req.seed is not None else random.randint(0, 2**31 - 1)
                 common = dict(steps=req.steps, guidance=req.guidance, seed=seed,
@@ -666,6 +729,28 @@ def generate(req: GenerateRequest):
                     if not ref_images:
                         raise ValueError("Combine needs at least one reference image.")
                     image = fx.compose(ref_images, req.prompt, **common)
+                elif req.mode == "control":
+                    # `init_image` is the structure source, not something being edited;
+                    # `ref_images` are subjects the prompt can draw from, as in compose.
+                    # Either the source or a ready-made map has to be present — `control`
+                    # checks the combination and says which one is missing.
+                    image, built = fx.control(
+                        init_image, kinds=req.control_kinds, prompt=req.prompt,
+                        refs=ref_images, maps=control_maps, lock=req.structure_lock,
+                        control_strength=req.control_strength,
+                        canny_low=req.canny_low, canny_high=req.canny_high,
+                        width=req.width, height=req.height, **common)
+                    # Emit the derived maps before the image. They're the diagnostic
+                    # when a pose comes out wrong — a bad map and an ignored map look
+                    # identical from the result alone — and each is a normal stored
+                    # image, so the user can pin one and re-feed it on the next roll.
+                    for kind, map_pil in built:
+                        mh = db.save_image(
+                            images.pil_to_data_url(map_pil),
+                            images.pil_to_data_url(map_pil, max_size=64, fmt="JPEG"))
+                        control_hashes.append(mh)
+                        events.put({"type": "control", "kind": kind, "hash": mh,
+                                    "url": db.image_url(mh)})
                 elif req.mode == "img2img":
                     if init_image is None:
                         raise ValueError("Image-to-image needs a source image.")
@@ -681,7 +766,7 @@ def generate(req: GenerateRequest):
                 full = images.pil_to_data_url(image)
                 thumb = images.pil_to_data_url(image, max_size=64, fmt="JPEG")
                 h = db.save_image(full, thumb)
-                record("assistant", "", label, [h])
+                record("assistant", "", label, [h] + control_hashes)
                 events.put(
                     {
                         "type": "image",

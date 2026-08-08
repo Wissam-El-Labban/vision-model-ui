@@ -4,12 +4,15 @@ import {
   deleteFluxBundle,
   deleteFluxModel,
   deleteLora,
+  deletePreprocessor,
   deleteTextEncoder,
   getCivitaiToken,
   getFluxCatalog,
   getLoras,
+  getPreprocessors,
   getTextEncoders,
   installFluxBundle,
+  installPreprocessor,
   pullFluxModel,
   pullLora,
   pullTextEncoder,
@@ -20,8 +23,10 @@ import {
 } from "../api";
 import type {
   FluxCatalog,
+  FluxLoraPick,
   FluxLoras,
   FluxModel,
+  FluxPreprocessor,
   FluxTextEncoders,
   HfTokenSource,
   LoraSource,
@@ -55,6 +60,8 @@ export default function ImageModels({ models, onChanged }: Props) {
   const [loraRepo, setLoraRepo] = useState("");
   const [loraSource, setLoraSource] = useState<LoraSource>("huggingface");
   const [loraStatus, setLoraStatus] = useState<string | null>(null);
+  const [preps, setPreps] = useState<FluxPreprocessor[]>([]);
+  const [prepStatus, setPrepStatus] = useState<string | null>(null);
   // The key itself only ever travels browser -> server. `civitaiSource` is all that
   // comes back — whether one is saved, inherited from the environment, or absent —
   // which is what the field's placeholder reports.
@@ -67,6 +74,7 @@ export default function ImageModels({ models, onChanged }: Props) {
       setCat(c);
       setTes(await getTextEncoders().catch(() => null));
       setLoras(await getLoras().catch(() => null));
+      setPreps(await getPreprocessors().catch(() => []));
       setCivitaiSource(await getCivitaiToken().catch(() => null));
       return c;
     } catch {
@@ -302,7 +310,7 @@ export default function ImageModels({ models, onChanged }: Props) {
   /** Every mutation to a model's LoRA list sends the whole list — the backend
    *  replaces rather than merges, so a partial update would drop whatever wasn't
    *  named in this call. */
-  async function saveModelLoras(model: string, picks: { name: string; strength: number }[]) {
+  async function saveModelLoras(model: string, picks: FluxLoraPick[]) {
     try {
       await setLoraPicks(model, picks);
       await refresh();
@@ -317,7 +325,7 @@ export default function ImageModels({ models, onChanged }: Props) {
   // source of truth for a model's LoRAs, kept fresh by anything that changes them.
   // A second, locally fetched copy would only stay in sync with mutations made from
   // this panel itself.
-  function currentPicks(model: string): { name: string; strength: number }[] {
+  function currentPicks(model: string): FluxLoraPick[] {
     return models.find((m) => m.name === model)?.loras ?? [];
   }
 
@@ -342,6 +350,51 @@ export default function ImageModels({ models, onChanged }: Props) {
       model,
       currentPicks(model).filter((p) => p.name !== name)
     );
+  }
+
+  /** Mark (or unmark) one adapter as this model's control adapter.
+   *
+   * At most one per model: the Control tab's strength dial is a single number, and
+   * two adapters both claiming it would make that number mean whichever the loop
+   * reached last. Toggling a second one moves the flag rather than adding it. */
+  function setControlAdapter(model: string, name: string, on: boolean) {
+    saveModelLoras(
+      model,
+      currentPicks(model).map((p) => ({ ...p, control: on && p.name === name }))
+    );
+  }
+
+  async function togglePreprocessor(p: FluxPreprocessor) {
+    if (!p.id) return; // built-in: nothing to install or remove
+    setBusy(`prep:${p.id}`);
+    setPrepStatus(p.installed ? "removing…" : "starting…");
+    setPct(null);
+    try {
+      if (p.installed) {
+        await deletePreprocessor(p.id);
+        setPrepStatus("✓ removed");
+      } else {
+        await installPreprocessor(
+          p.id,
+          (m) => setPrepStatus(m),
+          (pr) => {
+            setPrepStatus(
+              `${pr.file} — ${(pr.done / 1e9).toFixed(1)}/${(pr.total / 1e9).toFixed(1)} GB`
+            );
+            setPct(pr.pct);
+          }
+        );
+        setPrepStatus("✓ installed");
+      }
+      setPct(null);
+      await refresh();
+      onChanged();
+    } catch (e) {
+      setPrepStatus(`✗ ${(e as Error).message}`);
+      setPct(null);
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function removeLora(name: string) {
@@ -642,6 +695,24 @@ export default function ImageModels({ models, onChanged }: Props) {
                                 {pick.strength.toFixed(2)}
                               </span>
                             </div>
+                            {/* Which adapter is the control one can't be read off
+                                the file — the name is a hint, not a fact — so it's
+                                declared here, and the Control tab's strength dial
+                                drives whichever is flagged. */}
+                            <label
+                              className="lora-control-flag muted small"
+                              title="Flag this as the adapter that makes the model follow a control map. The Control tab's strength dial scales it."
+                            >
+                              <input
+                                type="checkbox"
+                                checked={!!pick.control}
+                                disabled={busy !== null}
+                                onChange={(e) =>
+                                  setControlAdapter(m.name, pick.name, e.target.checked)
+                                }
+                              />
+                              control adapter
+                            </label>
                           </div>
                         ))}
                         {available.length > 0 && (
@@ -669,7 +740,10 @@ export default function ImageModels({ models, onChanged }: Props) {
                     on the same model at once, each at its own weight. Models pick
                     separately, because adapters are trained against one base: a
                     FLUX.2 [dev] LoRA won't bind to klein, and a FLUX.1 dev one won't
-                    bind to Kontext. Start around 0.6-0.8.
+                    bind to Kontext. Start around 0.6-0.8. If one of them is a control
+                    adapter — trained to make the model follow a pose or depth map —
+                    tick <em>control adapter</em> on it, and the Control tab's strength
+                    dial will drive that one.
                   </div>
                   {(loras?.loras ?? []).map((l) => (
                     <div key={l.name} className="row extra-model">
@@ -761,6 +835,52 @@ export default function ImageModels({ models, onChanged }: Props) {
                         adapters are published on CivitAI — switch the source above.
                       </>
                     )}
+                  </div>
+
+                  <div className="lbl">Control preprocessors</div>
+                  {preps.map((p) => (
+                    <div key={p.kind} className="row extra-model prep-row">
+                      <span className="muted small prep-name" title={p.note}>
+                        {p.label}
+                        {p.builtin ? (
+                          <span className="prep-badge built-in">built in</span>
+                        ) : p.installed ? (
+                          <span className="prep-badge">{p.size_gb} GB</span>
+                        ) : (
+                          <span className="prep-badge muted">{p.size_gb} GB download</span>
+                        )}
+                      </span>
+                      {!p.builtin && (
+                        <button
+                          className={`btn small ${p.installed ? "danger" : ""}`}
+                          onClick={() => togglePreprocessor(p)}
+                          disabled={busy !== null}
+                          title={p.installed ? "Remove" : "Install"}
+                        >
+                          {busy === `prep:${p.id}` ? "…" : p.installed ? "🗑" : "⬇"}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  {busy?.startsWith("prep:") && (
+                    <div className="bundle-progress">
+                      <div className="progress">
+                        <div className="progress-bar" style={{ width: `${pct ?? 0}%` }} />
+                      </div>
+                      <div className="muted small">{prepStatus ?? "starting…"}</div>
+                    </div>
+                  )}
+                  {!busy?.startsWith("prep:") && prepStatus && (
+                    <div className="muted small note te-status">{prepStatus}</div>
+                  )}
+                  <div className="muted small">
+                    These turn a reference photo into the control map the{" "}
+                    <strong>🕹️ Control</strong> tab conditions on, so you can copy a pose
+                    words can't describe. <strong>Depth</strong> is the one to install
+                    first: it carries the whole scene, so it can say a subject is
+                    <em> sitting on</em> a chair rather than floating near one.{" "}
+                    <strong>Pose</strong> adds a skeleton on top, which is what pins
+                    which limb is which in a hard pose. Edges needs no download.
                   </div>
                 </>
               )}

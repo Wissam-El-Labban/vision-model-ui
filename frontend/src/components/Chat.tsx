@@ -169,6 +169,26 @@ export default function Chat({
                       ))}
                     </div>
                   )}
+                  {/* The control maps this turn conditioned on. Shown small and
+                      after the result, because they're diagnostic rather than the
+                      output: when a pose comes out wrong, the image alone can't tell
+                      you whether the map was bad or the model ignored a good one. */}
+                  {m.controlMaps && m.controlMaps.length > 0 && (
+                    <div className="control-maps">
+                      {m.controlMaps.map((cm, j) => (
+                        <button
+                          key={j}
+                          type="button"
+                          className="control-map"
+                          title={`${cm.kind} map — click to expand`}
+                          onClick={() => setZoom(cm.url)}
+                        >
+                          <img src={cm.url} alt={`${cm.kind} control map`} />
+                          <span className="control-map-kind">{cm.kind}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   {m.content ? (
                     m.role === "assistant" ? (
                       <div className="content markdown">

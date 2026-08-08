@@ -97,6 +97,36 @@ GUIDANCE_MIN, GUIDANCE_MAX = 0.5, 10.0
 # How the model lays out multiple reference images. See `_conditioning`.
 REF_METHOD = "offset"
 
+# --------------------------------------------------------------------------- #
+# Structural control
+# --------------------------------------------------------------------------- #
+# The control map defaults, taken from ComfyUI's own blueprints for these nodes rather
+# than picked here: `blueprints/Image Depth Estimation (Depth Anything 3).json` and
+# `blueprints/Image to Pose Map (SDPose-OOD).json`.
+DA3_MODEL = "depth_anything_3_mono_large.safetensors"
+DA3_RESOLUTION = 504          # longest side the estimator runs at; must be a multiple of 14
+SDPOSE_CKPT = "sdpose_wholebody_fp16.safetensors"
+SDPOSE_BATCH = 16
+SDPOSE_THRESHOLD = 0.5        # keypoint confidence below which a limb isn't drawn
+CANNY_LOW, CANNY_HIGH = 0.3, 0.4
+
+# How far down the sigma schedule a control generation starts. 1.0 means "start from
+# noise": the control maps guide through ReferenceLatent and nothing constrains the
+# geometry. Below 1.0 the sampler starts from the *source image* instead, so its limb
+# geometry survives — the only hard structural constraint FLUX.2 offers, and the dial
+# that matters for a pose the model won't otherwise hit. See `_control_graph`.
+#
+# The floor is 0.4 rather than `_strength`'s 0.05 because a control generation is meant
+# to replace the subject and the setting: below ~0.4 the source's own appearance is
+# still there and the prompt has stopped mattering, which is img2img with extra steps.
+LOCK_MIN, LOCK_MAX = 0.4, 1.0
+DEFAULT_LOCK = 1.0
+
+# Fraction of the progress bar the preprocess pass owns. It runs as its own ComfyUI
+# prompt (see `control`), so without a split the bar would fill once for the maps and
+# then restart for the generation.
+PREPROCESS_FRACTION = 0.2
+
 # FLUX responds to natural photographic language, not SD 1.5's comma-separated
 # quality tags — a tag salad actively hurts it. Applied when the caller opts in.
 #
@@ -185,6 +215,42 @@ def _strength(v) -> float:
     except (TypeError, ValueError):
         return 0.6
     return min(max(s, 0.05), 1.0)
+
+
+def _lock(v) -> float:
+    """Clamp a structure lock. Out-of-range or unparseable means "off" (1.0).
+
+    Deliberately not `_strength`: that one floors at 0.05, which is right for img2img
+    (where returning the input nearly unchanged is a legitimate ask) and wrong here.
+    """
+    try:
+        s = float(v)
+    except (TypeError, ValueError):
+        return DEFAULT_LOCK
+    return min(max(s, LOCK_MIN), LOCK_MAX)
+
+
+def _control_scale(v) -> float | None:
+    """Strength for the model's control adapter, or None to keep its saved weight.
+
+    None rather than 1.0 for "unset": a control adapter's saved strength is a choice
+    the user already made in the Image Models panel, and a request that says nothing
+    about strength should not quietly overwrite it with a default.
+    """
+    try:
+        s = float(v)
+    except (TypeError, ValueError):
+        return None
+    return min(max(s, 0.0), 2.0)
+
+
+def _canny_edge(v, default: float) -> float:
+    """A Canny threshold. The node's own range; either side of it is a hard error there."""
+    try:
+        t = float(v)
+    except (TypeError, ValueError):
+        return default
+    return t if 0.01 <= t <= 0.99 else default
 
 
 def _dim(v, default: int = 1024) -> int:
@@ -547,7 +613,7 @@ def _dual_clip_node(name1: str, name2: str, kind: str) -> dict:
             "inputs": {"clip_name1": name1, "clip_name2": name2, "type": kind}}
 
 
-def _with_lora(unet: str, loaders: dict) -> dict:
+def _with_lora(unet: str, loaders: dict, control_scale: float | None = None) -> dict:
     """Chain the model's selected LoRAs onto its transformer, one node per adapter.
 
     Every graph builder here refers to the model as `["unet", 0]`. Rather than teach
@@ -560,6 +626,13 @@ def _with_lora(unet: str, loaders: dict) -> dict:
     LoraLoaderModelOnly rather than LoraLoader: FLUX adapters patch the transformer,
     and the CLIP-patching variant demands a `clip` input that would also have to be
     rewired into every text-encode node for no gain.
+
+    `control_scale` overrides the saved strength of adapters flagged `control`, and
+    only those, for this one graph. A control generation needs a strength dial on the
+    reference path — `ReferenceLatent` has no input for one — and the adapter's weight
+    is the only lever there is. Scoped to the flagged adapters because scaling the
+    whole stack would drag a character or style LoRA along with it, changing who is in
+    the picture when the user only asked to change how hard the pose is held.
     """
     picks = loras_for(unet)
     if not picks:
@@ -569,19 +642,26 @@ def _with_lora(unet: str, loaders: dict) -> dict:
     prev = ["unet_base", 0]
     for i, pick in enumerate(picks):
         key = "unet" if i == len(picks) - 1 else f"unet_lora_{i}"
+        strength = pick["strength"]
+        if control_scale is not None and pick.get("control"):
+            strength = round(float(control_scale), 3)
         base[key] = {
             "class_type": "LoraLoaderModelOnly",
             "inputs": {"model": prev,
-                       "lora_name": pick["name"], "strength_model": pick["strength"]},
+                       "lora_name": pick["name"], "strength_model": strength},
         }
         prev = [key, 0]
     return base
 
 
-def _loaders(unet: str) -> dict:
+def _loaders(unet: str, control_scale: float | None = None) -> dict:
     """The transformer + its text encoder + its VAE. All three are family-specific:
     a FLUX.2 transformer decodes 128-channel latents through its own VAE and reads
-    conditioning from a Mistral-3 encoder, none of which FLUX.1's parts can supply."""
+    conditioning from a Mistral-3 encoder, none of which FLUX.1's parts can supply.
+
+    `control_scale` is passed straight through to `_with_lora`; only `_control_graph`
+    sets it.
+    """
     if cat.family_of(unet) == cat.FAMILY_FLUX2:
         b = cat.bundle_of_unet(unet)
         clip = clip_for(b)
@@ -590,12 +670,12 @@ def _loaders(unet: str) -> dict:
             "unet": _unet_node(unet),
             "clip": _clip_node(clip, "flux2"),
             "vae": {"class_type": "VAELoader", "inputs": {"vae_name": b["vae"]}},
-        })
+        }, control_scale)
     return _with_lora(unet, {
         "unet": _unet_node(unet),
         "clip": _dual_clip_node(CLIP_L, T5, "flux"),
         "vae": {"class_type": "VAELoader", "inputs": {"vae_name": FLUX1_VAE}},
-    })
+    }, control_scale)
 
 
 def _sampler(g: dict, unet, latent_src, steps, seed, width, height, denoise=1.0) -> None:
@@ -773,6 +853,165 @@ def _compose_graph(image_names, prompt, width, height, steps, guidance, seed, pr
     return g
 
 
+# --------------------------------------------------------------------------- #
+# Control: preprocess graphs
+# --------------------------------------------------------------------------- #
+# These turn a source image into a control map. They run as their own ComfyUI prompt,
+# separate from the generation that consumes the map — see `control` for why.
+#
+# All three snap the source through `_scale_node` first, for the same reason every
+# other image path here does: the map is about to be VAE-encoded as a reference at that
+# family's resolution, and preprocessing at some other size only to rescale afterwards
+# throws away detail in the one signal the whole mode depends on.
+#
+# Each ends in SaveImage, so `_run` reads the result back with no special casing.
+
+
+def _canny_graph(image_name: str, low: float, high: float, unet: str) -> dict:
+    """Edge map. Needs no weights at all — ComfyUI's `Canny` is a kornia filter.
+
+    The hardest structural signal of the three and the only one that is always
+    available, but it carries style as well as structure: every edge in the source,
+    including the ones that describe its clothing and its background, is handed to the
+    model as something to reproduce.
+    """
+    return {
+        "img": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "scale": _scale_node(unet, ("img", 0)),
+        "map": {"class_type": "Canny",
+                "inputs": {"image": ["scale", 0],
+                           "low_threshold": low, "high_threshold": high}},
+        "save": {"class_type": "SaveImage",
+                 "inputs": {"images": ["map", 0], "filename_prefix": "control_canny"}},
+    }
+
+
+def _depth_graph(image_name: str, unet: str) -> dict:
+    """Depth map, via Depth Anything 3.
+
+    The one that answers the question a skeleton can't: an OpenPose figure says where
+    the limbs are and nothing about what they are resting on, so a subject asked to sit
+    on a chair or stand on top of a closet floats. A depth map carries the chair, the
+    closet, the subject and the contact between them in one signal — and it resolves
+    limb ordering, which is what breaks first on a hard pose.
+
+    `mode` and `output` are DynamicCombo inputs: in ComfyUI's API format their nested
+    options are flat, dot-prefixed sibling keys (`output.normalization`), not a nested
+    object. `mode: "mono"` has no nested options of its own.
+    """
+    return {
+        "img": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "scale": _scale_node(unet, ("img", 0)),
+        "da3": {"class_type": "LoadDA3Model",
+                "inputs": {"model_name": DA3_MODEL, "weight_dtype": "default"}},
+        "geo": {"class_type": "DA3Inference",
+                "inputs": {"da3_model": ["da3", 0], "image": ["scale", 0],
+                           "resolution": DA3_RESOLUTION,
+                           "resize_method": "upper_bound_resize", "mode": "mono"}},
+        "map": {"class_type": "DA3Render",
+                "inputs": {"da3_geometry": ["geo", 0], "output": "depth",
+                           "output.normalization": "v2_style",
+                           "output.apply_sky_clip": False}},
+        "save": {"class_type": "SaveImage",
+                 "inputs": {"images": ["map", 0], "filename_prefix": "control_depth"}},
+    }
+
+
+def _pose_graph(image_name: str, unet: str) -> dict:
+    """OpenPose skeleton, via SDPose.
+
+    Limb configuration only — pair it with depth rather than using it alone, because on
+    its own it says nothing about the scene the pose happens in.
+
+    SDPose is an SD-architecture checkpoint whose keypoints are read out of a UNet
+    feature map, so it needs a MODEL *and* the matching VAE: `CheckpointLoaderSimple`
+    returns (MODEL, CLIP, VAE) and outputs 0 and 2 are the two this wants.
+
+    Single-person. Multi-person detection needs the optional `bboxes` input fed from
+    an RT-DETR detector (`rt_detr_v4-x-hgnet_fp16.safetensors` + `RTDETR_detect`) —
+    a second model to install and a second thing to fail, left out until one control
+    map per person is something the UI can express.
+    """
+    return {
+        "img": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "scale": _scale_node(unet, ("img", 0)),
+        "ck": {"class_type": "CheckpointLoaderSimple",
+               "inputs": {"ckpt_name": SDPOSE_CKPT}},
+        "kp": {"class_type": "SDPoseKeypointExtractor",
+               "inputs": {"model": ["ck", 0], "vae": ["ck", 2], "image": ["scale", 0],
+                          "batch_size": SDPOSE_BATCH}},
+        "map": {"class_type": "SDPoseDrawKeypoints",
+                "inputs": {"keypoints": ["kp", 0],
+                           "draw_body": True, "draw_hands": True, "draw_face": True,
+                           "draw_feet": True, "draw_head": True,
+                           "stick_width": 4, "face_point_size": 2,
+                           "score_threshold": SDPOSE_THRESHOLD}},
+        "save": {"class_type": "SaveImage",
+                 "inputs": {"images": ["map", 0], "filename_prefix": "control_pose"}},
+    }
+
+
+def _preprocess_graph(kind: str, image_name: str, unet: str,
+                      canny_low: float = CANNY_LOW, canny_high: float = CANNY_HIGH) -> dict:
+    if kind == "canny":
+        return _canny_graph(image_name, canny_low, canny_high, unet)
+    if kind == "depth":
+        return _depth_graph(image_name, unet)
+    if kind == "pose":
+        return _pose_graph(image_name, unet)
+    raise ValueError(f"Unknown control type '{kind}'.")
+
+
+def _control_graph(control_names, ref_names, source_name, lock, control_scale, prompt,
+                   width, height, steps, guidance, seed, prefix, unet):
+    """Generate from one or more control maps.
+
+    Structural control here is *not* a ControlNet, and shouldn't be turned into one
+    without checking what family is running. ComfyUI has ControlNet loaders for FLUX.1
+    only (`comfy/controlnet.py`: xlabs, mistoline, InstantX) — there is no FLUX.2
+    branch, no `comfy/ldm/flux2/controlnet.py`, and no published FLUX.2 ControlNet
+    weights to load into one. Wiring `ControlNetApplyAdvanced` into this graph on a
+    FLUX.2 model does not degrade, it fails.
+
+    What FLUX.2 does understand is a reference image, so each control map is chained in
+    as its own `ReferenceLatent` — the same mechanism `_edit_graph` and `_compose_graph`
+    use for subject references. A control-adapter LoRA (flagged in the model's LoRA
+    picks) is what turns "here is an image" into "match this structure"; without one
+    the maps still bias the composition, just more loosely.
+
+    Maps come before subject references in the chain: the structural signal should
+    anchor the layout, and whatever arrives later reads as an addition to it.
+
+    `lock` is where the sampler starts:
+
+      1.0  — an empty latent. The maps guide, nothing constrains; composition is free.
+      <1.0 — the *source image's* latent, denoised from `lock` down. Its geometry
+             survives while the prompt repaints subject, style and setting over it.
+             This is `_img2img_graph`'s mechanism with the maps riding along, and it
+             is the only hard geometric constraint available on this family.
+
+    The cost of a low lock is that the source's appearance survives too, not only its
+    geometry — which is why it is a dial the user sweeps rather than a fixed value, and
+    why depth is the map to pair it with: a depth map has no appearance to leak.
+    """
+    g = _loaders(unet, control_scale=control_scale)
+    refs = ([_encode_image(g, unet, n, f"ctl{i}") for i, n in enumerate(control_names)]
+            + [_encode_image(g, unet, n, f"src{i}") for i, n in enumerate(ref_names)])
+    if not refs:
+        raise ValueError("A control generation needs at least one control map.")
+    g.update(_conditioning(unet, prompt, guidance, ref_latents=refs))
+    if lock < 1.0:
+        if not source_name:
+            raise ValueError("Structure lock needs the source image it locks to.")
+        latent = _encode_image(g, unet, source_name, "lock")
+    else:
+        g["latent"] = _empty_latent(unet, width, height)
+        latent = ("latent", 0)
+    _sampler(g, unet, latent, steps, seed, width, height, denoise=min(lock, 1.0))
+    g.update(_tail(prefix))
+    return g
+
+
 def _wan_length(seconds, fps: int = WAN_FPS) -> int:
     """Frames to sample for a clip of `seconds`, on the lattice Wan requires.
 
@@ -932,6 +1171,16 @@ _NODE_SECONDS = {
     "CLIPTextEncode": 60.0,
     "LoadImage": 0.5, "VAEEncode": 2.0, "WanImageToVideo": 4.0,
     "VAEDecode": 3.0, "SaveImage": 0.5, "SaveWEBM": 10.0,
+    # Control preprocessors. Priced here rather than left to `_OTHER_NODE_SECONDS`
+    # (0.3s) because a preprocess pass is a whole graph made of these: costed at the
+    # default the bar would jump to full and then sit there for the ten seconds the
+    # pose extractor actually takes. Unlike the *Loader nodes above, these two do read
+    # their weights in the node — nothing downstream of them touches a patcher — so
+    # the load lands on the loader for once.
+    "LoadDA3Model": 6.0, "DA3Inference": 8.0, "DA3Render": 0.5,
+    "CheckpointLoaderSimple": 8.0,
+    "SDPoseKeypointExtractor": 10.0, "SDPoseDrawKeypoints": 0.5,
+    "Canny": 1.0,
 }
 _OTHER_NODE_SECONDS = 0.3
 # Per sampler step, multiplied by the steps that node actually runs. High for a step
@@ -942,7 +1191,10 @@ _SAMPLERS = ("KSampler", "KSamplerAdvanced", "SamplerCustomAdvanced")
 # The file names that identify *which* model a node loads. A 6 GB Klein and a 32 GB
 # FLUX.2 both load through UNETLoader and are a minute apart, so timings are keyed by
 # the file, not by the node class.
-_MODEL_INPUTS = ("unet_name", "clip_name", "clip_name1", "vae_name", "lora_name")
+_MODEL_INPUTS = ("unet_name", "clip_name", "clip_name1", "vae_name", "lora_name",
+                 # The control preprocessors' equivalents. Both load in the node, so
+                 # they benefit from the same per-file timing as the transformers.
+                 "ckpt_name", "model_name")
 
 # How often the bar advances while ComfyUI is silent (seconds).
 _TICK = 1.0
@@ -969,6 +1221,12 @@ _STAGE_LABELS = {
     "SamplerCustomAdvanced": "Generating",
     "VAEDecode": "Decoding the image",
     "SaveImage": "Saving", "SaveWEBM": "Encoding the video",
+    "LoadDA3Model": "Loading the depth model", "DA3Inference": "Reading the scene depth",
+    "DA3Render": "Drawing the depth map",
+    "CheckpointLoaderSimple": "Loading the pose model",
+    "SDPoseKeypointExtractor": "Finding the pose",
+    "SDPoseDrawKeypoints": "Drawing the skeleton",
+    "Canny": "Tracing the edges",
 }
 
 _TIMING_PATH = Path(__file__).resolve().parent / "data" / "gen_timing.json"
@@ -1510,6 +1768,125 @@ def compose(pils, prompt, steps=None, guidance=None, seed=0, model=None, on_prog
     return _run(g, on_progress=on_progress, on_status=on_status)
 
 
+def _scaled_progress(cb, lo: float, hi: float):
+    """Squeeze one graph's progress into the [lo, hi] slice of an overall bar.
+
+    `_Progress` costs a single graph and always runs 0 -> 1 over it. A control job is
+    two or three graphs, so without this the bar fills for the depth map, resets, fills
+    again for the pose map, resets, and fills a third time for the generation.
+    """
+    if cb is None:
+        return None
+
+    def relay(p):
+        frac = p.get("frac")
+        if isinstance(frac, (int, float)):
+            p = {**p, "frac": lo + (hi - lo) * min(max(frac, 0.0), 1.0)}
+        cb(p)
+
+    return relay
+
+
+def control(pil, kinds=(), prompt="", refs=(), maps=(), lock=None, control_strength=None,
+            canny_low=None, canny_high=None, width=None, height=None, steps=None,
+            guidance=None, seed=0, model=None, on_progress=None, on_status=None):
+    """Generate an image that follows the structure of a source image.
+
+    This is the answer to a pose words can't specify. `pil` is the source the structure
+    comes from — a photo of the pose, or a posed-mannequin render — and `kinds` names
+    the control maps to derive from it ("depth", "canny", "pose"; stackable, and depth
+    plus pose is the strong pair). `maps` are control maps the caller already has, which
+    skips deriving them; that is both the re-roll path and how a map drawn somewhere
+    else gets in.
+
+    Returns `(image, [(kind, map_pil), ...])` — the maps come back so the caller can
+    show and store them. Seeing the map is most of the value when a pose is failing: it
+    is the difference between "the model ignored me" and "the map didn't have the pose
+    in it either".
+
+    The preprocessors run as their own ComfyUI prompts rather than as extra nodes on the
+    generation graph. Two reasons, both practical: they are whole models (SDPose is an
+    SD-architecture checkpoint plus its VAE), and co-loading them with an 18 GB
+    transformer is a VRAM failure waiting to happen — as separate prompts, ComfyUI is
+    free to evict one before the other loads. And a map that comes back as its own
+    result can be looked at, kept, and re-fed.
+    """
+    ensure_server(on_status=on_status)
+    # ROLE_EDIT, not ROLE_CREATE: the whole mode rides on ReferenceLatent, which a plain
+    # FLUX.1 dev transformer silently ignores. The edit role is exactly the set of
+    # models that read a reference image.
+    unet = _resolve_unet(model, ROLE_EDIT)
+    lock = _lock(lock)
+    tag = uuid.uuid4().hex
+    say = on_status or (lambda _m: None)
+
+    kinds = [k for k in kinds if k]
+    unknown = [k for k in kinds if k not in cat.CONTROL_KINDS]
+    if unknown:
+        raise ValueError(f"Unknown control type '{unknown[0]}'.")
+    missing = [k for k in kinds if not cat.preprocessor_installed(k)]
+    if missing:
+        raise ValueError(
+            f"The {missing[0]} preprocessor isn't installed. Add it under Control "
+            "preprocessors in the Image Models panel.")
+    if pil is None:
+        if not maps:
+            raise ValueError("Control needs a source image to take its structure from.")
+        if kinds:
+            raise ValueError("Deriving a control map needs a source image.")
+        if lock < 1.0:
+            raise ValueError("Structure lock needs the source image it locks to.")
+    if not kinds and not maps:
+        raise ValueError("Pick at least one control type.")
+
+    # Say so rather than refuse. Without an adapter the maps still bias composition
+    # through the reference chain — weakly, but a weak result the user can see beats a
+    # refusal, and the structure lock works regardless of what LoRAs are attached.
+    if not any(p.get("control") for p in loras_for(unet)):
+        say(f"{_label(unet)} has no control LoRA attached — the maps will guide loosely. "
+            "Flag one as the control adapter in the Image Models panel.")
+
+    # Derive the missing maps, each as its own pass over the leading slice of the bar.
+    built: list[tuple[str, object]] = []
+    if kinds:
+        source = _upload_image(pil, f"ctlsrc_{tag}.png")
+        span = PREPROCESS_FRACTION / len(kinds)
+        for i, kind in enumerate(kinds):
+            say(f"building the {kind} map…")
+            g = _preprocess_graph(kind, source, unet,
+                                  _canny_edge(canny_low, CANNY_LOW),
+                                  _canny_edge(canny_high, CANNY_HIGH))
+            built.append((kind, _run(g, on_progress=_scaled_progress(
+                on_progress, i * span, (i + 1) * span))))
+
+    map_names = [_upload_image(p, f"ctlmap{i}_{tag}.png") for i, (_, p) in enumerate(built)]
+    map_names += [_upload_image(p, f"ctlgiven{i}_{tag}.png") for i, p in enumerate(maps)]
+    ref_names = [_upload_image(p, f"ctlref{i}_{tag}.png") for i, p in enumerate(refs)]
+    source_name = _upload_image(pil, f"ctllock_{tag}.png") if (pil and lock < 1.0) else ""
+
+    # The starting latent fixes the output shape, so a locked run takes its resolution
+    # from the source and an unlocked one from the request — the rule `img2img` and
+    # `create` already follow. With neither, the first map decides, the way `compose`
+    # sizes itself off its first reference.
+    if lock < 1.0:
+        w, h = _source_resolution(unet, pil)
+    elif width or height:
+        w, h = _dim(width), _dim(height)
+    else:
+        w, h = _source_resolution(unet, (built[0][1] if built else maps[0]))
+
+    g = _control_graph(map_names, ref_names, source_name, lock,
+                       _control_scale(control_strength), prompt or "", w, h,
+                       _steps(steps, _default_steps(unet)),
+                       _guidance(guidance, _default_guidance(unet, ROLE_EDIT)),
+                       int(seed), "flux_control", unet)
+    say(f"generating with {_label(unet)}…")
+    lo = PREPROCESS_FRACTION if built else 0.0
+    image = _run(g, on_progress=_scaled_progress(on_progress, lo, 1.0),
+                 on_status=on_status)
+    return image, built
+
+
 def animate(pil, prompt, seconds=None, steps=None, guidance=None, seed=0, model=None,
             on_progress=None, on_status=None):
     """Animate an image into a short video ('she turns to look at the camera').
@@ -1640,7 +2017,10 @@ def role_for_mode(mode: str) -> str:
     """The role a generate mode draws its transformer from."""
     if mode == "animate":
         return ROLE_ANIMATE
-    return ROLE_EDIT if mode in ("edit", "compose") else ROLE_CREATE
+    # "control" is an edit-role mode: it conditions on ReferenceLatent, which is the
+    # thing that role means, even though what comes out is a new image rather than an
+    # edited one.
+    return ROLE_EDIT if mode in ("edit", "compose", "control") else ROLE_CREATE
 
 
 def label(unet: str) -> str:
@@ -2954,7 +3334,82 @@ def set_loras(model: str, picks: list[dict]) -> None:
         # Last write for a repeated name wins, but keeps its original position —
         # attaching the same adapter twice is a no-op, not a stack of itself.
         seen[safe] = {"name": safe, "strength": strength}
+        # The control-adapter flag rides along. Stored only when set, so a settings
+        # file written before this existed reads back identically.
+        if pick.get("control"):
+            seen[safe]["control"] = True
     settings.set_loras(target, list(seen.values()))
+
+
+# --------------------------------------------------------------------------- #
+# Control preprocessors
+# --------------------------------------------------------------------------- #
+def list_preprocessors() -> list[dict]:
+    """Every control map the app can build, installed or not.
+
+    Includes the ones that need no weights (canny), because the UI's question is "can I
+    use this control type", not "is there a file". Those report `installed: True` and no
+    size, and the panel renders them as always-available rather than as a download.
+    """
+    out = []
+    for kind in cat.CONTROL_KINDS:
+        p = cat.preprocessor(kind)
+        if not p:
+            out.append({"kind": kind, "id": None, "installed": True, "builtin": True,
+                        "label": "Edge detection (Canny)", "size_gb": 0.0,
+                        "note": "Traces every edge in the source. No download — it's "
+                                "an image filter, not a model. The tightest lock on "
+                                "layout, but it carries the source's style across too."})
+            continue
+        path = cat.preprocessor_file(kind)
+        out.append({
+            "kind": kind, "id": p["id"], "installed": path.exists(), "builtin": False,
+            "label": p["label"], "note": p["note"],
+            "size_gb": round(path.stat().st_size / 1e9, 2) if path.exists() else p["size_gb"],
+        })
+    return out
+
+
+def install_preprocessor(pid: str, on_status=None, on_progress=None) -> None:
+    """Download a control preprocessor's weights.
+
+    One file each, so this is `pull_lora`'s shape rather than `install_bundle`'s: no
+    shard merging, no encoder or VAE to fetch alongside, nothing to resolve. The
+    destination is whichever ComfyUI folder the loading node searches — the node looks
+    models up by folder name, so it is the file's location that makes it findable.
+    """
+    p = cat.get_preprocessor(pid)
+    say = on_status or (lambda _m: None)
+    tick = on_progress or (lambda _p: None)
+    token = settings.hf_token()
+    for spec in p["files"]:
+        dest = cat.dest_dir(spec[2])
+        dest.mkdir(parents=True, exist_ok=True)
+        if cat.file_path(spec).exists():
+            continue
+        say(f"Downloading {p['label']}…")
+        _run_child(["fetch", spec[0], spec[1], str(dest), os.path.basename(spec[1])],
+                   on_status=say, on_progress=tick, token=token)
+    say("Download complete.")
+
+
+def delete_preprocessor(pid: str) -> None:
+    """Remove a control preprocessor's weights.
+
+    No detaching to do, unlike `delete_lora`: nothing points at a preprocessor. It is
+    named by the control kind a request asks for, and a request naming a kind whose
+    weights are gone is refused up front in `control` with something the user can act
+    on, rather than failing inside a graph.
+    """
+    p = cat.get_preprocessor(pid)
+    removed = False
+    for spec in p["files"]:
+        path = cat.file_path(spec)
+        if path.exists():
+            path.unlink()
+            removed = True
+    if not removed:
+        raise FileNotFoundError(p["label"])
 
 
 # Filenames that name the format rather than the adapter. Several popular repos call

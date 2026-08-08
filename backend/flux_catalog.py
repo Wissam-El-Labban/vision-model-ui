@@ -24,9 +24,18 @@ CLIP_DIR = MODELS_DIR / "clip"
 TE_DIR = MODELS_DIR / "text_encoders"
 VAE_DIR = MODELS_DIR / "vae"
 LORA_DIR = MODELS_DIR / "loras"
+# The two directories the control preprocessors load from. Both are ComfyUI search
+# paths already (folder_paths.py:57 and :61) — the nodes look models up by folder name,
+# so these are the only places their files can go.
+#
+# Neither is scanned by `flux_client.list_unets`, which reads UNET_DIR alone. That is
+# what keeps a depth estimator or a pose checkpoint out of the model picker: they are
+# not transformers and must never be offered as one.
+GEOM_DIR = MODELS_DIR / "geometry_estimation"
+CKPT_DIR = MODELS_DIR / "checkpoints"
 
 _DIRS = {"unet": UNET_DIR, "clip": CLIP_DIR, "text_encoders": TE_DIR, "vae": VAE_DIR,
-         "loras": LORA_DIR}
+         "loras": LORA_DIR, "geometry_estimation": GEOM_DIR, "checkpoints": CKPT_DIR}
 
 FAMILY_FLUX1 = "flux1"
 FAMILY_FLUX2 = "flux2"
@@ -183,6 +192,75 @@ BUNDLES = [
 ]
 
 _BY_ID = {b["id"]: b for b in BUNDLES}
+
+# --------------------------------------------------------------------------- #
+# Control preprocessors
+# --------------------------------------------------------------------------- #
+# The models that turn a source image into a *control map* — the depth map or pose
+# skeleton a control generation conditions on. Deliberately not bundles: a bundle is a
+# transformer plus the encoder and VAE that make it samplable, and dispatches a graph
+# family. These have no family, serve no role, and are never picked as a model; they
+# are one file each, loaded by one preprocess graph. Giving them their own registry
+# keeps them out of `BUNDLES`, which is what every model-facing lookup iterates.
+#
+# `kind` is the control map they produce and is the key the rest of the app uses. Canny
+# has no entry here on purpose — ComfyUI's `Canny` node is pure kornia, so edge control
+# needs no weights at all and is always available.
+PREPROCESSORS = [
+    {
+        "id": "depth-anything-3",
+        "kind": "depth",
+        "label": "Depth Anything 3 (Mono, Large)",
+        "note": "Encodes the whole scene in 3-D — a chair, a closet top, a subject's "
+                "contact with them, and which limb is in front. The strongest single "
+                "control for poses that interact with something.",
+        "size_gb": 1.4,
+        "files": [("Comfy-Org/Depth-Anything-3",
+                   "geometry_estimation/depth_anything_3_mono_large.safetensors",
+                   "geometry_estimation")],
+    },
+    {
+        "id": "sdpose",
+        "kind": "pose",
+        "label": "SDPose (whole body)",
+        "note": "An OpenPose skeleton: limb configuration only, nothing about the "
+                "scene. Pairs with depth rather than replacing it.",
+        "size_gb": 2.6,
+        "files": [("Comfy-Org/SDPose",
+                   "checkpoints/sdpose_wholebody_fp16.safetensors", "checkpoints")],
+    },
+]
+
+_BY_KIND = {p["kind"]: p for p in PREPROCESSORS}
+
+# Every control map the app can build, in the order the UI offers them. Depth leads
+# because it is the one that solves the hard cases; canny needs no download and so has
+# no PREPROCESSORS entry to be ordered by.
+CONTROL_KINDS = ("depth", "canny", "pose")
+
+
+def preprocessor(kind: str) -> dict | None:
+    """The model a control kind needs, or None if it needs no weights (canny)."""
+    return _BY_KIND.get(kind or "")
+
+
+def preprocessor_file(kind: str) -> Path | None:
+    """Where that model's single file lives on disk."""
+    p = preprocessor(kind)
+    return file_path(p["files"][0]) if p else None
+
+
+def preprocessor_installed(kind: str) -> bool:
+    """Whether a control kind can run right now. Kinds with no model are always ready."""
+    path = preprocessor_file(kind)
+    return True if path is None else path.exists()
+
+
+def get_preprocessor(pid: str) -> dict:
+    for p in PREPROCESSORS:
+        if p["id"] == pid:
+            return p
+    raise ValueError(f"Unknown control preprocessor '{pid}'.")
 
 
 def get(bundle_id: str) -> dict:

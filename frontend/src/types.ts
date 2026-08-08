@@ -20,10 +20,28 @@ export interface ChatMessage {
    *  actually generated the image, shown underneath the user's own typed
    *  prompt. Live-session only: not persisted, so it's gone on reload. */
   enhancedPrompt?: string;
+  /** The control maps a control generation derived and conditioned on. Shown as
+   *  small chips beside the result: when a pose comes out wrong, a bad map and an
+   *  ignored map look identical from the image alone, and this is what tells them
+   *  apart. Data-URLs, so one can be pinned and re-fed on the next roll. */
+  controlMaps?: ControlMap[];
+}
+
+/** One derived control map, as the backend's `control` stream event describes it. */
+export interface ControlMap {
+  kind: ControlKind;
+  /** Data-URL once the client has fetched it, so it can be pinned like any image. */
+  url: string;
 }
 
 /** Which generation workflow the composer is in. */
-export type GenOp = "create" | "edit" | "compose" | "animate";
+export type GenOp = "create" | "edit" | "compose" | "control" | "animate";
+
+/** A control map's type — what structure it carries out of the source image.
+ *  "depth" holds the whole scene in 3-D (and so the contact between a subject and
+ *  whatever it is sitting or standing on); "canny" holds every edge; "pose" holds
+ *  the skeleton and nothing else. Mirrors the backend's `flux_catalog.CONTROL_KINDS`. */
+export type ControlKind = "depth" | "canny" | "pose";
 
 /** How the settings-level prompt enhancer runs before a generation.
  *  "off": only the manual ✨ Improve prompt button rewrites, on demand.
@@ -70,6 +88,19 @@ export interface GenSettings {
   width: number;
   height: number;
   seed: string; // blank = random; kept as string for the input field
+  /** control: which maps to derive from the source image. Stackable — depth plus
+   *  pose is the pair that holds a hard pose, since depth carries the scene and
+   *  pose carries limb identity. Empty means "use the maps I attached as-is". */
+  controlKinds: ControlKind[];
+  /** control: how far down the schedule to start. 1 = the maps guide and nothing
+   *  constrains; lower starts from the source image so its geometry survives. The
+   *  dial that decides whether a pose is suggested or held. */
+  structureLock: number;
+  /** control: scales the model's control-adapter LoRA for this generation. */
+  controlStrength: number;
+  /** control: Canny edge thresholds. Lower low = more edges kept. */
+  cannyLow: number;
+  cannyHigh: number;
 }
 
 export interface VersionInfo {
