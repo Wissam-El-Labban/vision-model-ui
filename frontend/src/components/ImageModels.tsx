@@ -60,6 +60,14 @@ export default function ImageModels({ models, onChanged }: Props) {
   const [loraRepo, setLoraRepo] = useState("");
   const [loraSource, setLoraSource] = useState<LoraSource>("huggingface");
   const [loraStatus, setLoraStatus] = useState<string | null>(null);
+  // The strength a slider is *being dragged to*, before it's saved.
+  //
+  // A range input fires `onChange` once per notch, and each save is a PUT plus a
+  // full model-list refresh — a single drag used to be a dozen or more of them,
+  // landing on the server at once. Holding the value here and committing on release
+  // makes one drag one request. (The server no longer loses settings when they do
+  // overlap, but the cheapest concurrent write is the one never sent.)
+  const [draftStrength, setDraftStrength] = useState<Record<string, number>>({});
   const [preps, setPreps] = useState<FluxPreprocessor[]>([]);
   const [prepStatus, setPrepStatus] = useState<string | null>(null);
   // The key itself only ever travels browser -> server. `civitaiSource` is all that
@@ -339,10 +347,26 @@ export default function ImageModels({ models, onChanged }: Props) {
   }
 
   function reweightLora(model: string, name: string, strength: number) {
-    saveModelLoras(
+    return saveModelLoras(
       model,
       currentPicks(model).map((p) => (p.name === name ? { ...p, strength } : p))
     );
+  }
+
+  const strengthKey = (model: string, name: string) => `${model} ${name}`;
+
+  /** Save where a strength slider was let go, if it actually moved.
+   *
+   * The draft is cleared only once the save has come back, so the slider doesn't
+   * flick to the old value for the length of a round-trip and then flick back. */
+  async function commitStrength(model: string, name: string) {
+    const key = strengthKey(model, name);
+    const value = draftStrength[key];
+    if (value === undefined) return;
+    if (currentPicks(model).find((p) => p.name === name)?.strength !== value) {
+      await reweightLora(model, name, value);
+    }
+    setDraftStrength(({ [key]: _dropped, ...rest }) => rest);
   }
 
   function detachLora(model: string, name: string) {
@@ -685,14 +709,27 @@ export default function ImageModels({ models, onChanged }: Props) {
                                 min="0"
                                 max="1.5"
                                 step="0.05"
-                                value={pick.strength}
+                                value={
+                                  draftStrength[strengthKey(m.name, pick.name)] ?? pick.strength
+                                }
                                 disabled={busy !== null}
                                 onChange={(e) =>
-                                  reweightLora(m.name, pick.name, parseFloat(e.target.value))
+                                  setDraftStrength((d) => ({
+                                    ...d,
+                                    [strengthKey(m.name, pick.name)]: parseFloat(e.target.value),
+                                  }))
                                 }
+                                // Mouse and touch both end in pointerup; keyup catches
+                                // arrow-key stepping, which never fires one. Blur is the
+                                // backstop for a pointer released off the control.
+                                onPointerUp={() => commitStrength(m.name, pick.name)}
+                                onKeyUp={() => commitStrength(m.name, pick.name)}
+                                onBlur={() => commitStrength(m.name, pick.name)}
                               />
                               <span className="muted small lora-weight">
-                                {pick.strength.toFixed(2)}
+                                {(
+                                  draftStrength[strengthKey(m.name, pick.name)] ?? pick.strength
+                                ).toFixed(2)}
                               </span>
                             </div>
                             {/* Which adapter is the control one can't be read off
