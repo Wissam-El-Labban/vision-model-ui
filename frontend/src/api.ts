@@ -1,4 +1,6 @@
 import type {
+  AgentTool,
+  AgentToolId,
   ChatDetail,
   ChatMessage,
   ChatSummary,
@@ -20,11 +22,39 @@ function withImages(m: ChatMessage) {
     : { role: m.role, content: m.content };
 }
 
+/** One installed model's size and capabilities, as Ollama reports them. */
+export interface ModelDetail {
+  name: string;
+  /** Ollama's own string, e.g. "9.7B" — shown to the user verbatim. */
+  parameter_size: string;
+  /** That string as a number of billions, which is what the agent floor tests. */
+  params_b: number;
+  /** e.g. ["vision", "completion", "tools", "thinking"]. */
+  capabilities: string[];
+}
+
+/** Installed models grouped by what they can do. `agent` is the subset that can
+ *  run agent mode (tools + vision + the size floor); `details` says why. */
 export async function getModels(
   ollamaUrl: string
-): Promise<{ vision: string[]; all: string[] }> {
+): Promise<{
+  vision: string[];
+  all: string[];
+  agent: string[];
+  details: ModelDetail[];
+}> {
   const res = await fetch(`/api/models?ollama_url=${encodeURIComponent(ollamaUrl)}`);
   if (!res.ok) throw new Error(`models: ${res.status}`);
+  return res.json();
+}
+
+/** The tools the agent can be given, for the composer's Tools menu. */
+export async function getAgentTools(): Promise<{
+  tools: AgentTool[];
+  defaults: AgentToolId[];
+}> {
+  const res = await fetch("/api/agent/tools");
+  if (!res.ok) throw new Error(`agent tools: ${res.status}`);
   return res.json();
 }
 
@@ -745,6 +775,118 @@ export async function generate(
     else if (ev.type === "image") handlers.onImage(ev as unknown as GeneratedImage);
     else if (ev.type === "control")
       handlers.onControlMap?.(ev as unknown as GeneratedControlMap);
+    else if (ev.type === "error") handlers.onError?.(ev.message as string);
+  });
+}
+
+// --------------------------------------------------------------------------- #
+// Agent mode
+// --------------------------------------------------------------------------- #
+export interface AgentParams {
+  /** The conversation, exactly as /api/chat takes it: history with every image
+   *  consolidated onto the last message and a manifest numbering them. */
+  messages: ChatMessage[];
+  /** What the user typed, for chat history — the last message's content carries
+   *  the manifest annotation they never wrote. */
+  prompt: string;
+  /** The manifest as stored-image hashes, same order. Tool argument "image 2"
+   *  means `context_hashes[1]`. */
+  context_hashes: string[];
+  /** Images attached to this message specifically, for the recorded user turn. */
+  attachment_hashes: string[];
+  model: string;
+  enabled_tools: AgentToolId[];
+  flux_model?: string | null;
+  steps?: number | null;
+  guidance?: number | null;
+  width: number;
+  height: number;
+  seed?: number | null;
+  ollama_url: string;
+  chat_id?: string | null;
+}
+
+/** One tool the agent decided to call. `index` orders the steps within the turn
+ *  and tags every later event, so progress lands on the right step. */
+export interface AgentToolCall {
+  index: number;
+  name: AgentToolId;
+  args: Record<string, unknown>;
+}
+
+/** A tool call that won't run, with a reason to show. Either the agent's
+ *  arguments didn't validate, or the generation itself failed. */
+export interface AgentToolError {
+  index: number;
+  name: AgentToolId;
+  message: string;
+}
+
+interface AgentHandlers {
+  /** The agent's own prose, streamed. Empty for a plain "make me X". */
+  onToken?: (text: string) => void;
+  onUsage?: (u: Usage) => void;
+  onStatus?: (message: string, toolIndex?: number) => void;
+  onProgress?: (p: GenProgressEvent, toolIndex?: number) => void;
+  onToolCall?: (call: AgentToolCall) => void;
+  onToolError?: (err: AgentToolError) => void;
+  onImage?: (r: GeneratedImage, toolIndex?: number) => void;
+  /** The turn finished — including the case where the agent chose to answer in
+   *  words and generate nothing. */
+  onDone?: () => void;
+  /** The turn failed outright (as opposed to one tool failing). */
+  onError?: (message: string) => void;
+}
+
+/** Stream one agent turn: the model plans, then every tool it called runs.
+ *
+ * Same NDJSON shape as `generate`, with `token` / `tool_call` / `tool_error` /
+ * `done` added and every generation event optionally tagged `tool_index`. */
+export async function agentRun(
+  params: AgentParams,
+  handlers: AgentHandlers,
+  signal?: AbortSignal
+): Promise<void> {
+  const res = await fetch("/api/agent", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...params, messages: params.messages.map(withImages) }),
+    signal,
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `agent: ${res.status}`);
+  }
+  await readLines(res, (line) => {
+    let ev: { type: string; [k: string]: unknown };
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      return;
+    }
+    const toolIndex = ev.tool_index as number | undefined;
+    if (ev.type === "token") handlers.onToken?.(ev.text as string);
+    else if (ev.type === "usage") handlers.onUsage?.(ev as unknown as Usage);
+    else if (ev.type === "status")
+      handlers.onStatus?.(ev.message as string, toolIndex);
+    else if (ev.type === "progress")
+      handlers.onProgress?.(
+        {
+          frac: Math.max(0, Math.min(1, (ev.frac as number) ?? 0)),
+          stage: (ev.stage as string) ?? "",
+          live: ev.live !== false,
+          step: (ev.step as number) ?? 0,
+          total: (ev.total as number) ?? 0,
+        },
+        toolIndex
+      );
+    else if (ev.type === "tool_call")
+      handlers.onToolCall?.(ev as unknown as AgentToolCall);
+    else if (ev.type === "tool_error")
+      handlers.onToolError?.(ev as unknown as AgentToolError);
+    else if (ev.type === "image")
+      handlers.onImage?.(ev as unknown as GeneratedImage, toolIndex);
+    else if (ev.type === "done") handlers.onDone?.();
     else if (ev.type === "error") handlers.onError?.(ev.message as string);
   });
 }

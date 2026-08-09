@@ -17,6 +17,8 @@ Built with a **React (Vite + TypeScript)** frontend and a **FastAPI** backend th
   remove, unload from VRAM, and view running models.
 - **Image generation** — create, edit and combine images locally on FLUX. Models are installed
   from the app, not at setup; see below.
+- **Agent mode** — say what you want in plain words and a local model picks the workflow, picks
+  which images it applies to, and writes the prompt. See below.
 - **In-app Ollama updates** — the UI tells you when a newer Ollama is available and lets you choose
   to upgrade with one click (local installs only). Updates are **opt-in**, never forced.
 - **Per-image rotate** in the composer (client-side, via canvas).
@@ -55,6 +57,43 @@ environment works too.
 You can also add any single-file FLUX.1 transformer from a HuggingFace repo (`owner/model`, or
 `owner/model:file.safetensors`) from that panel. Those extras run on FLUX.1's text encoder, so the
 FLUX.1 model has to be installed alongside them.
+
+## Agent mode
+
+The **🤖 Agent** tab is the Generate tab without the homework. Instead of choosing Create / Edit /
+Combine yourself and arranging the attachments so the right one lands first, you describe what you
+want and a local Ollama model works it out — which workflow to run, which images it applies to, and
+the prompt to run it with.
+
+**It analyzes too.** Ask a question instead — *"what's different about these two?"*, *"how many
+people are in it?"*, *"does this look sharp to you?"* — and it answers in words, the way the Analyze
+tab does, without generating anything. Whether a message is a request for a picture or a question
+about one is decided before the turn runs, and on a question the model is never shown a tool at
+all, so a question can't cost you a generation you didn't ask for.
+
+Images come in the same way they do in **Analyze**: everything pinned in the left panel and
+everything attached anywhere in the conversation is visible to the agent, numbered, on every turn.
+That is what makes follow-ups work — *"now combine that one with the first photo"* refers to
+pictures from three messages ago.
+
+The chosen model is also the prompt enhancer. It writes the final FLUX prompt itself, to the same
+per-mode briefs the standalone enhancer uses, so there is no second rewriting pass — and it is
+shown, under the step in the chat, so you can see exactly what generated the image.
+
+**Requirements.** A model qualifies only if Ollama reports it with **tool support**, **vision**, and
+**at least 7B parameters**. All three matter: without tools it answers in prose and never calls
+anything, without vision it can't write *"make his jacket red"* into a specific instruction, and
+below ~7B it picks the wrong tool often enough to be worse than choosing by hand. With no eligible
+model installed the tab is disabled and says so.
+
+**Tools.** The 🧰 menu in the composer controls what the agent may reach for — Create, Edit and
+Combine on by default, Animate off (a video run is slow), Control listed but unavailable for now.
+A tool that is switched off is never shown to the model at all, so it cannot pick it. Neither can
+it pick one the conversation can't satisfy: Combine isn't offered until two images are in view.
+
+It plans once per turn, then runs everything it decided on. The GPU can't hold Ollama and FLUX at
+the same time, so a reason-act loop would pay a full model swap per step — minutes, for a second
+opinion the model can't form anyway, since it never sees the finished image.
 
 ## Development
 

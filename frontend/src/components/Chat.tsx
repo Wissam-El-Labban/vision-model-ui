@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatMessage, GenProgress } from "../types";
+import type { AgentStep, ChatMessage, GenProgress } from "../types";
 import GenProgressBar from "./GenProgressBar";
 
 /** Stable color per model name, for the per-chunk indicator. */
@@ -52,6 +52,76 @@ function annotateImageRefs(content: string, count: number): string {
       (m, ord) => inject(m, ORDINALS[ord.toLowerCase()])
     )
     .replace(/\bpinned reference images?\b/gi, (m) => inject(m, 1));
+}
+
+/** How the chip labels one tool call, image numbers included.
+ *
+ * The numbers are the point: "Edit image 2" is the difference between the agent
+ * having understood which photo was meant and having guessed. Reading them off
+ * the arguments rather than out of a separate field keeps this honest — it says
+ * what was actually sent. */
+function stepLabel(step: AgentStep): string {
+  const args = step.args ?? {};
+  const nums = (v: unknown): string =>
+    Array.isArray(v) ? v.join(", ") : v === undefined || v === null ? "" : String(v);
+  switch (step.name) {
+    case "create_image":
+      return args.source_image
+        ? `🖼️ Create from image ${nums(args.source_image)}`
+        : "🖼️ Create image";
+    case "edit_image":
+      return `✏️ Edit image ${nums(args.image)}`;
+    case "combine_images":
+      return `🧩 Combine images ${nums(args.images)}`;
+    case "animate_image":
+      return `🎬 Animate image ${nums(args.image)}`;
+    default:
+      return step.name;
+  }
+}
+
+/** The prompt the agent wrote for a step — the one argument worth reading. */
+function stepPrompt(step: AgentStep): string {
+  const args = step.args ?? {};
+  const text = args.prompt ?? args.instruction ?? args.motion;
+  return typeof text === "string" ? text : "";
+}
+
+/** What agent mode decided to do, above the images it produced.
+ *
+ * Collapsed by default: the answer to "why does this image look like this" is a
+ * paragraph of generated prompt, which is worth having but not worth reading
+ * every turn. */
+function AgentSteps({ steps }: { steps: AgentStep[] }) {
+  const [open, setOpen] = useState<number | null>(null);
+  return (
+    <div className="agent-steps">
+      {steps.map((step, i) => {
+        const prompt = stepPrompt(step);
+        return (
+          <div key={i} className={`agent-step ${step.state}`}>
+            <button
+              type="button"
+              className="agent-step-head"
+              onClick={() => setOpen(open === i ? null : i)}
+              disabled={!prompt && !step.message}
+              title={prompt || step.message || ""}
+            >
+              <span className="agent-step-state" aria-hidden>
+                {step.state === "running" ? "⏳" : step.state === "error" ? "⚠️" : "✓"}
+              </span>
+              <span className="agent-step-label">{stepLabel(step)}</span>
+              {(prompt || step.message) && (
+                <span className="chev" aria-hidden>{open === i ? "▾" : "▸"}</span>
+              )}
+            </button>
+            {step.message && <div className="agent-step-error">{step.message}</div>}
+            {open === i && prompt && <div className="agent-step-prompt">{prompt}</div>}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 interface Props {
@@ -133,6 +203,12 @@ export default function Chat({
               <div className={`msg ${m.role}`}>
                 <div className="avatar">{m.role === "user" ? "🧑" : "🤖"}</div>
                 <div className="bubble" style={{ ["--mc" as string]: color }}>
+                  {/* What the agent decided, above what it produced: the chips
+                      explain the images below them, so they have to be read
+                      first. */}
+                  {m.agentSteps && m.agentSteps.length > 0 && (
+                    <AgentSteps steps={m.agentSteps} />
+                  )}
                   {m.videos && m.videos.length > 0 && (
                     <div className="msg-images">
                       {m.videos.map((src, j) => (

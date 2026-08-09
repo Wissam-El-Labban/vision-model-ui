@@ -25,6 +25,51 @@ export interface ChatMessage {
    *  ignored map look identical from the image alone, and this is what tells them
    *  apart. Data-URLs, so one can be pinned and re-fed on the next roll. */
   controlMaps?: ControlMap[];
+  /** What agent mode decided to do this turn: which tools it called, with the
+   *  prompts it wrote. Live-session only, like `enhancedPrompt` — the images and
+   *  the text survive a reload, the reasoning behind them doesn't. */
+  agentSteps?: AgentStep[];
+}
+
+/** Which composer mode is active.
+ *  "analyze": chat with a vision model about the attached images.
+ *  "generate": pick a workflow by hand and drive FLUX directly.
+ *  "agent": describe what you want; a tool-capable model picks the workflow,
+ *  picks the images and writes the prompt. */
+export type ComposerMode = "analyze" | "generate" | "agent";
+
+/** A generation tool the agent can be given. Mirrors `backend/agent.py`'s TOOLS. */
+export type AgentToolId =
+  | "create_image"
+  | "edit_image"
+  | "combine_images"
+  | "animate_image"
+  | "control_image";
+
+/** One entry in the composer's Tools menu, served by `/api/agent/tools` so the
+ *  menu can't offer something the backend won't run. */
+export interface AgentTool {
+  id: AgentToolId;
+  label: string;
+  icon: string;
+  hint: string;
+  /** False for tools that exist as a workflow but aren't wired to the agent yet
+   *  (control). Shown greyed out rather than hidden, so their absence is
+   *  explained rather than mysterious. */
+  available: boolean;
+  default: boolean;
+}
+
+/** One tool call in an agent turn, as the chat renders it. */
+export interface AgentStep {
+  name: AgentToolId;
+  /** What the agent passed — including the prompt it wrote and the image numbers
+   *  it picked, which is the whole explanation of why this image looks like it
+   *  does. */
+  args: Record<string, unknown>;
+  state: "running" | "done" | "error";
+  /** Why it failed, when `state` is "error". A sentence, ready to show. */
+  message?: string;
 }
 
 /** One derived control map, as the backend's `control` stream event describes it. */

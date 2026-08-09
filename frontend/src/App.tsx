@@ -9,11 +9,13 @@ import GenModelPill from "./components/GenModelPill";
 // the app put together. Nobody who isn't posing a figure should pay for it.
 const PoseStudio = lazy(() => import("./components/PoseStudio"));
 import {
+  agentRun,
   appendMessage,
   deleteChat,
   enhancePrompt,
   generate,
   generateTitle,
+  getAgentTools,
   getChat,
   getFluxModels,
   getModels,
@@ -29,10 +31,14 @@ import {
 } from "./api";
 import { fileToDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
 import { guidanceFor, imagesFor, modeFor, resolveFlux, roleFor, stepsFor } from "./flux";
-import { trimHistory } from "./context";
+import { buildOllamaContext } from "./chatContext";
 import type {
+  AgentStep,
+  AgentTool,
+  AgentToolId,
   ChatMessage,
   ChatSummary,
+  ComposerMode,
   ControlMap,
   GenProgress,
   GenSettings,
@@ -52,10 +58,11 @@ export default function App() {
   const [ollamaUrl, setOllamaUrl] = useState(
     () => localStorage.getItem("ollamaUrl") || DEFAULT_URL
   );
-  const [models, setModels] = useState<{ vision: string[]; all: string[] }>({
-    vision: [],
-    all: [],
-  });
+  const [models, setModels] = useState<{
+    vision: string[];
+    all: string[];
+    agent: string[];
+  }>({ vision: [], all: [], agent: [] });
   const [model, setModel] = useState(() => localStorage.getItem("model") || "");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [systemImage, setSystemImage] = useState<string | null>(null);
@@ -70,10 +77,33 @@ export default function App() {
     () => (localStorage.getItem("enhancerMode") as EnhancerMode) || "off"
   );
 
-  // Image generation. `genMode` flips the composer from analyze to generate;
+  // Image generation. `composerMode` picks analyze / generate / agent;
   // `fluxAvailable` reports whether the engine *and* a model are installed;
   // `gen` holds the tunable settings.
-  const [genMode, setGenMode] = useState(false);
+  const [composerMode, setComposerMode] = useState<ComposerMode>(
+    () => (localStorage.getItem("composerMode") as ComposerMode) || "analyze"
+  );
+  const genMode = composerMode === "generate";
+  const agentMode = composerMode === "agent";
+
+  // Agent mode. `agentModel` is its own pick rather than the chat model's,
+  // because the two lists differ: agent mode needs tools + vision + 7B, and the
+  // model someone chats with is often smaller than that. `agentTools` is the
+  // Tools menu; its catalog comes from the backend so the menu can't offer
+  // something the backend won't run.
+  const [agentModel, setAgentModel] = useState(
+    () => localStorage.getItem("agentModel") || ""
+  );
+  const [agentToolCatalog, setAgentToolCatalog] = useState<AgentTool[]>([]);
+  const [agentTools, setAgentTools] = useState<AgentToolId[]>(() => {
+    const saved = localStorage.getItem("agentTools");
+    if (!saved) return [];  // replaced by the backend's defaults once they load
+    try {
+      return JSON.parse(saved) as AgentToolId[];
+    } catch {
+      return [];
+    }
+  });
   // Which generate workflow: create (txt2img/img2img), edit (instruction), or
   // compose (blend multiple reference images).
   const [genOp, setGenOp] = useState<GenOp>("create");
@@ -274,6 +304,42 @@ export default function App() {
     () => localStorage.setItem("enhanceTemplate", String(enhanceTemplate)),
     [enhanceTemplate]
   );
+  useEffect(() => localStorage.setItem("composerMode", composerMode), [composerMode]);
+  // The mode is remembered across reloads, so it can outlive the thing that made
+  // it reachable: uninstall the image models, or the only tool-capable model, and
+  // the tab that would take you out of the mode is hidden or disabled. Fall back
+  // rather than stranding the composer in a mode it can't submit from.
+  useEffect(() => {
+    if (composerMode === "analyze") return;
+    if (!fluxAvailable) setComposerMode("analyze");
+    else if (composerMode === "agent" && models.agent.length === 0) {
+      setComposerMode("analyze");
+    }
+  }, [composerMode, fluxAvailable, models.agent]);
+  useEffect(() => localStorage.setItem("agentModel", agentModel), [agentModel]);
+  useEffect(
+    () => localStorage.setItem("agentTools", JSON.stringify(agentTools)),
+    [agentTools]
+  );
+
+  // The agent's tool catalog, once. Static for the life of the backend, and the
+  // defaults only apply to someone who has never opened the Tools menu — an
+  // empty saved selection is a real choice (no tools = the agent can only talk).
+  useEffect(() => {
+    let cancelled = false;
+    getAgentTools()
+      .then(({ tools, defaults }) => {
+        if (cancelled) return;
+        setAgentToolCatalog(tools);
+        if (localStorage.getItem("agentTools") === null) setAgentTools(defaults);
+      })
+      .catch(() => {
+        /* agent mode stays unavailable; the tab explains why */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const refreshModels = useCallback(async () => {
     try {
@@ -282,10 +348,13 @@ export default function App() {
       setModel((cur) =>
         cur && m.vision.includes(cur) ? cur : m.vision[0] ?? cur
       );
+      setAgentModel((cur) =>
+        cur && m.agent.includes(cur) ? cur : m.agent[0] ?? ""
+      );
       setError(null);
     } catch {
       setError(`Could not reach Ollama at ${ollamaUrl}`);
-      setModels({ vision: [], all: [] });
+      setModels({ vision: [], all: [], agent: [] });
     }
   }, [ollamaUrl]);
 
@@ -460,53 +529,13 @@ export default function App() {
         updatedAt: Date.now(),
       });
 
-      // Auto-trim oldest turns from what we SEND (the UI keeps the full history)
-      // when the last measured usage shows we're near the window limit.
-      const { sent } = trimHistory(history, pinnedImages.length, usage);
-
-      // Image-sending policy (Ollama /api/chat is stateless AND only attends to
-      // images on the CURRENT/last message — images on earlier history messages
-      // are ignored by vision models). So we consolidate every image the
-      // (trimmed) conversation has seen onto the last message: pinned/primary
-      // first, then each in-chat attachment in order. Earlier messages go
-      // text-only. This keeps the model aware of every photo across follow-ups,
-      // not just the one from the latest turn. trimHistory (above) already sheds
-      // the oldest turns/images under context pressure, so this stays within the
-      // window budget (total image count is unchanged, just relocated + deduped).
-      //
-      // The chat API hands the model N *unlabeled* images with no anchor for
-      // which is which, so it conflates distinct photos when asked to compare
-      // them ("this image" vs "the initial one"). We therefore also build a short
-      // text manifest, in the same order as the images array, so the model can
-      // tell the pinned reference(s) apart from images shared earlier vs. now.
-      // Images keep a single global numbering (Image 1..N, in array order) —
-      // that's how models actually refer to them and how the UI resolves each
-      // "Image N" back to its thumbnail. But we group them under clear section
-      // headers so the model doesn't skim past which ones are the persistent
-      // pinned references vs. what was actually sent in the chat (even capable
-      // models mislabel a pinned image as "shared" when it's just one line in a
-      // flat list). Pinned images always come first, so contextImages =
-      // [pinned..., chat...].
-      const lastIdx = sent.length - 1;
-      const seen = new Set<string>(); // dedupe pinned + repeats across history
-      const outImages: string[] = [];
-      const pinnedLines: string[] = [];
-      const chatLines: string[] = [];
-      for (const img of pinnedImages) {
-        if (seen.has(img)) continue;
-        seen.add(img);
-        outImages.push(img);
-        pinnedLines.push(`  Image ${outImages.length}`);
-      }
-      sent.forEach((m, i) => {
-        for (const img of m.images ?? []) {
-          if (seen.has(img)) continue;
-          seen.add(img);
-          outImages.push(img);
-          chatLines.push(
-            `  Image ${outImages.length}${i === lastIdx ? " (sent just now)" : " (sent earlier)"}`
-          );
-        }
+      // Every image the conversation has seen, consolidated onto the last message
+      // and numbered — see `buildOllamaContext` for why both are necessary.
+      const { merged, outImages } = await buildOllamaContext({
+        history,
+        pinnedImages,
+        usage,
+        forOllama,
       });
       // Record the manifest's ordered image list on the assistant turn so the UI
       // can resolve the model's "image N" references back to a thumbnail.
@@ -517,34 +546,6 @@ export default function App() {
           next[next.length - 1] = { ...last, contextImages: outImages };
         }
         return next;
-      });
-      // What actually goes on the wire: downscaled copies. `outImages` stays as the
-      // originals, since the UI resolves "Image N" back to those for display.
-      const wireImages = await forOllama(outImages);
-      const merged = sent.map((m, i) => {
-        if (i !== lastIdx) {
-          return { role: m.role, content: m.content }; // strip history images (Ollama ignores them)
-        }
-        if (!outImages.length) return { role: m.role, content: m.content };
-        // Only annotate when there's more than one image (nothing to disambiguate otherwise).
-        let note = "";
-        if (outImages.length > 1) {
-          const sections: string[] = [];
-          if (pinnedLines.length) {
-            sections.push(
-              "PINNED REFERENCE IMAGES (kept in view for the whole conversation for " +
-                "analysis; NOT part of any single message):\n" +
-                pinnedLines.join("\n")
-            );
-          }
-          if (chatLines.length) {
-            sections.push("IMAGES SENT IN THE CHAT:\n" + chatLines.join("\n"));
-          }
-          note =
-            `[The ${outImages.length} images below are numbered 1-${outImages.length} in the ` +
-            `order shown; refer to each by its number.\n\n${sections.join("\n\n")}]\n\n`;
-        }
-        return { role: m.role, content: note + m.content, images: wireImages };
       });
 
       // Build the request: optional system message (with persistent image) + history.
@@ -969,6 +970,232 @@ export default function App() {
     ]
   );
 
+  /** One agent turn: the model decides, then whatever it decided on runs.
+   *
+   * The request half is `send`'s — the same conversation, the same consolidated
+   * and numbered images — because the agent has to see what an analyze turn sees
+   * before it can say which image it means. The response half is
+   * `generateImage`'s: progress, results fetched back as data-URLs, and the turns
+   * recorded by the backend thread rather than here, so a reload mid-generation
+   * still finds the images.
+   *
+   * Unlike `generateImage`, status text does not go into the message body: the
+   * body is the agent's own words, and overwriting them with "Loading the
+   * model…" would throw away the only explanation of what it decided. The
+   * progress bar and the step chips carry the state instead.
+   */
+  const runAgent = useCallback(
+    async (text: string, images: string[]) => {
+      if (!agentModel) {
+        setError("Agent mode needs a tool-capable model. Install one first.");
+        return;
+      }
+      setError(null);
+      const chatId = currentChatId;
+      const isFirstExchange = messages.length === 0;
+
+      const userMsg: ChatMessage = { role: "user", content: text, images, model: agentModel };
+      const history = [...messages, userMsg];
+      setMessages([...history, { role: "assistant", content: "", model: agentModel }]);
+      setStreaming(true);
+      setProgress({
+        phase: `Loading ${agentModel}…`,
+        stage: "",
+        frac: null,
+        step: 0,
+        total: 0,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+
+      const setAssistant = (patch: Partial<ChatMessage>) =>
+        setMessages((prev) => {
+          const next = [...prev];
+          next[next.length - 1] = { ...next[next.length - 1], ...patch };
+          return next;
+        });
+
+      // `alwaysNumber` because the tool arguments are image numbers: with one
+      // image analyze has nothing to disambiguate, but the agent still has to be
+      // able to say "image 1".
+      const { merged, outImages } = await buildOllamaContext({
+        history,
+        pinnedImages,
+        usage,
+        forOllama,
+        alwaysNumber: true,
+      });
+      setAssistant({ contextImages: outImages });
+
+      const payload: ChatMessage[] = [];
+      if (systemPrompt.trim()) {
+        payload.push({
+          role: "system",
+          content: systemPrompt.trim(),
+          images: systemImage ? await forOllama([systemImage]) : undefined,
+        });
+      }
+      payload.push(...merged);
+
+      // Keyed by the backend's step index, not by arrival order: a call that
+      // fails validation is reported before any call runs, so the two orders
+      // differ and a chip would otherwise attach its progress to the wrong step.
+      const steps = new Map<number, AgentStep>();
+      const flush = () =>
+        setAssistant({
+          agentSteps: [...steps.entries()]
+            .sort(([a], [b]) => a - b)
+            .map(([, step]) => step),
+        });
+      const mark = (index: number, patch: Partial<AgentStep>) => {
+        const current = steps.get(index);
+        if (current) steps.set(index, { ...current, ...patch });
+        flush();
+      };
+
+      let assistantText = "";
+      let produced = 0;
+      const resultImages: string[] = [];
+      const resultVideos: string[] = [];
+      const controller = new AbortController();
+      abortRef.current = controller;
+      try {
+        const context_hashes = await ensureHashes(outImages);
+        const attachment_hashes = await ensureHashes(images);
+
+        // Before the run, for the same reason generateImage does it: the backend
+        // writes both turns from a thread that outlives this page, and it needs a
+        // chat row to write them against.
+        try {
+          await putChat(chatId, {
+            model: agentModel,
+            system_prompt: systemPrompt,
+            pinned_hashes: await ensureHashes(pinnedImages),
+            system_image_hash: systemImage
+              ? (await ensureHashes([systemImage]))[0]
+              : null,
+          });
+          setChatExists(true);
+        } catch (err) {
+          console.error("putChat failed; this turn won't be recorded", err);
+        }
+
+        await agentRun(
+          {
+            messages: payload,
+            prompt: text,
+            context_hashes,
+            attachment_hashes,
+            model: agentModel,
+            enabled_tools: agentTools,
+            flux_model: gen.fluxModel || null,
+            steps: gen.steps,
+            guidance: gen.guidance,
+            width: gen.width,
+            height: gen.height,
+            seed: gen.seed ? parseInt(gen.seed, 10) : null,
+            ollama_url: ollamaUrl,
+            chat_id: chatId,
+          },
+          {
+            onToken: (token) => {
+              assistantText += token;
+              setAssistant({ content: assistantText });
+            },
+            onUsage: (u) => setUsage(u),
+            onStatus: (m) =>
+              setProgress((p) => (p ? { ...p, phase: m, updatedAt: Date.now() } : p)),
+            onProgress: ({ live, ...p }) =>
+              setProgress((cur) =>
+                cur
+                  ? { ...cur, ...p, updatedAt: live ? Date.now() : cur.updatedAt }
+                  : cur
+              ),
+            onToolCall: ({ index, name, args }) => {
+              steps.set(index, { name, args, state: "running" });
+              flush();
+            },
+            onToolError: ({ index, name, message }) => {
+              steps.set(index, {
+                ...(steps.get(index) ?? { name, args: {} }),
+                state: "error",
+                message,
+              });
+              flush();
+            },
+            onImage: async (r, toolIndex) => {
+              produced += 1;
+              const url = r.url || `/api/images/${r.hash}.png`;
+              if (r.kind === "video") {
+                // Left as a URL, never a data-URL — see the same branch in
+                // `generateImage` for why video must not reach `images`.
+                hashCache.current.set(url, r.hash);
+                resultVideos.push(url);
+                setAssistant({ videos: [...resultVideos] });
+              } else {
+                let dataUrl: string | null = null;
+                try {
+                  dataUrl = await urlToDataUrl(url);
+                  hashCache.current.set(dataUrl, r.hash);
+                } catch {
+                  /* fall back to the URL */
+                }
+                resultImages.push(dataUrl ?? url);
+                setAssistant({ images: [...resultImages] });
+              }
+              if (toolIndex !== undefined) mark(toolIndex, { state: "done" });
+            },
+            onError: (msg) => {
+              assistantText = `${assistantText}${assistantText ? "\n\n" : ""}⚠️ ${msg}`;
+              setAssistant({ content: assistantText });
+            },
+          },
+          controller.signal
+        );
+      } catch (e) {
+        if ((e as Error).name !== "AbortError") {
+          assistantText = `${assistantText}${assistantText ? "\n\n" : ""}⚠️ ${
+            (e as Error).message
+          }`;
+          setAssistant({ content: assistantText });
+        }
+      } finally {
+        setStreaming(false);
+        setProgress(null);
+        abortRef.current = null;
+
+        // The backend recorded both turns (see `chat_id` above), so all that's
+        // left is what needs this page: the title and the sidebar. Titling runs
+        // on the chat model — a turn that generated nothing still deserves one,
+        // since the agent answering in words is a normal outcome.
+        try {
+          if (isFirstExchange && (produced > 0 || assistantText.trim())) {
+            await generateTitle(chatId, model || agentModel, ollamaUrl).catch(() => "");
+          }
+          await refreshChats();
+        } catch (err) {
+          console.error("post-agent refresh failed", err);
+        }
+      }
+    },
+    [
+      agentModel,
+      agentTools,
+      gen,
+      model,
+      ollamaUrl,
+      systemPrompt,
+      systemImage,
+      pinnedImages,
+      messages,
+      usage,
+      currentChatId,
+      ensureHashes,
+      forOllama,
+      refreshChats,
+    ]
+  );
+
   const stop = useCallback(() => abortRef.current?.abort(), []);
 
   // Composer (full-width, bottom) state lives here so the input bar spans the
@@ -1057,7 +1284,14 @@ export default function App() {
 
   async function submitComposer() {
     const trimmed = composerText.trim();
-    if (genMode) {
+    if (agentMode) {
+      // No per-op validation and no auto-enhance: deciding which workflow the
+      // request needs, and writing the prompt for it, is the agent's whole job.
+      // Attachments are plain attachments — the conversation's images arrive
+      // through the same path analyze uses.
+      if (!trimmed) return;
+      runAgent(trimmed, composerImages);
+    } else if (genMode) {
       if (!trimmed || enhancing) return; // a prompt is required to generate
       // Source images come from the message attachments, else the pinned panel.
       const attached = composerImages.length ? composerImages : pinnedImages;
@@ -1159,7 +1393,7 @@ export default function App() {
           <h1>👁️ Vision Model Chat</h1>
           <div className="topbar-actions">
             {usage && <ContextMeter used={usage.used} numCtx={usage.num_ctx} />}
-            {fluxAvailable && (
+            {fluxAvailable && !agentMode && (
               <GenModelPill op={genOp} picked={gen.fluxModel} models={fluxModels} gen={gen} />
             )}
             {model && <span className="model-pill">{model}</span>}
@@ -1184,7 +1418,7 @@ export default function App() {
               messages={messages}
               streaming={streaming}
               progress={progress}
-              disabled={!model && !genMode}
+              disabled={composerMode === "analyze" && !model}
               onDropFiles={addComposerFiles}
             />
           </div>
@@ -1202,12 +1436,17 @@ export default function App() {
             models={models}
             model={model}
             setModel={setModel}
+            agentModel={agentModel}
+            setAgentModel={setAgentModel}
+            agentToolCatalog={agentToolCatalog}
+            agentTools={agentTools}
+            setAgentTools={setAgentTools}
             systemPrompt={systemPrompt}
             setSystemPrompt={setSystemPrompt}
             systemImage={systemImage}
             setSystemImage={setSystemImage}
-            genMode={genMode}
-            setGenMode={setGenMode}
+            composerMode={composerMode}
+            setComposerMode={setComposerMode}
             genOp={genOp}
             setGenOp={changeOp}
             fluxAvailable={fluxAvailable}
@@ -1240,7 +1479,7 @@ export default function App() {
               setStudioMeta(meta);
               // Posing is only meaningful in the Control tab, and arriving there
               // is what the user was doing — don't make them find the tab too.
-              setGenMode(true);
+              setComposerMode("generate");
               if (genOp !== "control") changeOp("control");
             }}
           />

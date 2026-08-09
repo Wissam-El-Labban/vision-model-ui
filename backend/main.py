@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import images  # noqa: F401  (imported first: pins HF offline env)
+from . import agent
 from . import db
 from . import flux_catalog as cat
 from . import flux_client as fx
@@ -154,14 +155,58 @@ class GenerateRequest(BaseModel):
     chat_id: str | None = None
 
 
+class AgentRequest(BaseModel):
+    """One agent turn: a conversation in, a decision plus zero or more images out.
+
+    Half chat request, half generate request, because that is what the turn is.
+    `messages` is exactly what `/api/chat` takes — the trimmed history with every
+    image consolidated onto the last message and a manifest numbering them — so the
+    model sees the conversation the same way it does in Analyze mode.
+
+    `context_hashes` is that manifest again, in the same order, as stored-image
+    hashes: image number N in a tool argument is `context_hashes[N - 1]`. It is the
+    bridge between what the model looked at (downscaled base64, inline) and what
+    FLUX will condition on (the full-size original on disk).
+    """
+    messages: list[Message]
+    # What the user actually typed. Recorded to chat history in place of the last
+    # message's content, which carries the manifest annotation the model needs and
+    # the user never wrote — the same split `display_prompt` makes above.
+    prompt: str = ""
+    context_hashes: list[str] = []
+    # Images attached to *this* message, for the recorded user turn. A subset of
+    # context_hashes (which also holds pinned images and everything from earlier
+    # turns), and the only ones that belong on this turn when the chat reloads.
+    attachment_hashes: list[str] = []
+    model: str  # the Ollama model doing the deciding; must be agent-eligible
+    enabled_tools: list[str] = agent.DEFAULT_TOOLS
+    flux_model: str | None = None
+    steps: int | None = None
+    guidance: float | None = None
+    width: int = 1024
+    height: int = 1024
+    seed: int | None = None
+    ollama_url: str = oc.DEFAULT_URL
+    chat_id: str | None = None
+
+
 # --------------------------------------------------------------------------- #
 # Models
 # --------------------------------------------------------------------------- #
 @app.get("/api/models")
 def get_models(ollama_url: str = oc.DEFAULT_URL):
+    """Installed models, grouped by what they can be used for.
+
+    `details` carries the size and capabilities each grouping was derived from, so
+    the UI can say *why* a model isn't eligible for agent mode rather than just
+    omitting it from a list.
+    """
+    details = oc.model_details(ollama_url)
     return {
-        "vision": oc.list_vision_models(ollama_url),
-        "all": oc.list_all_models(ollama_url),
+        "vision": sorted(d["name"] for d in details if "vision" in d["capabilities"]),
+        "all": [d["name"] for d in details],
+        "agent": sorted(d["name"] for d in details if oc.agent_eligible(d)),
+        "details": details,
     }
 
 
@@ -595,6 +640,189 @@ def civitai_token_delete():
     return {"source": settings.civitai_token_source()}
 
 
+FLUX_MISSING = "FLUX isn't installed on this machine. Run ./run.sh to fetch the weights."
+
+
+def _resolve(h: str):
+    """A stored image hash as a PIL image, ready to condition a generation on."""
+    from PIL import Image, ImageOps
+
+    path = db.image_path(h)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"image {h} not found")
+    # Orientation is applied here, not at write time — the store keeps a phone
+    # photo's original bytes and its EXIF Orientation tag with them, rather than
+    # paying a lossy re-encode to bake the rotation in. Uploads used to be
+    # laundered through a browser canvas, which applied it silently; without
+    # this, that removal would land every phone photo in FLUX sideways.
+    try:
+        return ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+    except Exception:
+        # The store holds video too now, and for /api/generate this runs in the
+        # request body — outside `gen()`'s try — so an unreadable file there is a
+        # bare 500 rather than an error in the stream. A generated video is a
+        # plausible thing to drag back in, so say what's wrong instead of failing
+        # opaquely.
+        raise HTTPException(
+            status_code=400,
+            detail=f"{path.suffix.lstrip('.') or 'that file'} isn't an image "
+                   "that can be used as a source.",
+        )
+
+
+def _emitter(events: queue.Queue, tool_index: int | None = None):
+    """Push events onto the stream, tagged with which agent step produced them.
+
+    Agent mode can run several generations in one response, so a progress event
+    means nothing without saying which step it belongs to. `/api/generate` has one
+    job per request and passes no index, which leaves its events byte-identical to
+    what they always were.
+    """
+    def emit(event: dict) -> None:
+        if tool_index is not None:
+            event = {**event, "tool_index": tool_index}
+        events.put(event)
+
+    return emit
+
+
+def _run_job(*, mode, prompt, init_image, ref_images, control_maps, unet, label,
+             seed, emit, record, steps=None, guidance=None, strength=None,
+             enhance=True, width=1024, height=1024, seconds=None,
+             control_kinds=(), structure_lock=1.0, control_strength=None,
+             canny_low=None, canny_high=None) -> None:
+    """Run one generation to completion: sample it, store it, record it, emit it.
+
+    Shared by `/api/generate` (one job per request) and `/api/agent` (one per tool
+    call the model made). Everything it needs is already resolved — the transformer
+    is picked, the images are PIL objects — so it is the same work either way, and
+    the two endpoints cannot drift on how a result is saved or recorded.
+
+    Runs synchronously on the caller's worker thread and raises on failure; the
+    caller decides whether that sinks the request or just fails one step.
+    """
+    status_cb = lambda m: emit({"type": "status", "message": m})
+    # One snapshot of the whole job per event — overall fraction, the stage
+    # producing it, and the sampler counters — so the client renders the bar
+    # from the last event it saw rather than stitching partial updates.
+    prog_cb = lambda p: emit({"type": "progress", **p})
+    common = dict(steps=steps, guidance=guidance, seed=seed, model=unet,
+                  on_progress=prog_cb, on_status=status_cb)
+
+    if mode == "animate":
+        if init_image is None:
+            raise ValueError("Animate needs a source image.")
+        # Returns bytes + a first frame, not a PIL image, so it doesn't
+        # join the shared tail below.
+        data, frame = fx.animate(init_image, prompt, seconds=seconds, **common)
+        h = db.save_image(
+            "data:video/webm;base64," + base64.b64encode(data).decode(),
+            images.pil_to_data_url(frame, max_size=64, fmt="JPEG") if frame else None,
+        )
+        record("assistant", "", label, [h])
+        emit({
+            "type": "image", "kind": "video",
+            "hash": h, "url": db.image_url(h), "seed": seed,
+            "width": frame.size[0] if frame else 0,
+            "height": frame.size[1] if frame else 0,
+            "model": unet, "model_label": label,
+        })
+        return
+
+    if mode == "edit":
+        if init_image is None:
+            raise ValueError("Edit needs a source image.")
+        # Extra images are references the instruction can draw subjects
+        # from; init_image stays the thing being edited.
+        image = fx.edit(init_image, prompt, refs=ref_images, **common)
+    elif mode == "compose":
+        if not ref_images:
+            raise ValueError("Combine needs at least one reference image.")
+        image = fx.compose(ref_images, prompt, **common)
+    elif mode == "control":
+        # `init_image` is the structure source, not something being edited;
+        # `ref_images` are subjects the prompt can draw from, as in compose.
+        # Either the source or a ready-made map has to be present — `control`
+        # checks the combination and says which one is missing.
+        image, built = fx.control(
+            init_image, kinds=control_kinds, prompt=prompt,
+            refs=ref_images, maps=control_maps, lock=structure_lock,
+            control_strength=control_strength,
+            canny_low=canny_low, canny_high=canny_high,
+            width=width, height=height, **common)
+        # Emit the derived maps before the image. They're the diagnostic
+        # when a pose comes out wrong — a bad map and an ignored map look
+        # identical from the result alone — and each is a normal stored
+        # image, so the user can pin one and re-feed it on the next roll.
+        #
+        # Deliberately *not* recorded onto the chat turn. A stored message
+        # is a flat list of image hashes with no notion of which one is the
+        # result, so a recorded map came back after a reload rendered at
+        # full size beside the image it merely conditioned — two pictures
+        # of equal weight, one of which is a greyscale depth render. The
+        # turn is the finished image; the maps are working material and
+        # live only in the session that produced them.
+        for kind, map_pil in built:
+            mh = db.save_image(
+                images.pil_to_data_url(map_pil),
+                images.pil_to_data_url(map_pil, max_size=64, fmt="JPEG"))
+            emit({"type": "control", "kind": kind, "hash": mh,
+                  "url": db.image_url(mh)})
+    elif mode == "img2img":
+        if init_image is None:
+            raise ValueError("Image-to-image needs a source image.")
+        image = fx.img2img(init_image, prompt, strength=strength,
+                           enhance=enhance, **common)
+    else:  # txt2img
+        image = fx.create(prompt, width=width, height=height,
+                          enhance=enhance, **common)
+
+    # PNG: a generated image is often the input to the next edit, and a
+    # JPEG round-trip per generation compounds. Thumbs stay JPEG — 64px
+    # of sidebar icon has nothing to preserve.
+    full = images.pil_to_data_url(image)
+    thumb = images.pil_to_data_url(image, max_size=64, fmt="JPEG")
+    h = db.save_image(full, thumb)
+    record("assistant", "", label, [h])
+    emit(
+        {
+            "type": "image",
+            # Stated rather than left to default, so the client never has to
+            # read an absent field as "image" — `animate` sends "video" here
+            # and both go down the same terminal path.
+            "kind": "image",
+            "hash": h,
+            "url": db.image_url(h),
+            "seed": seed,
+            "width": image.size[0],
+            "height": image.size[1],
+            # What actually ran, so the UI never has to guess.
+            "model": unet,
+            "model_label": label,
+        }
+    )
+
+
+def _recorder(chat_id: str | None):
+    """A `record(turn, content, model, hashes)` that writes to `chat_id`.
+
+    Best-effort: a database that won't take the row is no reason to sink a job the
+    user has already waited minutes for. The generation itself is still delivered
+    over the stream regardless.
+    """
+    def record(turn: str, content: str, model_label: str, hashes: list[str],
+               context_hashes: list[str] | None = None) -> None:
+        if not chat_id:
+            return
+        try:
+            db.append_message(chat_id, turn, content, model_label, hashes,
+                              context_hashes)
+        except Exception:
+            logging.exception("recording %s turn in chat %s failed", turn, chat_id)
+
+    return record
+
+
 @app.post("/api/generate")
 def generate(req: GenerateRequest):
     """Run a local image generation, streaming progress then the final image.
@@ -605,71 +833,26 @@ def generate(req: GenerateRequest):
     in a worker thread that pushes events onto a queue the response generator drains.
     """
     if not fx.available():
-        raise HTTPException(
-            status_code=503,
-            detail="FLUX isn't installed on this machine. Run ./run.sh to fetch the weights.",
-        )
+        raise HTTPException(status_code=503, detail=FLUX_MISSING)
 
     # Resolve stored image hashes to PIL objects (init image for img2img/edit,
     # reference images for compose).
-    from PIL import Image, ImageOps
-
-    def _resolve(h: str):
-        path = db.image_path(h)
-        if path is None:
-            raise HTTPException(status_code=404, detail=f"image {h} not found")
-        # Orientation is applied here, not at write time — the store keeps a phone
-        # photo's original bytes and its EXIF Orientation tag with them, rather than
-        # paying a lossy re-encode to bake the rotation in. Uploads used to be
-        # laundered through a browser canvas, which applied it silently; without
-        # this, that removal would land every phone photo in FLUX sideways.
-        try:
-            return ImageOps.exif_transpose(Image.open(path)).convert("RGB")
-        except Exception:
-            # The store holds video too now, and this runs in the request body —
-            # outside `gen()`'s try — so an unreadable file here is a bare 500 rather
-            # than an error in the stream. A generated video is a plausible thing to
-            # drag back in, so say what's wrong instead of failing opaquely.
-            raise HTTPException(
-                status_code=400,
-                detail=f"{path.suffix.lstrip('.') or 'that file'} isn't an image "
-                       "that can be used as a source.",
-            )
-
     init_image = _resolve(req.init_image_hash) if req.init_image_hash else None
     ref_images = [_resolve(h) for h in req.ref_image_hashes]
     control_maps = [_resolve(h) for h in req.control_map_hashes]
 
     def gen():
         events: queue.Queue = queue.Queue()
-
-        def record(turn: str, content: str, model_label: str, hashes: list[str]) -> None:
-            """Write one turn of this generation to the chat.
-
-            Best-effort: a database that won't take the row is no reason to sink a
-            job the user has already waited minutes for. The generation itself is
-            still delivered over the stream regardless.
-            """
-            if not req.chat_id:
-                return
-            try:
-                db.append_message(req.chat_id, turn, content, model_label, hashes)
-            except Exception:
-                logging.exception("recording %s turn in chat %s failed", turn, req.chat_id)
+        emit = _emitter(events)
+        record = _recorder(req.chat_id)
 
         def worker():
             try:
-                events.put({"type": "status", "message": "Freeing VRAM (unloading vision model)…"})
+                emit({"type": "status", "message": "Freeing VRAM (unloading vision model)…"})
                 try:
                     oc.unload_all(req.ollama_url)
                 except Exception:
                     pass  # best-effort; Ollama may be remote or already free
-
-                status_cb = lambda m: events.put({"type": "status", "message": m})
-                # One snapshot of the whole job per event — overall fraction, the stage
-                # producing it, and the sampler counters — so the client renders the bar
-                # from the last event it saw rather than stitching partial updates.
-                prog_cb = lambda p: events.put({"type": "progress", **p})
 
                 # Resolve the transformer once, here, and pass the resolved name down
                 # (resolving is idempotent). A request naming a model that can't serve
@@ -679,9 +862,9 @@ def generate(req: GenerateRequest):
                 role = fx.role_for_mode(req.mode)
                 unet = fx.resolve_unet(req.flux_model, role)
                 if req.flux_model and unet != os.path.basename(str(req.flux_model)):
-                    events.put({"type": "status", "message":
-                                f"{os.path.basename(str(req.flux_model))} can't {req.mode} "
-                                f"here — using {fx.label(unet)} instead"})
+                    emit({"type": "status", "message":
+                          f"{os.path.basename(str(req.flux_model))} can't {req.mode} "
+                          f"here — using {fx.label(unet)} instead"})
                 label = fx.label(unet)
 
                 # Record the prompt before sampling rather than after it. This thread
@@ -699,102 +882,224 @@ def generate(req: GenerateRequest):
                        + list(req.ref_image_hashes) + list(req.control_map_hashes))
 
                 seed = req.seed if req.seed is not None else random.randint(0, 2**31 - 1)
-                common = dict(steps=req.steps, guidance=req.guidance, seed=seed,
-                              model=unet, on_progress=prog_cb, on_status=status_cb)
+                _run_job(
+                    mode=req.mode, prompt=req.prompt,
+                    init_image=init_image, ref_images=ref_images,
+                    control_maps=control_maps, unet=unet, label=label, seed=seed,
+                    emit=emit, record=record,
+                    steps=req.steps, guidance=req.guidance, strength=req.strength,
+                    enhance=req.enhance, width=req.width, height=req.height,
+                    seconds=req.seconds, control_kinds=req.control_kinds,
+                    structure_lock=req.structure_lock,
+                    control_strength=req.control_strength,
+                    canny_low=req.canny_low, canny_high=req.canny_high,
+                )
+            except Exception as exc:
+                events.put({"type": "error", "message": str(exc)})
+            finally:
+                events.put(None)  # sentinel: worker done
 
-                if req.mode == "animate":
-                    if init_image is None:
-                        raise ValueError("Animate needs a source image.")
-                    # Returns bytes + a first frame, not a PIL image, so it doesn't
-                    # join the shared tail below.
-                    data, frame = fx.animate(init_image, req.prompt, seconds=req.seconds,
-                                             **common)
-                    h = db.save_image(
-                        "data:video/webm;base64," + base64.b64encode(data).decode(),
-                        images.pil_to_data_url(frame, max_size=64, fmt="JPEG") if frame else None,
-                    )
-                    record("assistant", "", label, [h])
-                    events.put({
-                        "type": "image", "kind": "video",
-                        "hash": h, "url": db.image_url(h), "seed": seed,
-                        "width": frame.size[0] if frame else 0,
-                        "height": frame.size[1] if frame else 0,
-                        "model": unet, "model_label": label,
-                    })
+        threading.Thread(target=worker, daemon=True).start()
+        while True:
+            item = events.get()
+            if item is None:
+                break
+            yield json.dumps(item) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+# --------------------------------------------------------------------------- #
+# Agent mode: the model picks the workflow and writes the prompt
+# --------------------------------------------------------------------------- #
+AGENT_NO_MODEL = (
+    "Agent mode needs an Ollama model with tool support, vision, and at least "
+    f"{oc.AGENT_MIN_PARAMS:g}B parameters. None is installed — pull one from the "
+    "sidebar's Model Manager."
+)
+
+
+@app.get("/api/agent/tools")
+def agent_tools():
+    """The tools the agent can be given, for the composer's Tools menu.
+
+    Served rather than duplicated in the frontend so the menu can't offer something
+    the backend won't run, and so an unavailable tool carries the same explanation
+    in both places.
+    """
+    return {"tools": agent.catalog(), "defaults": agent.DEFAULT_TOOLS}
+
+
+@app.post("/api/agent")
+def agent_turn(req: AgentRequest):
+    """Let a local model decide what to generate, then generate it.
+
+    One planning turn, then every tool it called, in order. Deliberately not a
+    reason-act loop: consulting the model between steps would mean unloading FLUX
+    and reloading Ollama each time, and on a cold FLUX.2 that is minutes per step
+    for a second opinion the model can't form anyway (it never sees the result —
+    the image goes to the browser, not back into its context). So it plans once,
+    Ollama is unloaded once, and the GPU is handed over exactly once.
+    """
+    if not fx.available():
+        raise HTTPException(status_code=503, detail=FLUX_MISSING)
+
+    eligible = oc.list_agent_models(req.ollama_url)
+    if not eligible:
+        raise HTTPException(status_code=503, detail=AGENT_NO_MODEL)
+    if req.model not in eligible:
+        detail = next(
+            (d for d in oc.model_details(req.ollama_url) if d["name"] == req.model),
+            None,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=oc.agent_shortfall(detail) if detail
+            else f"{req.model} isn't installed.",
+        )
+
+    # Check the manifest resolves before promising anything, but don't decode it:
+    # a ten-image conversation usually feeds one image to one tool, and the rest
+    # would be loaded and thrown away. The images that get used are opened lazily
+    # in the worker, once the model has said which ones it wants.
+    for h in req.context_hashes:
+        if db.image_path(h) is None:
+            raise HTTPException(status_code=404, detail=f"image {h} not found")
+
+    n_images = len(req.context_hashes)
+    enabled = set(req.enabled_tools)
+    # The user's own system prompt, if they set one, arrives as a leading system
+    # message. It is folded into whichever brief this turn ends up using rather
+    # than sent as a second system message: the brief has to come first and stay
+    # first, and how a template merges a second one is model-specific.
+    history = [m.model_dump(exclude_none=True) for m in req.messages]
+    extra_system = []
+    while history and history[0].get("role") == "system":
+        extra_system.append(history.pop(0).get("content") or "")
+
+    def brief(system: str) -> list[dict]:
+        if any(s.strip() for s in extra_system):
+            system += "\n\nThe user also set these standing instructions:\n" + "\n".join(
+                s.strip() for s in extra_system if s.strip()
+            )
+        return [{"role": "system", "content": system}, *history]
+
+    def gen():
+        events: queue.Queue = queue.Queue()
+        emit = _emitter(events)
+        record = _recorder(req.chat_id)
+
+        def worker():
+            try:
+                # Before anything slow, for the same reason /api/generate records
+                # early: this thread outlives the request, so a reload must not be
+                # able to lose the turn that started the work.
+                record("user", req.prompt, req.model, list(req.attachment_hashes),
+                       list(req.context_hashes))
+
+                emit({"type": "status", "message": f"Thinking with {req.model}…"})
+                text = ""
+                calls = []
+
+                # Is this a request to make an image at all? Settled first, on the
+                # text alone, so a question is answered by a model that was never
+                # shown a tool — see `agent.wants_image`. Skipped when no tool is
+                # switched on, since the answer couldn't change anything.
+                tools = agent.tool_schemas(enabled, n_images)
+                if tools and not agent.wants_image(req.ollama_url, req.model, req.prompt):
+                    tools = []
+
+                if tools:
+                    messages = brief(agent.system_prompt(enabled, n_images))
+                    for event in oc.stream_chat_tools(
+                        req.ollama_url, req.model, messages, tools
+                    ):
+                        if event["type"] == "token":
+                            text += event["text"]
+                            emit(event)
+                        elif event["type"] == "tool_calls":
+                            calls = event["calls"]
+                        else:
+                            emit(event)  # usage, for the context meter
+
+                # Either this was a question, or the turn above produced nothing at
+                # all — a dead end that leaves the user an empty bubble and no
+                # reason for it. Both want the same thing: answer, with no tool
+                # vocabulary in the way. Ollama is still loaded here, so the retry
+                # costs a round trip and no model swap.
+                if not calls and not text.strip():
+                    for event in oc.stream_chat(
+                        req.ollama_url, req.model, brief(agent.answer_system())
+                    ):
+                        if event["type"] == "token":
+                            text += event["text"]
+                        emit(event)
+
+                # Validate everything before running anything. A plan that is half
+                # impossible should say so up front rather than after four minutes
+                # of sampling the half that worked.
+                specs = []
+                for index, call in enumerate(calls):
+                    try:
+                        specs.append((index, call, agent.validate(
+                            call["name"], call.get("arguments") or {}, n_images)))
+                    except ValueError as exc:
+                        emit({"type": "tool_error", "index": index,
+                              "name": call.get("name", ""), "message": str(exc)})
+
+                # No tool calls is a normal outcome, not a failure: the model was
+                # asked a question, or wants to know which image is meant. Its
+                # answer is the whole turn.
+                if text.strip():
+                    record("assistant", text.strip(), req.model, [])
+                if not specs:
+                    emit({"type": "done"})
                     return
 
-                if req.mode == "edit":
-                    if init_image is None:
-                        raise ValueError("Edit needs a source image.")
-                    # Extra images are references the instruction can draw subjects
-                    # from; init_image stays the thing being edited.
-                    image = fx.edit(init_image, req.prompt, refs=ref_images, **common)
-                elif req.mode == "compose":
-                    if not ref_images:
-                        raise ValueError("Combine needs at least one reference image.")
-                    image = fx.compose(ref_images, req.prompt, **common)
-                elif req.mode == "control":
-                    # `init_image` is the structure source, not something being edited;
-                    # `ref_images` are subjects the prompt can draw from, as in compose.
-                    # Either the source or a ready-made map has to be present — `control`
-                    # checks the combination and says which one is missing.
-                    image, built = fx.control(
-                        init_image, kinds=req.control_kinds, prompt=req.prompt,
-                        refs=ref_images, maps=control_maps, lock=req.structure_lock,
-                        control_strength=req.control_strength,
-                        canny_low=req.canny_low, canny_high=req.canny_high,
-                        width=req.width, height=req.height, **common)
-                    # Emit the derived maps before the image. They're the diagnostic
-                    # when a pose comes out wrong — a bad map and an ignored map look
-                    # identical from the result alone — and each is a normal stored
-                    # image, so the user can pin one and re-feed it on the next roll.
-                    #
-                    # Deliberately *not* recorded onto the chat turn. A stored message
-                    # is a flat list of image hashes with no notion of which one is the
-                    # result, so a recorded map came back after a reload rendered at
-                    # full size beside the image it merely conditioned — two pictures
-                    # of equal weight, one of which is a greyscale depth render. The
-                    # turn is the finished image; the maps are working material and
-                    # live only in the session that produced them.
-                    for kind, map_pil in built:
-                        mh = db.save_image(
-                            images.pil_to_data_url(map_pil),
-                            images.pil_to_data_url(map_pil, max_size=64, fmt="JPEG"))
-                        events.put({"type": "control", "kind": kind, "hash": mh,
-                                    "url": db.image_url(mh)})
-                elif req.mode == "img2img":
-                    if init_image is None:
-                        raise ValueError("Image-to-image needs a source image.")
-                    image = fx.img2img(init_image, req.prompt, strength=req.strength,
-                                       enhance=req.enhance, **common)
-                else:  # txt2img
-                    image = fx.create(req.prompt, width=req.width, height=req.height,
-                                      enhance=req.enhance, **common)
+                emit({"type": "status",
+                      "message": "Freeing VRAM (unloading vision model)…"})
+                try:
+                    oc.unload_all(req.ollama_url)
+                except Exception:
+                    pass  # best-effort; Ollama may be remote or already free
 
-                # PNG: a generated image is often the input to the next edit, and a
-                # JPEG round-trip per generation compounds. Thumbs stay JPEG — 64px
-                # of sidebar icon has nothing to preserve.
-                full = images.pil_to_data_url(image)
-                thumb = images.pil_to_data_url(image, max_size=64, fmt="JPEG")
-                h = db.save_image(full, thumb)
-                record("assistant", "", label, [h])
-                events.put(
-                    {
-                        "type": "image",
-                        # Stated rather than left to default, so the client never has to
-                        # read an absent field as "image" — `animate` sends "video" here
-                        # and both go down the same terminal path.
-                        "kind": "image",
-                        "hash": h,
-                        "url": db.image_url(h),
-                        "seed": seed,
-                        "width": image.size[0],
-                        "height": image.size[1],
-                        # What actually ran, so the UI never has to guess.
-                        "model": unet,
-                        "model_label": label,
-                    }
-                )
+                for index, call, spec in specs:
+                    step = _emitter(events, tool_index=index)
+                    step({"type": "tool_call", "index": index, "name": call["name"],
+                          "args": call.get("arguments") or {}})
+                    try:
+                        role = fx.role_for_mode(spec["mode"])
+                        unet = fx.resolve_unet(req.flux_model, role)
+                        label = fx.label(unet)
+                        seed = (req.seed if req.seed is not None
+                                else random.randint(0, 2**31 - 1))
+                        _run_job(
+                            mode=spec["mode"], prompt=spec["prompt"],
+                            init_image=(_resolve(req.context_hashes[spec["init"]])
+                                        if spec["init"] is not None else None),
+                            ref_images=[_resolve(req.context_hashes[i])
+                                        for i in spec["refs"]],
+                            control_maps=[], unet=unet, label=label, seed=seed,
+                            emit=step, record=record,
+                            steps=req.steps, guidance=req.guidance,
+                            # The agent's aspect choice if it made one, else the
+                            # size the user set in the generate settings.
+                            width=spec.get("width") or req.width,
+                            height=spec.get("height") or req.height,
+                            seconds=spec.get("seconds"),
+                            # It writes its own prompt to the same brief the
+                            # enhancer uses, so wrapping it in the photoreal
+                            # template on top would fight what it wrote.
+                            enhance=False,
+                        )
+                    except Exception as exc:
+                        # One failed step doesn't sink the others. The user still
+                        # gets the images that worked, and a reason for the one
+                        # that didn't.
+                        logging.exception("agent tool %s failed", call["name"])
+                        step({"type": "tool_error", "index": index,
+                              "name": call["name"], "message": str(exc)})
+                emit({"type": "done"})
             except Exception as exc:
                 events.put({"type": "error", "message": str(exc)})
             finally:

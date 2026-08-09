@@ -86,6 +86,99 @@ def stream_chat(url, model, messages):
             }
 
 
+def stream_chat_tools(url, model, messages, tools):
+    """Like `stream_chat`, but offers the model tools and reports what it called.
+
+    Yields the same {"type": "token"} and {"type": "usage"} events, plus one
+    {"type": "tool_calls", "calls": [{"name": ..., "arguments": {...}}, ...]} if
+    the model asked for any. Tool calls arrive whole inside a chunk's message
+    rather than a token at a time, but a model may emit them across several
+    chunks, so they're accumulated and reported once at the end — the caller
+    wants the whole plan before it starts unloading GPUs on the strength of it.
+
+    Ollama returns `arguments` already parsed as an object; older builds send it
+    as a JSON string, so both are accepted.
+    """
+    num_ctx = context_size_for(messages)
+    payload = {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "stream": True,
+        "think": False,
+        "options": {"num_ctx": num_ctx},
+    }
+    response = requests.post(
+        f"{url}/api/chat", json=payload, stream=True, timeout=CHAT_TIMEOUT
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"Ollama returned {response.status_code}: {response.text}")
+
+    calls = []
+    for line in response.iter_lines():
+        if not line:
+            continue
+        try:
+            chunk = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = chunk.get("message") or {}
+        content = message.get("content")
+        if content:
+            yield {"type": "token", "text": content}
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") or {}
+            name = function.get("name")
+            if not name:
+                continue
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            calls.append({"name": name, "arguments": arguments or {}})
+        if chunk.get("done"):
+            if calls:
+                yield {"type": "tool_calls", "calls": calls}
+            prompt_tokens = chunk.get("prompt_eval_count") or 0
+            eval_tokens = chunk.get("eval_count") or 0
+            yield {
+                "type": "usage",
+                "used": prompt_tokens + eval_tokens,
+                "prompt_tokens": prompt_tokens,
+                "eval_tokens": eval_tokens,
+                "num_ctx": num_ctx,
+            }
+
+
+def ask_once(url, model, system, user, num_ctx=2048):
+    """One short text-only question, answered in full. "" on any failure.
+
+    No images and a small context on purpose: this is for classification-shaped
+    questions about what the user *asked for*, which the text answers on its own.
+    Skipping the vision tokens is what keeps it cheap enough to run before the
+    real turn.
+    """
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "stream": False,
+        "think": False,
+        "options": {"num_ctx": num_ctx},
+    }
+    try:
+        response = requests.post(f"{url}/api/chat", json=payload, timeout=CHAT_TIMEOUT)
+        if response.status_code != 200:
+            return ""
+        return ((response.json().get("message") or {}).get("content") or "").strip()
+    except (requests.RequestException, ValueError):
+        return ""
+
+
 def generate_title(url, model, first_user, first_assistant):
     """Ask the model for a short conversation title from the first exchange.
 
@@ -250,6 +343,18 @@ def _subject_note(subjects: int, contact: bool) -> str:
     return note
 
 
+def enhance_system(template: str) -> str:
+    """The brief that teaches a model to write for one generate mode.
+
+    Public so agent mode can reuse them. The agent picks the mode *and* writes the
+    prompt in a single turn, so it needs the same instruction the standalone
+    enhancer gets — and there should be exactly one copy of it, or the two paths
+    drift and the same request produces differently-styled prompts depending on
+    which tab it went through.
+    """
+    return _ENHANCE_SYSTEM[template]
+
+
 _PREAMBLE = re.compile(r"^\s*(here'?s|here is|sure[,!]?|prompt:)[^\n]*:\s*", re.I)
 
 
@@ -341,28 +446,102 @@ def is_vision_model(url, model_name):
         return False
 
 
-def list_vision_models(url):
-    """Return sorted names of installed vision-capable models."""
+# Agent mode drives tools instead of answering in prose, and below roughly this
+# size a model stops choosing tools reliably: it describes the tool it would call,
+# calls one with the arguments of another, or loops on the same call. Ollama draws
+# the same line for its own agent features. Sized in billions of parameters.
+AGENT_MIN_PARAMS = 7.0
+
+
+def _parse_params(text) -> float:
+    """Ollama's `parameter_size` ("9.7B", "700M") as a number of billions."""
+    match = re.search(r"([\d.]+)\s*([BbMm])", str(text or ""))
+    if not match:
+        return 0.0
+    value = float(match.group(1))
+    return value / 1000 if match.group(2).lower() == "m" else value
+
+
+def model_details(url):
+    """Every installed model with its size and capabilities.
+
+    One `/api/tags` request: modern Ollama reports `details` and `capabilities`
+    inline there, so the per-model `/api/show` round trips this used to make
+    (one per model, on every model-list refresh) are only needed as a fallback
+    for older builds that omit `capabilities`.
+    """
     try:
         response = requests.get(f"{url}/api/tags", timeout=5)
         if response.status_code != 200:
             return []
         models = response.json().get("models", [])
-        vision = [m["name"] for m in models if is_vision_model(url, m["name"])]
-        return sorted(vision)
     except requests.RequestException:
         return []
 
+    out = []
+    for m in models:
+        name = m.get("name")
+        if not name:
+            continue
+        details = m.get("details") or {}
+        capabilities = m.get("capabilities")
+        if capabilities is None:
+            # Old Ollama. `is_vision_model` has its own heuristic fallback, and
+            # a build this old has no tool support to report anyway.
+            capabilities = ["vision"] if is_vision_model(url, name) else []
+        parameter_size = details.get("parameter_size") or ""
+        out.append({
+            "name": name,
+            "parameter_size": parameter_size,
+            "params_b": _parse_params(parameter_size),
+            "capabilities": list(capabilities),
+        })
+    return out
 
-def list_all_models(url):
-    """Return names of every installed model (for the remove dropdown)."""
-    try:
-        response = requests.get(f"{url}/api/tags", timeout=5)
-        if response.status_code != 200:
-            return []
-        return [m["name"] for m in response.json().get("models", [])]
-    except requests.RequestException:
-        return []
+
+def agent_eligible(detail) -> bool:
+    """Whether a model can run agent mode.
+
+    Three requirements, all load-bearing. `tools` because function calling needs a
+    tool-aware chat template — without one the model answers in prose and never
+    calls anything. `vision` because the agent is also the prompt enhancer, and it
+    can't write "make his jacket red" into a specific instruction without seeing
+    the jacket. And the size floor above.
+    """
+    caps = set(detail.get("capabilities") or [])
+    return (
+        detail.get("params_b", 0.0) >= AGENT_MIN_PARAMS
+        and "tools" in caps
+        and "vision" in caps
+    )
+
+
+def agent_shortfall(detail) -> str:
+    """Why a model can't run agent mode, as a sentence. "" if it can."""
+    caps = set(detail.get("capabilities") or [])
+    missing = [c for c in ("tools", "vision") if c not in caps]
+    if missing:
+        return f"{detail.get('name')} has no {' or '.join(missing)} support."
+    if detail.get("params_b", 0.0) < AGENT_MIN_PARAMS:
+        return (
+            f"{detail.get('name')} is {detail.get('parameter_size') or 'too small'}; "
+            f"agent mode needs at least {AGENT_MIN_PARAMS:g}B parameters."
+        )
+    return ""
+
+
+def list_agent_models(url):
+    """Return sorted names of models that can run agent mode."""
+    return sorted(d["name"] for d in model_details(url) if agent_eligible(d))
+
+
+def list_vision_models(url):
+    """Return sorted names of installed vision-capable models."""
+    return sorted(
+        d["name"] for d in model_details(url) if "vision" in d["capabilities"]
+    )
+
+
 
 
 def pull(url, name):

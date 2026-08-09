@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { fileToDataUrl } from "../fileUtils";
 import { guidanceFor, resolveFlux, roleFor, stepsFor } from "../flux";
-import type { ControlKind, GenSettings, GenOp } from "../types";
+import type {
+  AgentTool,
+  AgentToolId,
+  ComposerMode,
+  ControlKind,
+  GenSettings,
+  GenOp,
+} from "../types";
 import type { FluxModel, FluxPreprocessor } from "../api";
 
 /** The control maps the Control tab offers, in the order they're worth reaching for.
@@ -32,16 +39,27 @@ interface Props {
   streaming: boolean;
   disabled: boolean;
   // Moved here from the sidebar: system prompt (left) + model selector (right).
-  models: { vision: string[]; all: string[] };
+  models: { vision: string[]; all: string[]; agent: string[] };
   model: string;
   setModel: (v: string) => void;
+  /** Agent mode's own model pick. Separate from `model` because the eligible sets
+   *  differ — agent mode needs tools + vision + 7B, which most chat models lack. */
+  agentModel: string;
+  setAgentModel: (v: string) => void;
+  /** Every tool the agent could be given, served by the backend so the menu can't
+   *  offer one it won't run. Includes unavailable entries (control), shown greyed
+   *  out rather than hidden. */
+  agentToolCatalog: AgentTool[];
+  /** Which of them are switched on. */
+  agentTools: AgentToolId[];
+  setAgentTools: (v: AgentToolId[]) => void;
   systemPrompt: string;
   setSystemPrompt: (v: string) => void;
   systemImage: string | null;
   setSystemImage: (v: string | null) => void;
   // Image generation (FLUX).
-  genMode: boolean;
-  setGenMode: (v: boolean) => void;
+  composerMode: ComposerMode;
+  setComposerMode: (v: ComposerMode) => void;
   /** Which generate workflow (create / edit / compose). */
   genOp: GenOp;
   setGenOp: (v: GenOp) => void;
@@ -93,8 +111,13 @@ export default function Composer({
   setSystemPrompt,
   systemImage,
   setSystemImage,
-  genMode,
-  setGenMode,
+  agentModel,
+  setAgentModel,
+  agentToolCatalog,
+  agentTools,
+  setAgentTools,
+  composerMode,
+  setComposerMode,
   genOp,
   setGenOp,
   fluxAvailable,
@@ -113,12 +136,28 @@ export default function Composer({
   const fileRef = useRef<HTMLInputElement>(null);
   const sysRef = useRef<HTMLDivElement>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
+  const toolsRef = useRef<HTMLDivElement>(null);
   const [sysOpen, setSysOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  // Everything below still asks `genMode`, so deriving it here keeps a third
+  // composer mode from touching the twenty-odd guards that only ever meant
+  // "the hand-driven generate workflows".
+  const genMode = composerMode === "generate";
+  const agentMode = composerMode === "agent";
   // Generate doesn't need an Ollama model, so `disabled` only bites in chat mode
-  // — same rule the attach button uses.
-  const dropDisabled = disabled && !genMode;
+  // — same rule the attach button uses. Agent mode needs one of its own.
+  const dropDisabled = disabled && !genMode && !agentMode;
+  // Which model the mode's picker is bound to, and the list it picks from.
+  const activeModel = agentMode ? agentModel : model;
+  const setActiveModel = agentMode ? setAgentModel : setModel;
+  const modelChoices = agentMode ? models.agent : models.vision;
+  // Said the same way here and in the backend's 503, so the reason reads
+  // identically wherever the user meets it.
+  const noAgentModel =
+    "Agent mode needs an Ollama model with tool support, vision, and at least 7B " +
+    "parameters. None is installed — pull one from the sidebar's Model Manager.";
 
   const hasSystem = systemPrompt.trim().length > 0 || !!systemImage;
   const patchGen = (p: Partial<typeof gen>) => setGen({ ...gen, ...p });
@@ -238,6 +277,29 @@ export default function Composer({
     return () => document.removeEventListener("mousedown", onDown);
   }, [settingsOpen]);
 
+  useEffect(() => {
+    if (!toolsOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (toolsRef.current && !toolsRef.current.contains(e.target as Node)) {
+        setToolsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [toolsOpen]);
+
+  const toggleTool = (id: AgentToolId) =>
+    setAgentTools(
+      agentTools.includes(id)
+        ? agentTools.filter((t) => t !== id)
+        : [...agentTools, id]
+    );
+  // Only the available ones count: control is in the catalog so it can be shown
+  // greyed out, and counting it would advertise a tool the agent never gets.
+  const enabledCount = agentToolCatalog.filter(
+    (t) => t.available && agentTools.includes(t.id)
+  ).length;
+
   function onKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -288,9 +350,10 @@ export default function Composer({
         <div className="mode-toggle" role="tablist" aria-label="Composer mode">
           <button
             role="tab"
-            aria-selected={!genMode}
-            className={`mode-tab ${!genMode ? "active" : ""}`}
-            onClick={() => setGenMode(false)}
+            aria-selected={composerMode === "analyze"}
+            className={`mode-tab ${composerMode === "analyze" ? "active" : ""}`}
+            onClick={() => setComposerMode("analyze")}
+            title="Ask a vision model about the images you attach"
           >
             🔍 Analyze
           </button>
@@ -298,10 +361,48 @@ export default function Composer({
             role="tab"
             aria-selected={genMode}
             className={`mode-tab ${genMode ? "active" : ""}`}
-            onClick={() => setGenMode(true)}
+            onClick={() => setComposerMode("generate")}
+            title="Pick a workflow yourself and drive the image model directly"
           >
             🎨 Generate
           </button>
+          <button
+            role="tab"
+            aria-selected={agentMode}
+            className={`mode-tab ${agentMode ? "active" : ""}`}
+            onClick={() => setComposerMode("agent")}
+            disabled={models.agent.length === 0}
+            title={
+              models.agent.length === 0
+                ? noAgentModel
+                : "Say what you want — the model picks the workflow, picks the images and writes the prompt"
+            }
+          >
+            🤖 Agent
+          </button>
+        </div>
+      )}
+
+      {agentMode && (
+        <div className="agent-hint">
+          {images.length || pinnedCount ? (
+            <>
+              Ask a question about these images, or ask for a new one. The agent sees
+              every image in the conversation and decides which to work on.
+            </>
+          ) : (
+            <>
+              Describe an image to make it, or ask a question — attach photos and it
+              can analyze, edit or combine them too.
+            </>
+          )}
+          {enabledCount === 0 && (
+            <span className="warn">
+              {" "}
+              Every tool is switched off, so it can only talk. Turn one on in 🧰
+              Tools.
+            </span>
+          )}
         </div>
       )}
 
@@ -597,6 +698,49 @@ export default function Composer({
           )}
         </div>
 
+        {agentMode && (
+          <div className="sys-control" ref={toolsRef}>
+            <button
+              className={`btn ghost icon ${enabledCount === 0 ? "has-dot warn" : ""}`}
+              onClick={() => setToolsOpen((v) => !v)}
+              title="Which tools the agent may use"
+            >
+              🧰{enabledCount === 0 && <span className="dot" />}
+            </button>
+            {toolsOpen && (
+              <div className="system-popover tools-popover">
+                <div className="popover-title">🧰 Tools</div>
+                <p className="hint muted">
+                  What the agent is allowed to do. It only ever sees the tools that
+                  are on here — switching one off is how you keep it from reaching
+                  for that workflow at all.
+                </p>
+                {agentToolCatalog.map((tool) => (
+                  <label
+                    key={tool.id}
+                    className={`tool-row ${tool.available ? "" : "unavailable"}`}
+                    title={tool.hint}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={tool.available && agentTools.includes(tool.id)}
+                      disabled={!tool.available}
+                      onChange={() => toggleTool(tool.id)}
+                    />
+                    <span className="tool-label">
+                      {tool.icon} {tool.label}
+                    </span>
+                    <span className="tool-hint">{tool.hint}</span>
+                  </label>
+                ))}
+                {agentToolCatalog.length === 0 && (
+                  <p className="hint muted">Couldn't load the tool list.</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {genMode && (
           <div className="sys-control" ref={settingsRef}>
             <button
@@ -808,9 +952,15 @@ export default function Composer({
 
         <button
           className="btn icon"
-          title={genMode ? "Attach a starting image (img2img)" : "Attach images"}
+          title={
+            agentMode
+              ? "Attach images for the agent to work on"
+              : genMode
+                ? "Attach a starting image (img2img)"
+                : "Attach images"
+          }
           onClick={() => fileRef.current?.click()}
-          disabled={disabled && !genMode}
+          disabled={dropDisabled}
         >
           📎
         </button>
@@ -830,7 +980,11 @@ export default function Composer({
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
           placeholder={
-            genMode
+            agentMode
+              ? agentModel
+                ? "Ask or describe… e.g. “make his jacket red”, or “what’s different about these two?”"
+                : "No model can run agent mode — install a 7B+ model with tools and vision…"
+              : genMode
               ? isAnimate
                 ? "Describe the motion… e.g. “she turns to look at the camera, slow push in”"
                 : isControl
@@ -847,7 +1001,7 @@ export default function Composer({
                 : "Ask about your image(s)… (drop or paste images anywhere, Enter to send)"
           }
           rows={1}
-          disabled={genMode ? false : disabled}
+          disabled={genMode || agentMode ? false : disabled}
         />
 
         {streaming ? (
@@ -856,16 +1010,28 @@ export default function Composer({
           </button>
         ) : (
           <button
-            className={`btn send ${genMode ? "gen" : ""}`}
+            className={`btn send ${genMode ? "gen" : ""} ${agentMode ? "agent" : ""}`}
             onClick={onSubmit}
-            title={genMode && enhancing ? "Enhancing prompt…" : genMode ? "Generate image" : "Send"}
+            title={
+              agentMode
+                ? agentModel
+                  ? "Ask the agent"
+                  : noAgentModel
+                : genMode && enhancing
+                  ? "Enhancing prompt…"
+                  : genMode
+                    ? "Generate image"
+                    : "Send"
+            }
             disabled={
-              genMode
-                ? !text.trim() || enhancing
-                : disabled || (!text.trim() && images.length === 0)
+              agentMode
+                ? !text.trim() || !agentModel
+                : genMode
+                  ? !text.trim() || enhancing
+                  : disabled || (!text.trim() && images.length === 0)
             }
           >
-            {genMode ? (enhancing ? "✨" : "🎨") : "➤"}
+            {agentMode ? "🤖" : genMode ? (enhancing ? "✨" : "🎨") : "➤"}
           </button>
         )}
 
@@ -888,16 +1054,29 @@ export default function Composer({
             )}
           </div>
         ) : (
-          <div className="model-control" title="Vision model">
-            <span aria-hidden>🤖</span>
-            {models.vision.length > 0 ? (
-              <select value={model} onChange={(e) => setModel(e.target.value)}>
-                {models.vision.map((m) => (
+          <div
+            className="model-control"
+            title={agentMode ? "Agent model (tools + vision, 7B+)" : "Vision model"}
+          >
+            <span aria-hidden>{agentMode ? "🧠" : "🤖"}</span>
+            {modelChoices.length > 0 ? (
+              <select
+                value={activeModel}
+                onChange={(e) => setActiveModel(e.target.value)}
+              >
+                {modelChoices.map((m) => (
                   <option key={m} value={m}>
                     {m}
                   </option>
                 ))}
               </select>
+            ) : agentMode ? (
+              // No free-text fallback here, unlike the vision picker: a name typed
+              // by hand can't be checked for tool support, and a model without it
+              // silently never calls anything.
+              <span className="flux-engine" title={noAgentModel}>
+                no eligible model
+              </span>
             ) : (
               <input
                 value={model}
