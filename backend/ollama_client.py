@@ -125,6 +125,184 @@ def generate_title(url, model, first_user, first_assistant):
 
 
 # --------------------------------------------------------------------------- #
+# Prompt enhancement
+# --------------------------------------------------------------------------- #
+# FLUX.2 is conditioned by a large LLM text encoder (Mistral-3 for [dev], Qwen3 for
+# [klein]) and follows long natural prose — see the note above `PHOTOREAL_TEMPLATE`
+# in flux_client.py for why tag salad hurts it. These prompts are written for that,
+# and are split by mode because an edit is not a description: rewriting "make the
+# jacket red" into a scene paragraph turns an edit into a regeneration, which is the
+# one way an enhancer can make things actively worse.
+_ENHANCE_SYSTEM = {
+    "create": (
+        "You are a prompt engineer for the FLUX.2 image model. It is conditioned by a "
+        "large language model and follows long, natural prose. Never write "
+        "comma-separated tag lists — they degrade this model.\n"
+        "Rewrite the user's idea as a single vivid paragraph describing the finished "
+        "photograph: the subject, what they are doing, the setting, camera and lens, "
+        "lighting, composition, mood and style.\n"
+        "If reference images are attached, describe their subjects accurately — "
+        "appearance, clothing, distinguishing features — so the model reproduces them "
+        "rather than inventing new ones.\n"
+        "Keep every concrete detail the user specified. Invent only what they left "
+        "open.\n"
+        "Return the prompt only: no preamble, no quotes, no commentary."
+    ),
+    "edit": (
+        "You are a prompt engineer for the FLUX.2 image editing model.\n"
+        "The user gives an INSTRUCTION describing a change to the attached image. "
+        "Rewrite it as a clearer, more specific instruction. It must REMAIN an "
+        "instruction in the imperative. Never turn it into a description of a scene.\n"
+        "Use the attached image to name exactly what to change and where it is.\n"
+        "State explicitly what must stay unchanged: background, other subjects, pose, "
+        "lighting, framing.\n"
+        "Do not add camera, lens or style language unless the user asked to change "
+        "those.\n"
+        "Return the instruction only: no preamble, no quotes, no commentary."
+    ),
+    "compose": (
+        "You are a prompt engineer for the FLUX.2 image model. It is conditioned by a "
+        "large language model and follows long, natural prose. Never write "
+        "comma-separated tag lists — they degrade this model.\n"
+        "Several reference images are attached. The user wants a new image that "
+        "combines them. Describe the finished image as a single vivid paragraph.\n"
+        "Identify each reference's subject explicitly and say what it contributes, so "
+        "the model knows which is which and reproduces each faithfully rather than "
+        "blending them into someone new.\n"
+        "Keep every concrete detail the user specified. Invent only what they left "
+        "open.\n"
+        "Return the prompt only: no preamble, no quotes, no commentary."
+    ),
+    "control": (
+        "You are a prompt engineer for the FLUX.2 image model. It is conditioned by a "
+        "large language model and follows long, natural prose. Never write "
+        "comma-separated tag lists — they degrade this model.\n"
+        "The attached image is a CONTROL MAP — a depth render, an edge trace or an "
+        "OpenPose skeleton. It is not content and must never be described. It exists "
+        "only to fix the pose and the layout.\n"
+        "The user often writes an instruction ('make him clap his hands', 'do a "
+        "T-pose'). That is the wrong shape here and produces a greyscale copy of the "
+        "map, because an instruction gives the model nothing to render and imitating "
+        "the reference is all that is left. Convert it into a description of the "
+        "FINISHED PHOTOGRAPH, in which the subject is already in that pose.\n"
+        "Describe the subject, their clothing, the setting, the lighting and the "
+        "style, as a single vivid paragraph. Say it is a photograph.\n"
+        "Never mention depth maps, skeletons, greyscale, silhouettes, poses maps or "
+        "the control image itself.\n"
+        "Keep every concrete detail the user specified. Invent only what they left "
+        "open.\n"
+        "Return the prompt only: no preamble, no quotes, no commentary."
+    ),
+    "animate": (
+        "You are a prompt engineer for the Wan 2.2 image-to-video model.\n"
+        "The attached image is the video's FIRST FRAME. It already fixes the subject, "
+        "the setting, the lighting and the framing — do not describe them. Describing "
+        "the scene again wastes the prompt and fights the frame the model is starting "
+        "from.\n"
+        "Describe only what HAPPENS over the next few seconds: how the subject moves, "
+        "and how the camera moves (a slow push in, a pan left, a locked-off static "
+        "shot). Name the camera move explicitly — it is the strongest control there "
+        "is.\n"
+        "It is one continuous shot. Never describe a cut, a new angle, or a second "
+        "scene.\n"
+        "Keep it to what five seconds can hold: one action, not a sequence of them.\n"
+        "Write a short paragraph of plain prose in the present tense.\n"
+        "Return the prompt only: no preamble, no quotes, no commentary."
+    ),
+}
+
+# Which system prompt a generate mode gets. img2img is a partial denoise toward a
+# described scene, so it reads as a description, not an instruction. animate is the
+# odd one out: its image isn't a reference to describe, it's the frame the video
+# starts from, so the brief is about motion rather than about the picture. control
+# is the opposite of edit and gets its own brief for that reason: its attachment is
+# a control map to be obeyed and never described, and an instruction-shaped prompt
+# there returns a greyscale copy of the map (measured, not theorised).
+_ENHANCE_MODE = {"txt2img": "create", "img2img": "create", "edit": "edit",
+                 "compose": "compose", "control": "control", "animate": "animate"}
+
+# What the control brief cannot work out for itself.
+#
+# The maps are never sent to the vision model — a control map is the one image the
+# control brief explicitly forbids describing, so showing it invites the exact
+# failure the brief exists to prevent. That leaves the model with no way to know
+# how many people the pose holds, and a two-figure pose described as one person
+# comes back with one person and a spare set of limbs. The studio counts them and
+# says so in words instead.
+_SUBJECT_BRIEF = (
+    "The pose contains {n} people. Describe all {n} of them individually — each "
+    "one's appearance and clothing — and keep them in the exact arrangement and "
+    "relative position the pose specifies. Never describe fewer than {n}."
+)
+_CONTACT_BRIEF = (
+    "They are in physical contact. Say so explicitly and describe how they touch "
+    "(holding, leaning on, carrying, hands clasped) — the contact is the point of "
+    "the picture, and a prompt that omits it produces two people standing apart."
+)
+
+
+def _subject_note(subjects: int, contact: bool) -> str:
+    if subjects < 2:
+        return ""
+    note = "\n" + _SUBJECT_BRIEF.format(n=subjects)
+    if contact:
+        note += "\n" + _CONTACT_BRIEF
+    return note
+
+
+_PREAMBLE = re.compile(r"^\s*(here'?s|here is|sure[,!]?|prompt:)[^\n]*:\s*", re.I)
+
+
+def _clean_prompt(text: str) -> str:
+    """Strip the wrapping a chat model adds despite being told not to."""
+    t = (text or "").strip()
+    t = _PREAMBLE.sub("", t).strip()
+    if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
+        t = t[1:-1].strip()
+    return t
+
+
+def enhance_prompt(url, model, prompt, mode, images_b64=(), subjects=1, contact=False):
+    """Rewrite a FLUX prompt with a vision model that can see the references.
+
+    The identity-preserving work is done by the reference latents, not by this text
+    — no description reproduces a face. What this buys is prompt adherence,
+    composition and phrasing the text encoder actually responds to, so the user
+    isn't rewriting the same prompt five times by hand.
+
+    `subjects`/`contact` describe a pose built in the studio. They are appended to
+    the control brief and nowhere else: no other mode conditions on a pose, so a
+    figure count would be noise in them.
+
+    Fails soft (returns "") exactly like `generate_title`; the caller falls back to
+    the static template.
+    """
+    template = _ENHANCE_MODE.get(mode, "create")
+    system = _ENHANCE_SYSTEM[template]
+    if template == "control":
+        system += _subject_note(subjects, contact)
+    user = {"role": "user", "content": prompt}
+    if images_b64:
+        user["images"] = list(images_b64)
+    messages = [{"role": "system", "content": system}, user]
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "think": False,
+        "options": {"num_ctx": context_size_for(messages)},
+    }
+    try:
+        response = requests.post(f"{url}/api/chat", json=payload, timeout=CHAT_TIMEOUT)
+        if response.status_code != 200:
+            return ""
+        text = (response.json().get("message") or {}).get("content", "")
+    except (requests.RequestException, ValueError):
+        return ""
+    return _clean_prompt(text)
+
+
+# --------------------------------------------------------------------------- #
 # Models
 # --------------------------------------------------------------------------- #
 def is_vision_model(url, model_name):

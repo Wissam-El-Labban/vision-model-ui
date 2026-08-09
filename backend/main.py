@@ -3,8 +3,12 @@
 Serves the built React frontend and proxies all Ollama interaction so the
 browser never talks to Ollama directly.
 """
+import base64
 import json
+import logging
+import os
 import queue
+import random
 import threading
 from pathlib import Path
 
@@ -14,9 +18,12 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import images  # noqa: F401  (imported first: pins HF offline env)
 from . import db
+from . import flux_catalog as cat
+from . import flux_client as fx
 from . import ollama_client as oc
-from . import sd_client as sd
+from . import settings
 
 app = FastAPI(title="Vision Model Chat")
 
@@ -83,19 +90,68 @@ class TitleRequest(BaseModel):
     ollama_url: str = oc.DEFAULT_URL
 
 
+# More than a handful of references costs vision tokens without telling the model
+# much more about what the user wants.
+MAX_ENHANCE_IMAGES = 4
+
+
+class EnhanceRequest(BaseModel):
+    prompt: str
+    mode: str = "txt2img"  # txt2img | img2img | edit | compose | control | animate
+    model: str  # the Ollama vision model to rewrite with
+    image_hashes: list[str] = []
+    ollama_url: str = oc.DEFAULT_URL
+    # What a pose built in the Pose Studio contains. The control maps themselves
+    # are never sent here (the control brief forbids describing them), so this is
+    # the only way the rewrite can know it is briefing a two-person scene.
+    subjects: int = 1
+    contact: bool = False
+
+
 class GenerateRequest(BaseModel):
-    mode: str = "txt2img"  # txt2img | img2img
-    model: str | None = None
+    # No negative prompt is exposed. On FLUX that's because there's nothing to expose:
+    # FLUX.1 samples at cfg=1.0 (the negative branch has no effect) and FLUX.2 has no
+    # negative branch at all. `animate` runs on Wan, which does use a real negative at
+    # cfg~3.5 — but it's a fixed quality string the model was tuned against, not a knob
+    # (see flux_client.WAN_NEGATIVE), so it stays out of the API.
+    mode: str = "txt2img"  # txt2img | img2img | edit | compose | control | animate
     prompt: str = ""
-    negative_prompt: str = ""
-    init_image_hash: str | None = None
+    # What actually generated the image — may be a settings-level auto-enhancer's
+    # rewrite of what the user typed. `display_prompt`, if set, is recorded to chat
+    # history instead, so a reloaded turn shows what the user saw live rather than
+    # a rewrite they never typed and (in "on" mode) never saw at all. None means
+    # they're the same (the pre-enhancer behavior).
+    display_prompt: str | None = None
+    init_image_hash: str | None = None  # img2img / edit / animate: the source image
+    ref_image_hashes: list[str] = []  # compose: reference images to fuse
+    flux_model: str | None = None  # which UNet (None = that mode's default)
     steps: int | None = None
     guidance: float | None = None
-    strength: float | None = None
-    width: int = 512
-    height: int = 512
+    strength: float | None = None  # img2img: how far to drift from the source
+    enhance: bool = True  # wrap create prompts in a photoreal template
+    width: int = 1024  # FLUX is trained at ~1 megapixel
+    height: int = 1024
+    seconds: float | None = None  # animate: clip length (capped at 5s)
+    # control: which maps to derive from `init_image_hash` ("depth" | "canny" | "pose",
+    # stackable), plus maps the client already has and wants used as-is — a re-roll, or
+    # a skeleton posed in some other tool. All defaulted, so a client that predates
+    # control sends exactly what it used to and gets exactly what it used to.
+    control_kinds: list[str] = []
+    control_map_hashes: list[str] = []
+    # How far down the schedule a control run starts. 1.0 = the maps guide and nothing
+    # constrains; below that the sampler starts from the source image and its geometry
+    # survives. Distinct from `strength` above, which is img2img's denoise: the two
+    # modes are tuned separately and overloading one field would tie them together.
+    structure_lock: float = 1.0
+    control_strength: float | None = None  # scales the model's control-adapter LoRA
+    canny_low: float | None = None
+    canny_high: float | None = None
     seed: int | None = None
     ollama_url: str = oc.DEFAULT_URL
+    # The chat to record this generation in. The worker that runs the job outlives
+    # the request, so it — not the browser — is what writes the turns. None means
+    # don't record. The chat row must already exist (PUT /api/chats/<id>).
+    chat_id: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -156,35 +212,29 @@ def ps(ollama_url: str = oc.DEFAULT_URL):
 
 
 # --------------------------------------------------------------------------- #
-# Local image generation (diffusers, in-process)
+# Image generation (FLUX, via the ComfyUI sidecar)
 # --------------------------------------------------------------------------- #
-@app.get("/api/generate/models")
-def generate_models():
-    return {"available": sd.available(), "device": sd.device(), "models": sd.list_models()}
-
-
 @app.post("/api/generate/unload")
 def generate_unload():
-    sd.unload()
+    fx.free()
     return {"ok": True}
 
 
-class SdPullRequest(BaseModel):
-    model: str
+# --------------------------------------------------------------------------- #
+# Image models: install a catalog bundle, add a UNet from any HF repo, remove either
+# --------------------------------------------------------------------------- #
+def _ndjson(work) -> StreamingResponse:
+    """Run `work(emit)` on a thread and stream whatever it emits as NDJSON.
 
-
-@app.post("/api/generate/pull")
-def generate_pull(req: SdPullRequest):
-    """Explicitly download an image model's weights (opt-in, streams status)."""
-    if not sd.available():
-        raise HTTPException(status_code=503, detail="Image generation deps not installed.")
-
+    Downloads are tens of GB, so the browser gets progress as it happens rather than
+    one response an hour later.
+    """
     def gen():
         events: queue.Queue = queue.Queue()
 
         def worker():
             try:
-                sd.pull(req.model, on_status=lambda m: events.put({"type": "status", "message": m}))
+                work(events.put)
                 events.put({"type": "done"})
             except Exception as exc:
                 events.put({"type": "error", "message": str(exc)})
@@ -201,32 +251,411 @@ def generate_pull(req: SdPullRequest):
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
-@app.post("/api/generate")
-def generate(req: GenerateRequest):
-    """Run a local diffusion generation, streaming progress then the final image.
+@app.get("/api/flux/models")
+def flux_models():
+    """Installed transformers, each tagged with the roles (create / edit) it can serve."""
+    return {"available": fx.available(), "models": fx.list_unets()}
 
-    Frees VRAM from any resident Ollama vision model first (the 6 GB can't hold
-    both). The diffusion call is synchronous, so it runs in a worker thread that
-    pushes events onto a queue the response generator drains.
+
+@app.post("/api/flux/enhance")
+def flux_enhance(req: EnhanceRequest):
+    """Rewrite a prompt with a local vision model that can see the attached images.
+
+    Separate from /api/generate on purpose. Generate unloads Ollama to free VRAM, so
+    enhancing inside it would reload the vision model for every run; and the whole
+    point is that the user sees the rewrite and can edit it before sampling. Ordering
+    then works out: enhance loads the VLM, the user reviews, generate frees it.
+
+    Never fails: a rewrite the user can't get is a rewrite they type themselves, so
+    an unreachable Ollama falls back to the static template rather than 500ing.
     """
-    if not sd.available():
-        raise HTTPException(
-            status_code=503,
-            detail="Image generation deps (torch/diffusers) are not installed.",
+    if req.model:
+        imgs = []
+        for h in req.image_hashes[:MAX_ENHANCE_IMAGES]:
+            p = db.image_path(h)
+            if not p:
+                continue
+            try:
+                imgs.append(images.image_to_b64(p))
+            except Exception:
+                # Not decodable as an image — a stored video, most likely. This
+                # endpoint's contract is that it never fails, so drop it and let the
+                # model rewrite from whatever else it was given.
+                pass
+        text = oc.enhance_prompt(
+            req.ollama_url, req.model, req.prompt, req.mode, imgs,
+            subjects=req.subjects, contact=req.contact,
+        )
+        if text:
+            return {"prompt": text, "source": "vlm"}
+    # No vision model installed, or Ollama couldn't answer.
+    return {"prompt": fx.static_enhance(req.prompt, req.mode), "source": "template"}
+
+
+@app.get("/api/flux/catalog")
+def flux_catalog():
+    """The installable models and what it would take to install them."""
+    return {
+        "runtime_ready": fx.runtime_ready(),
+        "available": fx.available(),
+        "disk_free_gb": cat.free_gb(),
+        "bundles": fx.catalog(),
+        "hf_token": settings.hf_token_source(),
+        # A download survives the request that started it, so a reloaded page can find
+        # it again here instead of assuming nothing is happening.
+        "installing": fx.install_state(),
+    }
+
+
+class FluxInstallRequest(BaseModel):
+    id: str
+
+
+@app.post("/api/flux/install")
+def flux_install(req: FluxInstallRequest):
+    """Download a catalog model — weights, text encoder and VAE together."""
+    if not fx.runtime_ready():
+        raise HTTPException(status_code=503, detail="The image engine isn't installed.")
+
+    def work(emit):
+        fx.install_bundle(
+            req.id,
+            on_status=lambda m: emit({"type": "status", "message": m}),
+            on_progress=lambda p: emit({"type": "progress", **p}),
         )
 
-    # Resolve the init image (img2img) from the content-addressed store to a PIL.
-    init_image = None
-    if req.init_image_hash:
-        from PIL import Image
+    return _ndjson(work)
 
-        path = db.IMAGES_DIR / f"{req.init_image_hash}.jpg"
-        if not path.exists():
-            raise HTTPException(status_code=404, detail="init image not found")
-        init_image = Image.open(path).convert("RGB")
+
+@app.delete("/api/flux/bundles/{bundle_id}")
+def flux_bundle_delete(bundle_id: str):
+    try:
+        fx.delete_bundle(bundle_id)
+        return {"ok": True}
+    except ValueError as exc:  # unknown id
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="That model isn't installed.")
+
+
+class FluxPullRequest(BaseModel):
+    repo: str
+
+
+@app.post("/api/flux/pull")
+def flux_pull(req: FluxPullRequest):
+    """Download an extra FLUX.1 UNet from any HuggingFace repo (opt-in, streams status)."""
+    if not fx.runtime_ready():
+        raise HTTPException(status_code=503, detail="The image engine isn't installed.")
+
+    def work(emit):
+        fx.pull_unet(
+            req.repo,
+            on_status=lambda m: emit({"type": "status", "message": m}),
+            on_progress=lambda p: emit({"type": "progress", **p}),
+        )
+
+    return _ndjson(work)
+
+
+@app.delete("/api/flux/models/{name}")
+def flux_delete(name: str):
+    try:
+        fx.delete_unet(name)
+        return {"ok": True}
+    except ValueError as exc:  # part of a bundle, or not a model file
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Model not found.")
+
+
+# --------------------------------------------------------------------------- #
+# Text encoders — a FLUX.2 model's conditioning half. Swappable: the bundled one is
+# only a default, and a lighter quant of the same encoder is the usual reason to change.
+# --------------------------------------------------------------------------- #
+@app.get("/api/flux/text-encoders")
+def flux_text_encoders():
+    return {"encoders": fx.list_text_encoders(), "selected": fx.selected_text_encoders()}
+
+
+class TextEncoderPullRequest(BaseModel):
+    repo: str
+
+
+@app.post("/api/flux/text-encoders/pull")
+def flux_text_encoder_pull(req: TextEncoderPullRequest):
+    """Add a text encoder from HuggingFace. Needs owner/repo:file — see pull_text_encoder."""
+    if not fx.runtime_ready():
+        raise HTTPException(status_code=503, detail="The image engine isn't installed.")
+
+    def work(emit):
+        fx.pull_text_encoder(
+            req.repo,
+            on_status=lambda m: emit({"type": "status", "message": m}),
+            on_progress=lambda p: emit({"type": "progress", **p}),
+        )
+
+    return _ndjson(work)
+
+
+class TextEncoderSelectRequest(BaseModel):
+    bundle_id: str
+    name: str  # "" restores the model's default
+
+
+@app.put("/api/flux/text-encoders/select")
+def flux_text_encoder_select(req: TextEncoderSelectRequest):
+    try:
+        fx.set_text_encoder(req.bundle_id, req.name)
+        return {"ok": True, "selected": fx.selected_text_encoders()}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="That text encoder isn't installed.")
+
+
+@app.delete("/api/flux/text-encoders/{name}")
+def flux_text_encoder_delete(name: str):
+    try:
+        fx.delete_text_encoder(name)
+        return {"ok": True}
+    except ValueError as exc:  # a model is currently using it
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Text encoder not found.")
+
+
+# --------------------------------------------------------------------------- #
+# LoRA adapters — an optional low-rank patch over a model's transformer. Every model
+# starts with none, and "none" stays available; the pick is per model, because a LoRA
+# is trained against one base and binds to nothing useful on another.
+# --------------------------------------------------------------------------- #
+@app.get("/api/flux/loras")
+def flux_loras():
+    return {"loras": fx.list_loras(), "selected": fx.selected_loras()}
+
+
+class LoraPullRequest(BaseModel):
+    repo: str
+    # Defaulted rather than required so an older client (or a saved request) keeps
+    # meaning what it used to mean.
+    source: str = "huggingface"  # huggingface | civitai
+
+
+@app.post("/api/flux/loras/pull")
+def flux_lora_pull(req: LoraPullRequest):
+    """Add a LoRA. HuggingFace takes owner/repo:file (or owner/repo holding exactly
+    one); CivitAI takes a page URL, a download URL, an AIR, or a bare id."""
+    if not fx.runtime_ready():
+        raise HTTPException(status_code=503, detail="The image engine isn't installed.")
+    if req.source not in ("huggingface", "civitai"):
+        raise HTTPException(status_code=400, detail=f"Unknown source '{req.source}'.")
+
+    def work(emit):
+        pull = fx.pull_lora_civitai if req.source == "civitai" else fx.pull_lora
+        pull(
+            req.repo,
+            on_status=lambda m: emit({"type": "status", "message": m}),
+            on_progress=lambda p: emit({"type": "progress", **p}),
+        )
+
+    return _ndjson(work)
+
+
+class LoraPick(BaseModel):
+    name: str
+    strength: float = 1.0
+    # Whether this adapter is the model's *control* adapter — the one the Control tab's
+    # strength dial scales. Defaulted, so a client that predates control still round-
+    # trips a model's picks without clearing the flag.
+    control: bool = False
+
+
+class LoraSelectRequest(BaseModel):
+    model: str  # the transformer's filename — FLUX.1's dev and Kontext pick separately
+    picks: list[LoraPick] = []  # [] detaches everything — the "None" option
+
+
+@app.put("/api/flux/loras/select")
+def flux_lora_select(req: LoraSelectRequest):
+    try:
+        fx.set_loras(req.model, [p.dict() for p in req.picks])
+        return {"ok": True, "selected": fx.selected_loras()}
+    except ValueError as exc:  # not installed, or a model that takes no adapter
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="That LoRA isn't installed.")
+
+
+@app.delete("/api/flux/loras/{name}")
+def flux_lora_delete(name: str):
+    try:
+        fx.delete_lora(name)
+        return {"ok": True, "selected": fx.selected_loras()}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="LoRA not found.")
+
+
+# --------------------------------------------------------------------------- #
+# Control preprocessors — the models that turn a source image into a control map.
+# Not transformers and never pickable as one: they live in their own ComfyUI folders
+# and are named by the control kind a generate asks for.
+# --------------------------------------------------------------------------- #
+@app.get("/api/flux/preprocessors")
+def flux_preprocessors():
+    return {"preprocessors": fx.list_preprocessors()}
+
+
+class PreprocessorRequest(BaseModel):
+    id: str
+
+
+@app.post("/api/flux/preprocessors/install")
+def flux_preprocessor_install(req: PreprocessorRequest):
+    if not fx.runtime_ready():
+        raise HTTPException(status_code=503, detail="The image engine isn't installed.")
+
+    def work(emit):
+        fx.install_preprocessor(
+            req.id,
+            on_status=lambda m: emit({"type": "status", "message": m}),
+            on_progress=lambda p: emit({"type": "progress", **p}),
+        )
+
+    return _ndjson(work)
+
+
+@app.delete("/api/flux/preprocessors/{pid}")
+def flux_preprocessor_delete(pid: str):
+    try:
+        fx.delete_preprocessor(pid)
+        return {"ok": True, "preprocessors": fx.list_preprocessors()}
+    except ValueError as exc:  # unknown id
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="That preprocessor isn't installed.")
+
+
+# --------------------------------------------------------------------------- #
+# HuggingFace token — needed only for gated repos. Stored server-side, 0600, and
+# never sent back to the browser: the UI only ever learns whether one is set.
+# --------------------------------------------------------------------------- #
+class HfTokenRequest(BaseModel):
+    token: str
+
+
+@app.get("/api/settings/hf-token")
+def hf_token_get():
+    return {"source": settings.hf_token_source()}
+
+
+@app.put("/api/settings/hf-token")
+def hf_token_put(req: HfTokenRequest):
+    try:
+        user = fx.verify_token(req.token)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    settings.set_hf_token(req.token)
+    return {"source": "saved", "user": user}
+
+
+@app.delete("/api/settings/hf-token")
+def hf_token_delete():
+    settings.clear_hf_token()
+    return {"source": settings.hf_token_source()}
+
+
+# --------------------------------------------------------------------------- #
+# CivitAI API key — needed for most LoRA downloads there. Same storage and same
+# silence as the HuggingFace token: 0600 on disk, only its presence reported back.
+# Unlike HuggingFace's there's no validation call before saving — CivitAI has no
+# cheap whoami endpoint, and a bad key surfaces on the next download with a message
+# that says so.
+# --------------------------------------------------------------------------- #
+class CivitaiTokenRequest(BaseModel):
+    token: str
+
+
+@app.get("/api/settings/civitai-token")
+def civitai_token_get():
+    return {"source": settings.civitai_token_source()}
+
+
+@app.put("/api/settings/civitai-token")
+def civitai_token_put(req: CivitaiTokenRequest):
+    settings.set_civitai_token(req.token)
+    return {"source": settings.civitai_token_source()}
+
+
+@app.delete("/api/settings/civitai-token")
+def civitai_token_delete():
+    settings.set_civitai_token("")
+    return {"source": settings.civitai_token_source()}
+
+
+@app.post("/api/generate")
+def generate(req: GenerateRequest):
+    """Run a local image generation, streaming progress then the final image.
+
+    Every mode runs on FLUX in the ComfyUI sidecar: create (txt2img/img2img) on
+    FLUX dev, edit/compose on FLUX Kontext. The other GPU tenant (the Ollama vision
+    model) is freed first, since the GPU can't hold both. The synchronous call runs
+    in a worker thread that pushes events onto a queue the response generator drains.
+    """
+    if not fx.available():
+        raise HTTPException(
+            status_code=503,
+            detail="FLUX isn't installed on this machine. Run ./run.sh to fetch the weights.",
+        )
+
+    # Resolve stored image hashes to PIL objects (init image for img2img/edit,
+    # reference images for compose).
+    from PIL import Image, ImageOps
+
+    def _resolve(h: str):
+        path = db.image_path(h)
+        if path is None:
+            raise HTTPException(status_code=404, detail=f"image {h} not found")
+        # Orientation is applied here, not at write time — the store keeps a phone
+        # photo's original bytes and its EXIF Orientation tag with them, rather than
+        # paying a lossy re-encode to bake the rotation in. Uploads used to be
+        # laundered through a browser canvas, which applied it silently; without
+        # this, that removal would land every phone photo in FLUX sideways.
+        try:
+            return ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+        except Exception:
+            # The store holds video too now, and this runs in the request body —
+            # outside `gen()`'s try — so an unreadable file here is a bare 500 rather
+            # than an error in the stream. A generated video is a plausible thing to
+            # drag back in, so say what's wrong instead of failing opaquely.
+            raise HTTPException(
+                status_code=400,
+                detail=f"{path.suffix.lstrip('.') or 'that file'} isn't an image "
+                       "that can be used as a source.",
+            )
+
+    init_image = _resolve(req.init_image_hash) if req.init_image_hash else None
+    ref_images = [_resolve(h) for h in req.ref_image_hashes]
+    control_maps = [_resolve(h) for h in req.control_map_hashes]
 
     def gen():
         events: queue.Queue = queue.Queue()
+
+        def record(turn: str, content: str, model_label: str, hashes: list[str]) -> None:
+            """Write one turn of this generation to the chat.
+
+            Best-effort: a database that won't take the row is no reason to sink a
+            job the user has already waited minutes for. The generation itself is
+            still delivered over the stream regardless.
+            """
+            if not req.chat_id:
+                return
+            try:
+                db.append_message(req.chat_id, turn, content, model_label, hashes)
+            except Exception:
+                logging.exception("recording %s turn in chat %s failed", turn, req.chat_id)
 
         def worker():
             try:
@@ -236,34 +665,134 @@ def generate(req: GenerateRequest):
                 except Exception:
                     pass  # best-effort; Ollama may be remote or already free
 
-                params = {
-                    "mode": req.mode,
-                    "model": req.model,
-                    "prompt": req.prompt,
-                    "negative_prompt": req.negative_prompt,
-                    "steps": req.steps,
-                    "guidance": req.guidance,
-                    "strength": req.strength,
-                    "width": req.width,
-                    "height": req.height,
-                    "seed": req.seed,
-                    "init_image": init_image,
-                }
-                image, seed = sd.generate(
-                    params,
-                    on_step=lambda s, t: events.put({"type": "progress", "step": s, "total": t}),
-                    on_status=lambda m: events.put({"type": "status", "message": m}),
-                )
-                full = sd.pil_to_data_url(image)
-                thumb = sd.pil_to_data_url(image, max_size=64)
+                status_cb = lambda m: events.put({"type": "status", "message": m})
+                # One snapshot of the whole job per event — overall fraction, the stage
+                # producing it, and the sampler counters — so the client renders the bar
+                # from the last event it saw rather than stitching partial updates.
+                prog_cb = lambda p: events.put({"type": "progress", **p})
+
+                # Resolve the transformer once, here, and pass the resolved name down
+                # (resolving is idempotent). A request naming a model that can't serve
+                # this mode still falls back rather than failing — a stale model list
+                # is a legitimate reason to arrive here — but it says so instead of
+                # quietly running something else.
+                role = fx.role_for_mode(req.mode)
+                unet = fx.resolve_unet(req.flux_model, role)
+                if req.flux_model and unet != os.path.basename(str(req.flux_model)):
+                    events.put({"type": "status", "message":
+                                f"{os.path.basename(str(req.flux_model))} can't {req.mode} "
+                                f"here — using {fx.label(unet)} instead"})
+                label = fx.label(unet)
+
+                # Record the prompt before sampling rather than after it. This thread
+                # outlives the request — a reload or a Stop drops the stream but not
+                # the job — so a turn written only on completion is lost in exactly
+                # the case that hurts, a cold FLUX.2 load that runs for minutes.
+                # `label` is what will actually run, so the pair can't disagree.
+                # Every image the job conditions on, not just the first. An edit takes
+                # the scene in `init_image_hash` *and* subject references after it;
+                # recording only the init left a reloaded turn showing fewer images
+                # than the generate actually used. compose sends no init, so the same
+                # expression covers every mode.
+                record("user", req.display_prompt or req.prompt, label,
+                       [h for h in (req.init_image_hash,) if h]
+                       + list(req.ref_image_hashes) + list(req.control_map_hashes))
+
+                seed = req.seed if req.seed is not None else random.randint(0, 2**31 - 1)
+                common = dict(steps=req.steps, guidance=req.guidance, seed=seed,
+                              model=unet, on_progress=prog_cb, on_status=status_cb)
+
+                if req.mode == "animate":
+                    if init_image is None:
+                        raise ValueError("Animate needs a source image.")
+                    # Returns bytes + a first frame, not a PIL image, so it doesn't
+                    # join the shared tail below.
+                    data, frame = fx.animate(init_image, req.prompt, seconds=req.seconds,
+                                             **common)
+                    h = db.save_image(
+                        "data:video/webm;base64," + base64.b64encode(data).decode(),
+                        images.pil_to_data_url(frame, max_size=64, fmt="JPEG") if frame else None,
+                    )
+                    record("assistant", "", label, [h])
+                    events.put({
+                        "type": "image", "kind": "video",
+                        "hash": h, "url": db.image_url(h), "seed": seed,
+                        "width": frame.size[0] if frame else 0,
+                        "height": frame.size[1] if frame else 0,
+                        "model": unet, "model_label": label,
+                    })
+                    return
+
+                if req.mode == "edit":
+                    if init_image is None:
+                        raise ValueError("Edit needs a source image.")
+                    # Extra images are references the instruction can draw subjects
+                    # from; init_image stays the thing being edited.
+                    image = fx.edit(init_image, req.prompt, refs=ref_images, **common)
+                elif req.mode == "compose":
+                    if not ref_images:
+                        raise ValueError("Combine needs at least one reference image.")
+                    image = fx.compose(ref_images, req.prompt, **common)
+                elif req.mode == "control":
+                    # `init_image` is the structure source, not something being edited;
+                    # `ref_images` are subjects the prompt can draw from, as in compose.
+                    # Either the source or a ready-made map has to be present — `control`
+                    # checks the combination and says which one is missing.
+                    image, built = fx.control(
+                        init_image, kinds=req.control_kinds, prompt=req.prompt,
+                        refs=ref_images, maps=control_maps, lock=req.structure_lock,
+                        control_strength=req.control_strength,
+                        canny_low=req.canny_low, canny_high=req.canny_high,
+                        width=req.width, height=req.height, **common)
+                    # Emit the derived maps before the image. They're the diagnostic
+                    # when a pose comes out wrong — a bad map and an ignored map look
+                    # identical from the result alone — and each is a normal stored
+                    # image, so the user can pin one and re-feed it on the next roll.
+                    #
+                    # Deliberately *not* recorded onto the chat turn. A stored message
+                    # is a flat list of image hashes with no notion of which one is the
+                    # result, so a recorded map came back after a reload rendered at
+                    # full size beside the image it merely conditioned — two pictures
+                    # of equal weight, one of which is a greyscale depth render. The
+                    # turn is the finished image; the maps are working material and
+                    # live only in the session that produced them.
+                    for kind, map_pil in built:
+                        mh = db.save_image(
+                            images.pil_to_data_url(map_pil),
+                            images.pil_to_data_url(map_pil, max_size=64, fmt="JPEG"))
+                        events.put({"type": "control", "kind": kind, "hash": mh,
+                                    "url": db.image_url(mh)})
+                elif req.mode == "img2img":
+                    if init_image is None:
+                        raise ValueError("Image-to-image needs a source image.")
+                    image = fx.img2img(init_image, req.prompt, strength=req.strength,
+                                       enhance=req.enhance, **common)
+                else:  # txt2img
+                    image = fx.create(req.prompt, width=req.width, height=req.height,
+                                      enhance=req.enhance, **common)
+
+                # PNG: a generated image is often the input to the next edit, and a
+                # JPEG round-trip per generation compounds. Thumbs stay JPEG — 64px
+                # of sidebar icon has nothing to preserve.
+                full = images.pil_to_data_url(image)
+                thumb = images.pil_to_data_url(image, max_size=64, fmt="JPEG")
                 h = db.save_image(full, thumb)
+                record("assistant", "", label, [h])
                 events.put(
                     {
                         "type": "image",
+                        # Stated rather than left to default, so the client never has to
+                        # read an absent field as "image" — `animate` sends "video" here
+                        # and both go down the same terminal path.
+                        "kind": "image",
                         "hash": h,
+                        "url": db.image_url(h),
                         "seed": seed,
                         "width": image.size[0],
                         "height": image.size[1],
+                        # What actually ran, so the UI never has to guess.
+                        "model": unet,
+                        "model_label": label,
                     }
                 )
             except Exception as exc:
@@ -366,7 +895,7 @@ def _unload_on_shutdown():
     except Exception:
         pass
     try:
-        sd.unload()
+        fx.free()
     except Exception:
         pass
 

@@ -8,6 +8,7 @@
   --accent: #2f81f7;
   --accent-2: #1f6feb;
   --green: #3fb950;
+  --amber: #d29922;
   --red: #f85149;
   --radius: 10px;
 }
@@ -143,6 +144,13 @@ textarea {
   background: transparent;
 }
 
+/* For buttons sitting inside the settings popovers, where 14px reads as loud. */
+.btn.small {
+  padding: 5px 9px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
 .btn.block {
   width: 100%;
   justify-content: center;
@@ -158,6 +166,10 @@ textarea {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
+  /* The sidebar is a flex column: without this, an expanded section is squeezed by
+     its siblings and — because of the overflow:hidden above — its lower half is
+     silently clipped instead of scrolling the sidebar. */
+  flex-shrink: 0;
 }
 
 .section-head {
@@ -258,6 +270,9 @@ textarea {
   display: flex;
   align-items: center;
   gap: 10px;
+  /* Lets the gen pill's ellipsis engage instead of pushing the row wider than
+     the bar — flex items refuse to shrink past content without this. */
+  min-width: 0;
 }
 
 .model-pill {
@@ -267,6 +282,616 @@ textarea {
   padding: 4px 12px;
   font-size: 12px;
   color: var(--muted);
+}
+
+/* The image/video model a generate would run, with its text encoder. Tinted green
+   to read as a different axis from the blue-grey vision-model pill beside it. */
+.gen-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 40vw;
+  background: rgba(63, 185, 80, 0.1);
+  border: 1px solid rgba(63, 185, 80, 0.35);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.gen-pill-icon {
+  flex: none;
+  font-size: 11px;
+}
+
+/* The model name is the headline and shrinks last; the encoder is the detail and
+   gives up width first. Both need min-width:0 for ellipsis inside a flex row. */
+.gen-pill-model {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gen-pill-sep {
+  flex: none;
+  color: var(--border);
+}
+
+.gen-pill-enc {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+/* Steps / guidance / seed — the settings the pill's model actually ran (or will
+   run) with, so a retune is visible without opening the gear popover. */
+.gen-pill-settings {
+  flex: none;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* One model's LoRA block: its label, then a stack of attached adapters plus the
+   control to add another. */
+.lora-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 8px;
+}
+
+/* The install row's source picker. Sized to its content so the reference field beside
+   it keeps the rest of the row — that field holds a URL and is the one that needs the
+   space. */
+.lora-source {
+  flex: 0 0 auto;
+  width: auto;
+}
+
+/* One attached adapter within a model's stack — its own name, delete button and
+   weight slider. A left rule separates it from its neighbors once there's more
+   than one, the same way a nested list reads as belonging to its parent. */
+.lora-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0 4px 8px;
+  border-left: 2px solid var(--border);
+}
+
+.lora-pick-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Role first, at full opacity and never shrinking; the shared model label takes
+   whatever width is left and clips there instead. */
+.lora-model {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.lora-role {
+  flex: none;
+  color: var(--green);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.lora-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lora-strength {
+  padding-left: 4px;
+}
+
+.lora-strength input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.lora-weight {
+  flex: none;
+  width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Amber against the pill's green, so an attached adapter reads as a modification
+   of the model rather than another of its parts. */
+.gen-pill-lora {
+  flex: 0 2 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--amber);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+/* Structural control ------------------------------------------------------- */
+
+.lora-control-flag {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-left: 4px;
+  cursor: pointer;
+}
+
+.lora-control-flag input {
+  margin: 0;
+}
+
+.prep-row .prep-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.prep-badge {
+  flex: none;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.prep-badge.built-in {
+  color: var(--amber);
+}
+
+.control-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  margin-top: 8px;
+  border-top: 1px solid var(--panel-2);
+}
+
+.control-kinds {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* A chip rather than a checkbox: these stack, and the point of the row is that
+   picking two is normal — depth plus pose is the pair that holds a hard pose. */
+.control-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--panel-2);
+  border-radius: 999px;
+  background: var(--panel);
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.control-chip:hover:not(:disabled) {
+  border-color: var(--amber);
+}
+
+.control-chip.on {
+  border-color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 18%, var(--panel));
+}
+
+.control-chip.unavailable {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.chip-badge {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.control-slider {
+  width: 100%;
+}
+
+.gen-pill-control {
+  flex: none;
+  color: var(--amber);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+/* Deliberately smaller than a result image: a control map is evidence about the
+   generation, not the generation. */
+.control-maps {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.control-map {
+  position: relative;
+  padding: 0;
+  border: 1px solid var(--panel-2);
+  border-radius: 6px;
+  background: none;
+  overflow: hidden;
+  cursor: zoom-in;
+  line-height: 0;
+}
+
+.control-map img {
+  display: block;
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+}
+
+.control-map-kind {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 1px 0;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 9px;
+  line-height: 1.4;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Pose Studio --------------------------------------------------------------- */
+
+.studio-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.66);
+}
+
+.studio {
+  display: flex;
+  flex-direction: column;
+  width: min(1240px, 96vw);
+  height: min(860px, 94vh);
+  border: 1px solid var(--panel-2);
+  border-radius: 10px;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.studio-loading {
+  padding: 18px 22px;
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+}
+
+.studio-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--panel-2);
+}
+
+.studio-head strong { flex: none; }
+.studio-head .muted { flex: 1; min-width: 0; }
+
+.studio-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.studio-viewport {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  background: #14171c;
+}
+
+.studio-canvas {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+}
+
+/* The canvas is letterboxed to the output frame rather than filling the viewport,
+   so what you see is exactly what renders — the camera's FOV is vertical, so a
+   wider output aspect adds width instead of cropping height, and a viewport-
+   filling canvas showed the opposite of the truth for any landscape frame. Its
+   pixel size is set by the renderer; this only stops the flex box stretching it. */
+.studio-canvas canvas {
+  display: block;
+  flex: none;
+  cursor: grab;
+  touch-action: none;
+}
+
+/* A scene photo to pose against, laid behind the transparent canvas at exactly
+   the frame's rect. It is never part of the WebGL scene, so it cannot reach a
+   rendered map however the studio is used. */
+.studio-scene-img {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  object-fit: cover;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Joint names, laid over the canvas at the same rect and moved imperatively by
+   the animation loop. `overflow: hidden` keeps a label for a joint that has been
+   dragged off-frame from spilling into the panel. */
+.studio-labels {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.studio-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* Offsets, not transform: the transform slot is the joint's position. Sits to
+     the right of its handle, vertically centred on it. */
+  margin: -7px 0 0 11px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(20, 23, 28, 0.72);
+  color: #c7ccd6;
+  font-size: 10px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.studio-label.on {
+  background: rgba(255, 180, 84, 0.9);
+  color: #14171c;
+  font-weight: 600;
+}
+
+/* Now the same rect as the canvas — kept as a separate element for the label. */
+.studio-guide {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  border: 1px dashed rgba(255, 180, 84, 0.55);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* A file input styled as a button: the native control can't be, and this is the
+   one place in the studio that takes a file. */
+.studio-file {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.studio-file input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.studio-guide-tag {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  color: rgba(255, 180, 84, 0.8);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+}
+
+.studio-panel {
+  flex: none;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px;
+  border-left: 1px solid var(--panel-2);
+  overflow-y: auto;
+}
+
+.studio-panel .lbl {
+  margin-top: 4px;
+}
+
+.studio-chips,
+.studio-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.studio-row input[type="text"],
+.studio-row > input:not([type]) {
+  flex: 1;
+  min-width: 0;
+}
+
+.studio-prop {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px;
+  border: 1px solid var(--panel-2);
+  border-radius: 6px;
+}
+
+.studio-field {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.studio-field input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.studio-num {
+  flex: none;
+  width: 44px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.studio-preview {
+  display: flex;
+  gap: 6px;
+}
+
+.studio-preview figure {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+
+.studio-preview img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--panel-2);
+  border-radius: 4px;
+}
+
+.studio-preview figcaption {
+  text-align: center;
+}
+
+.studio-load {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.studio-use {
+  margin-top: 8px;
+  padding: 9px;
+}
+
+.studio-open {
+  width: 100%;
+}
+
+/* The maps waiting in the composer, above the prompt box. */
+.studio-maps {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+.studio-maps figure {
+  margin: 0;
+  width: 52px;
+}
+
+.studio-maps img {
+  display: block;
+  width: 52px;
+  height: 52px;
+  object-fit: cover;
+  border: 1px solid var(--panel-2);
+  border-radius: 4px;
+}
+
+.studio-maps figcaption {
+  color: var(--muted);
+  font-size: 9px;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+/* Inline in the studio-maps hint, so it reads as part of the sentence rather
+   than as a settings row that happens to be sitting there. */
+.studio-scene-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.studio-scene-toggle input {
+  margin: 0;
+}
+
+.link-btn {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--amber);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.link-btn.strong {
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.init-hint.warn {
+  border-left: 2px solid var(--amber);
+  padding-left: 8px;
+}
+
+/* The one action the Control tab has that isn't shared with any other mode, so it
+   carries the accent rather than sitting anonymously beside the paperclip. */
+.btn.studio-btn {
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--panel-2));
+}
+
+.btn.studio-btn:hover {
+  border-color: var(--amber);
 }
 
 .ctx-meter {
@@ -499,6 +1124,25 @@ textarea {
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
 }
 
+/* Expanded image + its action bar (download / close). */
+.lightbox-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  cursor: default;
+}
+
+.lightbox-body img {
+  /* Leave room for the action bar below without overflowing the viewport. */
+  max-height: 85vh;
+}
+
+.lightbox-bar {
+  display: flex;
+  gap: 10px;
+}
+
 /* Inline thumbnail rendered next to a model's "image N" reference. */
 .ctx-thumb {
   display: inline-flex;
@@ -571,6 +1215,86 @@ textarea {
 .messages.drag {
   outline: 2px dashed var(--accent);
   outline-offset: -10px;
+}
+
+/* Generation liveness bar — sits between the conversation and the composer.
+   Deliberately tiny: it reports that work is happening, it isn't a focal point. */
+.genbar {
+  flex: none;
+  padding: 5px 18px 6px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.genbar-track {
+  position: relative;
+  height: 3px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--panel-2);
+}
+
+/* The fill is the backend's measured fraction and nothing else — it advances only
+   when the job does. `width` is the only thing that moves it. */
+.genbar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(63, 185, 80, 0.55);
+  transition: width 0.25s linear, background-color 0.3s ease;
+}
+
+.genbar-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.genbar-phase {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Counters are pushed right as a group and monospaced, so ticking digits don't
+   jitter the layout. */
+.genbar-meta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.genbar-step {
+  color: var(--green);
+}
+
+.genbar-pct {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.genbar-time {
+  opacity: 0.75;
+}
+
+.genbar-eta {
+  opacity: 0.75;
+}
+
+.genbar-warn {
+  color: var(--amber);
+}
+
+.genbar.stalled .genbar-fill {
+  background: var(--amber);
+  box-shadow: 0 0 6px rgba(210, 153, 34, 0.55);
 }
 
 .drop-overlay {
@@ -685,6 +1409,14 @@ textarea {
   white-space: normal;
 }
 
+/* Verbose prompt enhancer's rewrite, under the user's own typed prompt. */
+.content.enhanced-prompt {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  font-style: italic;
+}
+
 .markdown > :first-child {
   margin-top: 0;
 }
@@ -784,11 +1516,71 @@ textarea {
   margin-bottom: 8px;
 }
 
+.msg-image-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  line-height: 0;
+  cursor: zoom-in;
+  border-radius: 8px;
+}
+
+.msg-image-btn:hover img {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(47, 129, 247, 0.3);
+}
+
 .msg-images img {
   max-width: 180px;
   max-height: 180px;
   border-radius: 8px;
   border: 1px solid var(--border);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+/* A generated video. Bigger than the 180px image thumbs on purpose: a still is a
+   thumbnail you click to zoom, but there is no zoom view for a video — it plays
+   where it lands, so this is the only size it's ever seen at. */
+.msg-video {
+  position: relative;
+  line-height: 0;
+}
+
+.msg-video video {
+  max-width: 360px;
+  max-height: 360px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #000;
+}
+
+/* Always visible, not hover-only: it's the one way to get the file out, and a
+   hover-only control doesn't exist on a touch screen. */
+.video-dl {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+  text-decoration: none;
+  opacity: 0.65;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+
+.msg-video:hover .video-dl {
+  opacity: 1;
+}
+
+.video-dl:hover {
+  background: rgba(0, 0, 0, 0.85);
 }
 
 .cursor {
@@ -804,6 +1596,7 @@ textarea {
 
 /* ---------- Composer ---------- */
 .composer {
+  position: relative; /* anchors the drop hint */
   border-top: 1px solid var(--border);
   padding: 14px 22px;
   background: var(--panel);
@@ -812,6 +1605,20 @@ textarea {
 .composer.drag {
   outline: 2px dashed var(--accent);
   outline-offset: -8px;
+}
+
+/* The composer doesn't scroll, so `.drop-overlay`'s sticky positioning would put
+   the hint in normal flow and shove the input down the moment a drag starts.
+   Float it over instead — the dashed outline already marks the target, and this
+   only has to say what dropping will do. `pointer-events: none` keeps it from
+   becoming the drop target itself and stealing the drag. */
+.composer .drop-overlay {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  white-space: nowrap;
 }
 
 .composer-row {
@@ -861,6 +1668,24 @@ textarea {
   object-fit: cover;
   border-radius: 8px;
   border: 1px solid var(--border);
+}
+
+/* What this attachment is *for*. Role has always come from position in the list,
+   which is invisible until the wrong image turns out to have been the scene. */
+.thumb-role {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 1px 3px;
+  border-radius: 0 0 8px 8px;
+  background: rgba(0, 0, 0, 0.7);
+  color: var(--muted);
+  font-size: 9px;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  pointer-events: none;
 }
 
 .thumb-actions {
@@ -1118,6 +1943,43 @@ textarea {
   color: #fff;
 }
 
+/* Second-level workflow picker (Create / Edit / Combine) under Generate. */
+.mode-toggle.sub {
+  margin-top: -4px;
+  padding: 2px;
+}
+
+.mode-toggle.sub .mode-tab {
+  padding: 4px 13px;
+  font-size: 12px;
+}
+
+.mode-toggle.sub .mode-tab.active {
+  background: #8957e5;
+}
+
+.enhance-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.enhance-row input {
+  width: auto;
+  margin: 0;
+}
+
+.flux-engine {
+  font-size: 13px;
+  font-weight: 600;
+  color: #b389ff;
+  padding: 0 4px;
+}
+
 .init-hint {
   display: flex;
   align-items: center;
@@ -1199,4 +2061,184 @@ textarea {
 .dl-box .hint {
   margin-top: 6px;
   margin-bottom: 0;
+}
+
+/* Image model installs (sidebar → Image Models). */
+.bundle-list {
+  list-style: none;
+  margin: 6px 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bundle-list li {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.bundle-list li.installed {
+  border-color: rgba(47, 129, 247, 0.5);
+  background: rgba(47, 129, 247, 0.08);
+}
+
+.bundle-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.bundle-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.btn.small {
+  padding: 2px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.bundle-progress {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bundle-progress .progress {
+  margin: 0;
+}
+
+.extra-model {
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* "That repo holds several encoders: …" arrives as a list, one per line. Keep the
+   newlines rather than collapsing the candidates into one unreadable run. */
+.te-status {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* The model a text-encoder dropdown belongs to. Fixed share of the row so the selects
+   line up under each other rather than stepping in and out with the label length. */
+.te-model {
+  flex: 0 0 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* FLUX model picker (in the generation-settings popover). */
+.flux-models {
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.flux-model-list {
+  list-style: none;
+  margin: 6px 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.flux-model-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.flux-model-list li.active {
+  background: rgba(47, 129, 247, 0.12);
+}
+
+.flux-model-list li:hover .chat-del {
+  opacity: 1;
+}
+
+.flux-model-pick {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flux-radio {
+  color: var(--accent);
+  flex: none;
+}
+
+.flux-model-size {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.flux-model-tag {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  flex: none;
+}
+
+.flux-model-del {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  opacity: 0.7;
+  padding: 0 2px;
+  flex: none;
+}
+
+.flux-model-del:hover:not(:disabled) {
+  opacity: 1;
+}
+
+.flux-model-del:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.flux-add {
+  display: flex;
+  gap: 6px;
+}
+
+.flux-add input {
+  flex: 1;
+  min-width: 0;
+}
+
+.flux-models code {
+  font-size: 11px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 3px;
 }

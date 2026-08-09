@@ -15,6 +15,8 @@ Built with a **React (Vite + TypeScript)** frontend and a **FastAPI** backend th
   with every message.
 - **Model management** — list installed vision models, download new ones (with live progress),
   remove, unload from VRAM, and view running models.
+- **Image generation** — create, edit and combine images locally on FLUX. Models are installed
+  from the app, not at setup; see below.
 - **In-app Ollama updates** — the UI tells you when a newer Ollama is available and lets you choose
   to upgrade with one click (local installs only). Updates are **opt-in**, never forced.
 - **Per-image rotate** in the composer (client-side, via canvas).
@@ -29,6 +31,30 @@ This creates the Python venv, installs backend deps, builds the frontend, ensure
 and running, and serves everything at **http://127.0.0.1:8000**.
 
 > Requires Python 3.10+, Node.js 18+, and (on first run) internet access to install Ollama.
+
+`run.sh` also installs the image-generation *engine* (a ComfyUI sidecar in its own venv) but
+downloads **no image weights** — which model to run is your choice, and they are large. Skip the
+engine entirely with `SKIP_FLUX=1 ./run.sh` if you only want chat.
+
+## Image generation
+
+Install a model from the sidebar's **🖼️ Image Models** panel. Nothing generates until you do.
+
+| Model | Download | VRAM | Notes |
+| --- | --- | --- | --- |
+| **FLUX.2 [dev]** — fp8 | ~50 GB | 48 GB | Best photorealism. One model does create, edit *and* combine. |
+| **FLUX.1 dev + Kontext** — Q8 GGUF | ~31 GB | 24 GB | Quantized; two transformers, dev creates and Kontext edits. |
+
+Downloads resume if interrupted, and the weights are used entirely offline afterwards.
+
+Both models above are ungated. A **HuggingFace token** is only needed to install a gated model
+(Black Forest Labs' own repos, for instance): paste one into the same panel — it is validated on
+save, stored `0600` on the server, and never sent back to the browser. `HF_TOKEN` in the
+environment works too.
+
+You can also add any single-file FLUX.1 transformer from a HuggingFace repo (`owner/model`, or
+`owner/model:file.safetensors`) from that panel. Those extras run on FLUX.1's text encoder, so the
+FLUX.1 model has to be installed alongside them.
 
 ## Development
 

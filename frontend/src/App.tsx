@@ -1,34 +1,51 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Sidebar from "./components/Sidebar";
 import Chat from "./components/Chat";
 import Composer from "./components/Composer";
 import ImageBar from "./components/ImageBar";
 import ContextMeter from "./components/ContextMeter";
+import GenModelPill from "./components/GenModelPill";
+// Lazily loaded: the studio pulls in three.js, which is bigger than the rest of
+// the app put together. Nobody who isn't posing a figure should pay for it.
+const PoseStudio = lazy(() => import("./components/PoseStudio"));
 import {
   appendMessage,
   deleteChat,
+  enhancePrompt,
   generate,
   generateTitle,
   getChat,
+  getFluxModels,
   getModels,
-  getSdInfo,
+  getPreprocessors,
   listChats,
   putChat,
   streamChat,
   uploadImages,
   urlToDataUrl,
-  type SdInfo,
+  type FluxModel,
+  type FluxPreprocessor,
   type Usage,
 } from "./api";
-import { fileToResizedDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
+import { fileToDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
+import { guidanceFor, imagesFor, modeFor, resolveFlux, roleFor, stepsFor } from "./flux";
 import { trimHistory } from "./context";
-import type { ChatMessage, ChatSummary, GenSettings } from "./types";
+import type {
+  ChatMessage,
+  ChatSummary,
+  ControlMap,
+  GenProgress,
+  GenSettings,
+  GenOp,
+  EnhancerMode,
+} from "./types";
 
 const DEFAULT_URL = "http://localhost:11434";
 
-/** Extract the sha256 hash from an image/thumb URL like /api/images/<hash>.jpg */
+/** Extract the sha256 hash from an image/thumb URL like /api/images/<hash>.png.
+ *  The store keeps each image in its own format, so match any extension. */
 function hashFromUrl(url: string): string {
-  return (url.split("/").pop() || "").replace(/\.jpg$/, "");
+  return (url.split("/").pop() || "").replace(/\.[a-z0-9]+$/i, "");
 }
 
 export default function App() {
@@ -43,29 +60,134 @@ export default function App() {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [systemImage, setSystemImage] = useState<string | null>(null);
 
-  // Image generation (diffusers). `genMode` flips the composer from analyze to
-  // generate; `sdInfo` reports availability + downloaded models; `gen` holds the
-  // tunable settings.
+  // Prompt enhancer settings (sidebar). `enhancerModel` "" = auto-detect, same
+  // fallback the manual ✨ button always used. `enhancerMode` gates whether that
+  // rewrite also runs automatically before a generation, and whether it's shown.
+  const [enhancerModel, setEnhancerModel] = useState(
+    () => localStorage.getItem("enhancerModel") || ""
+  );
+  const [enhancerMode, setEnhancerMode] = useState<EnhancerMode>(
+    () => (localStorage.getItem("enhancerMode") as EnhancerMode) || "off"
+  );
+
+  // Image generation. `genMode` flips the composer from analyze to generate;
+  // `fluxAvailable` reports whether the engine *and* a model are installed;
+  // `gen` holds the tunable settings.
   const [genMode, setGenMode] = useState(false);
-  const [sdInfo, setSdInfo] = useState<SdInfo>({
-    available: false,
-    device: "cpu",
-    models: [],
-  });
+  // Which generate workflow: create (txt2img/img2img), edit (instruction), or
+  // compose (blend multiple reference images).
+  const [genOp, setGenOp] = useState<GenOp>("create");
+  const [fluxAvailable, setFluxAvailable] = useState(false);
+  // Prompt enhancement. `enhanceTemplate` is the independent photoreal-template
+  // toggle (sidebar-level, see `PromptEnhancer`). `enhancing` guards the brief
+  // async gap while the settings-level auto-enhancer runs before a generation
+  // goes out. Verbose mode's rewrite isn't held in state here — it's attached
+  // directly to the chat message it produced (`ChatMessage.enhancedPrompt`) by
+  // `generateImage`, and rendered under that message, not in the composer.
+  const [enhanceTemplate, setEnhanceTemplate] = useState(
+    () => localStorage.getItem("enhanceTemplate") !== "false"
+  );
+  const [enhancing, setEnhancing] = useState(false);
   const [gen, setGen] = useState<GenSettings>({
-    model: "",
-    negativePrompt: "",
-    steps: 25,
-    guidance: 7.5,
+    fluxModel: "", // "" = let the backend pick this mode's default
+    steps: 20,
+    guidance: 3.5, // retuned to the installed model — see `guidanceFor`
     strength: 0.6,
-    width: 512,
-    height: 512,
+    width: 1024, // FLUX is trained at ~1 megapixel
+    height: 1024,
     seed: "",
+    // control. Depth alone by default: it's the map that carries the scene, so it's
+    // the one that answers the pose the user couldn't get with words. The lock
+    // starts off — it changes the output a lot, and it should be something the user
+    // reaches for once the maps alone haven't landed the pose.
+    controlKinds: ["depth"],
+    structureLock: 1,
+    studioSource: false,
+    controlStrength: 1,
+    cannyLow: 0.3,
+    cannyHigh: 0.4,
   });
+  // Installed image models. Refreshed after an install/removal so the composer's
+  // picker stays in sync with the sidebar's Image Models panel.
+  const [fluxModels, setFluxModels] = useState<FluxModel[]>([]);
+  // Which control maps can be built. Refreshed alongside the model list, since
+  // installing one is done in the same sidebar panel.
+  const [preprocessors, setPreprocessors] = useState<FluxPreprocessor[]>([]);
+  // Maps posed in the Pose Studio, held apart from the composer's attachments.
+  // They're already control maps, not images to derive one from, and mixing the
+  // two lists would make "is this the source or the map?" ambiguous per image.
+  const [studioMaps, setStudioMaps] = useState<ControlMap[]>([]);
+  // What those maps contain. Held separately because it isn't in the pixels the
+  // enhancer is allowed to look at — a control map is the one image its brief
+  // forbids describing, so the figure count has to arrive as a number.
+  const [studioMeta, setStudioMeta] = useState<{ subjects: number; contact: boolean } | null>(
+    null
+  );
+  const [studioOpen, setStudioOpen] = useState(false);
+  const guidanceReady = useRef(false);
+  const refreshFlux = useCallback(() => {
+    getPreprocessors()
+      .then(setPreprocessors)
+      .catch(() => {
+        /* backend predates control preprocessors — the Control tab offers canny only */
+      });
+    getFluxModels()
+      .then((r) => {
+        setFluxAvailable(r.available);
+        setFluxModels(r.models);
+        // Guidance defaults depend on which model is installed, which we only learn
+        // here. Set it once, on the first list we see, so a value the user has since
+        // tuned by hand doesn't get reset by a later install.
+        if (!guidanceReady.current && r.models.length) {
+          guidanceReady.current = true;
+          setGen((g) => ({
+            ...g,
+            guidance: guidanceFor(genOp, r.models),
+            steps: stepsFor(genOp, r.models),
+          }));
+        }
+      })
+      .catch(() => {
+        /* backend older / no model installed — generation stays hidden */
+      });
+  }, [genOp]);
+
+  // Switching workflow retunes guidance, and drops the model pick only when that
+  // model can't serve the new role — which on FLUX.2 is never, since one model
+  // does every job. (On FLUX.1 the two modes draw from disjoint sets, so a create
+  // pick genuinely can't edit.) Clearing it unconditionally used to silently swap
+  // the model out from under an explicit choice while the picker still showed it.
+  // Steps are left alone: they aren't role-dependent, so a hand-tuned value should
+  // survive a tab switch.
+  const changeOp = useCallback(
+    (op: GenOp) => {
+      setGenOp(op);
+      setGen((g) => {
+        const keep = fluxModels.some(
+          (m) => m.name === g.fluxModel && m.roles.includes(roleFor(op))
+        );
+        const fluxModel = keep ? g.fluxModel : "";
+        return {
+          ...g,
+          fluxModel,
+          guidance: guidanceFor(op, fluxModels, fluxModel),
+          // Steps aren't role-dependent for a given model, so a hand-tuned value
+          // survives a tab switch — unless the switch forced the model itself to
+          // change (`!keep`), in which case the new model's own default applies.
+          steps: keep ? g.steps : stepsFor(op, fluxModels, fluxModel),
+        };
+      });
+    },
+    [fluxModels]
+  );
 
   const [pinnedImages, setPinnedImages] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
+  // Liveness of the in-flight turn. Separate from `streaming` because it carries
+  // *when* the last backend event landed, which is the only thing that tells a
+  // slow first-run model load apart from a wedged one.
+  const [progress, setProgress] = useState<GenProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [usage, setUsage] = useState<Usage | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -101,6 +223,24 @@ export default function App() {
     );
   }, []);
 
+  // data-URL -> its downscaled copy for the vision model. Chat sends images from
+  // component state, which now holds originals, and a vision model tokenizes by
+  // resolution — so a 12 MP photo would blow `context_size_for`'s ceiling. The
+  // downscale belongs here, at the point of sending to the consumer that wants it,
+  // rather than on the upload that everything else reads from.
+  const ollamaCache = useRef<Map<string, string>>(new Map());
+  const forOllama = useCallback(async (urls: string[]): Promise<string[]> => {
+    return Promise.all(
+      urls.map(async (url) => {
+        const cached = ollamaCache.current.get(url);
+        if (cached) return cached;
+        const small = await resizeDataUrl(url, 1280);
+        ollamaCache.current.set(url, small);
+        return small;
+      })
+    );
+  }, []);
+
   const refreshChats = useCallback(async () => {
     try {
       setChats(await listChats());
@@ -111,7 +251,10 @@ export default function App() {
 
   async function addPinned(files: FileList | File[]) {
     const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
-    const urls = await Promise.all(list.map((f) => fileToResizedDataUrl(f)));
+    // Keep the original bytes. The backend caps and resamples once, with a better
+    // filter, and hands each consumer the size it wants (`forOllama` below for the
+    // vision model, full-res for FLUX) — so nothing degrades what we store.
+    const urls = await Promise.all(list.map((f) => fileToDataUrl(f)));
     setPinnedImages((prev) => [...prev, ...urls]);
   }
   function removePinned(i: number) {
@@ -125,6 +268,12 @@ export default function App() {
   // Persist settings.
   useEffect(() => localStorage.setItem("ollamaUrl", ollamaUrl), [ollamaUrl]);
   useEffect(() => localStorage.setItem("model", model), [model]);
+  useEffect(() => localStorage.setItem("enhancerModel", enhancerModel), [enhancerModel]);
+  useEffect(() => localStorage.setItem("enhancerMode", enhancerMode), [enhancerMode]);
+  useEffect(
+    () => localStorage.setItem("enhanceTemplate", String(enhanceTemplate)),
+    [enhanceTemplate]
+  );
 
   const refreshModels = useCallback(async () => {
     try {
@@ -148,17 +297,10 @@ export default function App() {
     refreshChats();
   }, [refreshChats]);
 
-  // Probe the image-generation backend once; seed the default SD model.
+  // Probe the image-generation backend once.
   useEffect(() => {
-    getSdInfo()
-      .then((info) => {
-        setSdInfo(info);
-        setGen((g) => (g.model ? g : { ...g, model: info.models[0]?.id ?? "" }));
-      })
-      .catch(() => {
-        /* deps not installed / backend older — generation stays hidden */
-      });
-  }, []);
+    refreshFlux();
+  }, [refreshFlux]);
 
   // Keep an existing chat's metadata (model / system prompt / pinned + system
   // image) in sync as the user edits it, debounced. Skipped until the chat row
@@ -226,6 +368,11 @@ export default function App() {
       };
       const present = (arr: (string | null)[]) =>
         arr.filter((x): x is string => x !== null);
+      // The store holds video under the same `images` list a still uses — it's one
+      // content-addressed blob store and the hash doesn't say what it is. The URL's
+      // extension does, and it's the only signal here. Split on it so `images`
+      // stays "data-URLs of decodable images" on reload, exactly as it is live.
+      const isVideoUrl = (url: string) => url.toLowerCase().endsWith(".webm");
 
       // Dropping missing pinned images here also self-heals the DB: the next
       // send re-persists the pinned set without them.
@@ -233,7 +380,11 @@ export default function App() {
       const sysImg = d.system_image ? await loadImg(d.system_image) : null;
       const msgs: ChatMessage[] = await Promise.all(
         d.messages.map(async (m) => {
-          const images = present(await Promise.all(m.images.map(loadImg)));
+          const videos = m.images.filter(isVideoUrl);
+          videos.forEach((url) => hashCache.current.set(url, hashFromUrl(url)));
+          const images = present(
+            await Promise.all(m.images.filter((u) => !isVideoUrl(u)).map(loadImg))
+          );
           // Keep context-image positions stable (missing -> "") so the model's
           // "image N" references still line up; "" simply renders no thumbnail.
           const contextImages = (
@@ -244,6 +395,7 @@ export default function App() {
             content: m.content,
             model: m.model ?? undefined,
             images: images.length ? images : undefined,
+            videos: videos.length ? videos : undefined,
             contextImages: contextImages.length ? contextImages : undefined,
           };
         })
@@ -293,6 +445,20 @@ export default function App() {
       const history = [...messages, userMsg];
       setMessages([...history, { role: "assistant", content: "", model }]);
       setStreaming(true);
+      // Text has one silent stretch — Ollama loading the model before the first
+      // token. The streamed text is its own liveness signal after that, so the
+      // bar clears on first token rather than running the whole turn.
+      // No fraction: Ollama reports nothing at all while it loads, so the bar shows
+      // the phase and the clock rather than inventing a position for itself.
+      setProgress({
+        phase: `Loading ${model}…`,
+        stage: "",
+        frac: null,
+        step: 0,
+        total: 0,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+      });
 
       // Auto-trim oldest turns from what we SEND (the UI keeps the full history)
       // when the last measured usage shows we're near the window limit.
@@ -352,6 +518,9 @@ export default function App() {
         }
         return next;
       });
+      // What actually goes on the wire: downscaled copies. `outImages` stays as the
+      // originals, since the UI resolves "Image N" back to those for display.
+      const wireImages = await forOllama(outImages);
       const merged = sent.map((m, i) => {
         if (i !== lastIdx) {
           return { role: m.role, content: m.content }; // strip history images (Ollama ignores them)
@@ -375,7 +544,7 @@ export default function App() {
             `[The ${outImages.length} images below are numbered 1-${outImages.length} in the ` +
             `order shown; refer to each by its number.\n\n${sections.join("\n\n")}]\n\n`;
         }
-        return { role: m.role, content: note + m.content, images: outImages };
+        return { role: m.role, content: note + m.content, images: wireImages };
       });
 
       // Build the request: optional system message (with persistent image) + history.
@@ -384,7 +553,7 @@ export default function App() {
         payload.push({
           role: "system",
           content: systemPrompt.trim(),
-          images: systemImage ? [systemImage] : undefined,
+          images: systemImage ? await forOllama([systemImage]) : undefined,
         });
       }
       payload.push(...merged);
@@ -400,6 +569,7 @@ export default function App() {
           {
             onToken: (token) => {
               assistantText += token;
+              setProgress(null);
               setMessages((prev) => {
                 const next = [...prev];
                 next[next.length - 1] = {
@@ -429,6 +599,7 @@ export default function App() {
         }
       } finally {
         setStreaming(false);
+        setProgress(null);
         abortRef.current = null;
 
         // Persist this turn (best-effort; a failure here must not break the UI).
@@ -479,36 +650,115 @@ export default function App() {
       usage,
       currentChatId,
       ensureHashes,
+      forOllama,
       refreshChats,
     ]
   );
 
   const generateImage = useCallback(
-    async (prompt: string, images: string[]) => {
-      if (!gen.model) {
-        setError("No image model available.");
+    // `prompt` is always what the user typed — it's what's shown in the chat
+    // turn. `sendPrompt` is what actually goes to the backend: the same text,
+    // unless the settings-level auto-enhancer rewrote it, in which case the chat
+    // still shows the original while the rewrite does the generating.
+    // `displayEnhanced` (Verbose mode only) is that same rewrite, attached to
+    // the chat message so it renders underneath the user's prompt.
+    async (
+      prompt: string,
+      op: GenOp,
+      images: string[],
+      sendPrompt = prompt,
+      displayEnhanced: string | null = null
+    ) => {
+      // Which transformer this run will use. Resolved once, here: it names the
+      // placeholder turn, and it's what goes on the wire — so what the composer
+      // shows, what the chat says, and what the backend loads are all one value.
+      // (The backend echoes back the model it actually used; that wins on arrival.)
+      const fluxModel = resolveFlux(gen.fluxModel, fluxModels, roleFor(op));
+      const modelId =
+        fluxModels.find((m) => m.name === fluxModel)?.label || fluxModel || "FLUX";
+      if (!fluxAvailable) {
+        setError("FLUX isn't installed on this machine. Run ./run.sh to fetch the weights.");
         return;
       }
       setError(null);
       const chatId = currentChatId;
       const isFirstExchange = messages.length === 0;
-      const submode = images.length > 0 ? "img2img" : "txt2img";
-      const initUrl = submode === "img2img" ? images[0] : null;
+
+      // compose blends every reference image. edit takes the first image as the
+      // scene being changed and the rest as subject references. create uses one
+      // source image, and infers txt2img vs img2img from its presence.
+      // animate takes one source image, like create's img2img, and no references.
+      // control reads the first image as the structure source and the rest as
+      // subject references — the same split edit uses, for the same reason: one
+      // image says *how it is arranged*, the others say *what is in it*.
+      //
+      // With no control type selected, that first image is not a source to derive a
+      // map from: it *is* the map. It goes to `control_map_hashes` instead, which is
+      // both the re-roll path (pin the map the last run emitted) and how a skeleton
+      // posed in Blender or PoseMy.Art gets in without being re-analysed.
+      //
+      // Studio maps were authored as maps too, so nothing is derived from them
+      // either. What they leave open is what an *attachment* then means, and the
+      // two answers produce completely different images: a subject reference lends
+      // a face and clothing, while a scene is the photograph the figures are posed
+      // into and survives the generation. `studioSource` is that choice.
+      const isCompose = op === "compose";
+      const isControl = op === "control";
+      const usingStudio = isControl && studioMaps.length > 0;
+      const studioScene = usingStudio && gen.studioSource && images.length > 0;
+      const controlAsMap = isControl && !usingStudio && gen.controlKinds.length === 0;
+      const initUrl =
+        isCompose || controlAsMap || (usingStudio && !studioScene) ? null : images[0] ?? null;
+      const mapUrls = usingStudio
+        ? studioMaps.map((m) => m.url)
+        : controlAsMap && images.length
+          ? [images[0]]
+          : [];
+      const refUrls = isCompose
+        ? images
+        : usingStudio
+          ? // With no scene, nothing is the source and every attachment describes
+            // who is in the pose.
+            studioScene
+            ? images.slice(1)
+            : images
+          : op === "edit" || isControl
+            ? images.slice(1)
+            : [];
+      // Shared with the prompt enhancer, so both brief the model on the same job.
+      const mode = modeFor(op, images);
+      // Every image the job conditions on, in the order the backend receives them.
+      // edit has two kinds — the scene in `initUrl` and the subject references after
+      // it — and showing only the first made the references invisible in the turn
+      // that used them. compose has no init, so the spread covers it too.
+      const conditioning = [...(initUrl ? [initUrl] : []), ...mapUrls, ...refUrls];
+      const shownImages = conditioning.length ? conditioning : undefined;
+      const icon = op === "animate" ? "🎬" : op === "control" ? "🕹️" : "🎨";
 
       // Show the prompt as a user turn, then an assistant placeholder we fill
       // with progress text and finally the generated image.
       const userMsg: ChatMessage = {
         role: "user",
         content: prompt,
-        images: initUrl ? [initUrl] : undefined,
-        model: gen.model,
+        images: shownImages,
+        model: modelId,
+        enhancedPrompt: displayEnhanced ?? undefined,
       };
       setMessages((prev) => [
         ...prev,
         userMsg,
-        { role: "assistant", content: "🎨 Preparing…", model: gen.model },
+        { role: "assistant", content: `${icon} Preparing…`, model: modelId },
       ]);
       setStreaming(true);
+      setProgress({
+        phase: "Preparing…",
+        stage: "",
+        frac: null,
+        step: 0,
+        total: 0,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+      });
 
       const setAssistant = (patch: Partial<ChatMessage>) =>
         setMessages((prev) => {
@@ -521,41 +771,158 @@ export default function App() {
       abortRef.current = controller;
       let resultHash: string | null = null;
       let resultDataUrl: string | null = null;
+      // Starts as this client's prediction; the backend's echo replaces it.
+      let resultLabel = modelId;
+      // Control maps arrive one event at a time, before the image. Accumulated here
+      // rather than read back off the message, because `setAssistant` is a state
+      // update and the next map can land before it has applied.
+      let controlMaps: ControlMap[] = [];
       try {
         const initHash = initUrl ? (await ensureHashes([initUrl]))[0] : null;
+        const refHashes = refUrls.length ? await ensureHashes(refUrls) : [];
+        const mapHashes = mapUrls.length ? await ensureHashes(mapUrls) : [];
+
+        // Create the chat before sampling, so the backend has a row to record the
+        // turns against — it writes them from a thread that outlives this page,
+        // which is what lets a reload mid-generation find the result. Best-effort
+        // for the same reason it always was: losing the history is a smaller harm
+        // than refusing to generate.
+        try {
+          await putChat(chatId, {
+            model: model || modelId,
+            system_prompt: systemPrompt,
+            pinned_hashes: await ensureHashes(pinnedImages),
+            system_image_hash: systemImage
+              ? (await ensureHashes([systemImage]))[0]
+              : null,
+          });
+          setChatExists(true);
+        } catch (err) {
+          console.error("putChat failed; this turn won't be recorded", err);
+        }
+
         await generate(
           {
-            mode: submode,
-            model: gen.model,
-            prompt,
-            negative_prompt: gen.negativePrompt,
+            mode,
+            chat_id: chatId,
+            flux_model: fluxModel || null,
+            prompt: sendPrompt,
+            // Only set when the two diverge, so a reloaded turn shows what the
+            // user actually saw live rather than a rewrite they never typed.
+            display_prompt: sendPrompt !== prompt ? prompt : null,
             init_image_hash: initHash,
+            ref_image_hashes: refHashes,
             steps: gen.steps,
             guidance: gen.guidance,
             strength: gen.strength,
+            // The static template is a fallback for an un-enhanced create prompt.
+            // Wrapping it around a prompt the settings-level auto-enhancer already
+            // rewrote would bury the rewrite's own framing inside a second,
+            // blunter one.
+            enhance: enhanceTemplate && sendPrompt === prompt,
             width: gen.width,
             height: gen.height,
+            // Only sent for control, so no other mode's request changes shape. The
+            // backend defaults every one of these, so omitting them is the same as
+            // not knowing about them.
+            ...(isControl
+              ? {
+                  // Studio maps are finished maps. With no scene photo there is
+                  // no source to derive more from, and asking would just error;
+                  // with one, derived maps stack with the studio's on the
+                  // backend, which is how a photo's own depth joins the pose.
+                  control_kinds: usingStudio && !studioScene ? [] : gen.controlKinds,
+                  control_map_hashes: mapHashes,
+                  structure_lock: gen.structureLock,
+                  control_strength: gen.controlStrength,
+                  canny_low: gen.cannyLow,
+                  canny_high: gen.cannyHigh,
+                }
+              : {}),
             seed: gen.seed ? parseInt(gen.seed, 10) : null,
             ollama_url: ollamaUrl,
           },
           {
-            onStatus: (m) => setAssistant({ content: `🎨 ${m}` }),
-            onProgress: (step, total) =>
-              setAssistant({ content: `🎨 Generating… step ${step}/${total}` }),
+            onStatus: (m) => {
+              setAssistant({ content: `${icon} ${m}` });
+              // A status line renames the job; it doesn't rewind it. The fraction
+              // covers the whole graph, so it survives every phase change until the
+              // job ends.
+              setProgress((p) => (p ? { ...p, phase: m, updatedAt: Date.now() } : p));
+            },
+            onProgress: ({ live, ...p }) => {
+              setAssistant({
+                content:
+                  p.step > 0
+                    ? `${icon} ${p.stage}… step ${p.step}/${p.total} (${Math.round(p.frac * 100)}%)`
+                    : `${icon} ${p.stage}… ${Math.round(p.frac * 100)}%`,
+              });
+              // Only a live update means the backend is still there, so only a live
+              // update clears the stall clock — an estimate ticking through a silent
+              // load looks identical to a wedged one, and must not vouch for it.
+              setProgress((cur) =>
+                cur
+                  ? { ...cur, ...p, updatedAt: live ? Date.now() : cur.updatedAt }
+                  : cur
+              );
+            },
+            onControlMap: async (m) => {
+              // Fetched back as a data-URL like a generated image is, so a map can
+              // be pinned and re-fed on the next roll without a round trip — that's
+              // how you iterate on a prompt while holding one pose fixed.
+              let url = m.url;
+              try {
+                url = await urlToDataUrl(m.url);
+                hashCache.current.set(url, m.hash);
+              } catch {
+                /* fall back to the URL */
+              }
+              controlMaps = [...controlMaps, { kind: m.kind, url }];
+              setAssistant({ controlMaps });
+            },
             onImage: async (r) => {
               resultHash = r.hash;
-              // Load the stored image back as a data-URL for display + pin/reuse
-              // parity, and seed the hash cache so it isn't re-uploaded.
-              try {
-                resultDataUrl = await urlToDataUrl(`/api/images/${r.hash}.jpg`);
-                hashCache.current.set(resultDataUrl, r.hash);
-              } catch {
-                /* fall back to the URL below */
+              // The store keeps each result in its own format, so take the URL the
+              // backend built rather than assuming an extension here.
+              const url = r.url || `/api/images/${r.hash}.png`;
+              // The model the backend actually ran, which is the authoritative
+              // answer — `modelId` above is only this client's prediction of it.
+              if (r.model_label) resultLabel = r.model_label;
+
+              if (r.kind === "video") {
+                // Deliberately *not* urlToDataUrl'd. A 5s 720p clip is megabytes,
+                // which is a lot to hold base64'd in state for every turn — and
+                // `images` is data-URLs by convention, feeding a canvas resize
+                // (`ensureHashes`), the pin panel and the vision model, none of
+                // which can read a webm. Keeping video in its own field is what
+                // stops it reaching them.
+                hashCache.current.set(url, r.hash);
+                setAssistant({ content: "", videos: [url], model: resultLabel });
+              } else {
+                // Load the stored image back as a data-URL for display + pin/reuse
+                // parity, and seed the hash cache so it isn't re-uploaded.
+                try {
+                  resultDataUrl = await urlToDataUrl(url);
+                  hashCache.current.set(resultDataUrl, r.hash);
+                } catch {
+                  /* fall back to the URL below */
+                }
+                setAssistant({
+                  content: "",
+                  images: [resultDataUrl ?? url],
+                  model: resultLabel,
+                });
               }
-              setAssistant({
-                content: "",
-                images: [resultDataUrl ?? `/api/images/${r.hash}.jpg`],
-              });
+              // Relabel the user turn too, so the pair on screen matches the one the
+              // backend recorded — otherwise a fallback shows this client's guess
+              // now and the model that really ran on reload.
+              setMessages((prev) =>
+                prev.map((m, i) =>
+                  i === prev.length - 2 && m.role === "user"
+                    ? { ...m, model: resultLabel }
+                    : m
+                )
+              );
             },
             onError: (msg) => setAssistant({ content: `⚠️ ${msg}` }),
           },
@@ -567,45 +934,29 @@ export default function App() {
         }
       } finally {
         setStreaming(false);
+        setProgress(null);
         abortRef.current = null;
 
-        // Persist (best-effort). Only if we actually produced an image.
+        // Both turns are the backend's to write (see `chat_id` above), so what's
+        // left here is only the work that needs this page: the title, which runs
+        // on the VLM, and the sidebar.
         if (resultHash) {
           try {
-            await putChat(chatId, {
-              model: model || gen.model,
-              system_prompt: systemPrompt,
-              pinned_hashes: await ensureHashes(pinnedImages),
-              system_image_hash: systemImage
-                ? (await ensureHashes([systemImage]))[0]
-                : null,
-            });
-            setChatExists(true);
-            await appendMessage(chatId, {
-              role: "user",
-              content: prompt,
-              model: gen.model,
-              image_hashes: initUrl ? await ensureHashes([initUrl]) : [],
-            });
-            await appendMessage(chatId, {
-              role: "assistant",
-              content: "",
-              model: gen.model,
-              image_hashes: [resultHash],
-            });
             if (isFirstExchange && model) {
               await generateTitle(chatId, model, ollamaUrl).catch(() => "");
             }
             await refreshChats();
-            await getSdInfo().then(setSdInfo).catch(() => {});
           } catch (err) {
-            console.error("persist failed", err);
+            console.error("post-generate refresh failed", err);
           }
         }
       }
     },
     [
       gen,
+      enhanceTemplate,
+      fluxAvailable,
+      fluxModels,
       model,
       ollamaUrl,
       systemPrompt,
@@ -627,7 +978,8 @@ export default function App() {
   async function addComposerFiles(files: FileList | File[]) {
     const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
     if (list.length === 0) return;
-    const urls = await Promise.all(list.map((f) => fileToResizedDataUrl(f)));
+    // Original bytes — these are FLUX's reference images. See `addPinned`.
+    const urls = await Promise.all(list.map((f) => fileToDataUrl(f)));
     setComposerImages((prev) => [...prev, ...urls]);
   }
   function removeComposerImage(i: number) {
@@ -655,16 +1007,124 @@ export default function App() {
     const rotated = await rotateDataUrl(composerImages[i], 90);
     setComposerImages((prev) => prev.map((img, idx) => (idx === i ? rotated : img)));
   }
-  function submitComposer() {
+  /** The Ollama model that will do the rewriting: the Settings pick if the user
+   *  made one, else the one in use if it can see, else any vision model. ""
+   *  means none is installed/picked — skip the call entirely. */
+  const effectiveEnhanceModel =
+    enhancerModel || (models.vision.includes(model) ? model : models.vision[0] || "");
+
+  /** Settings-level auto-enhance, run right before a generation goes out.
+   *  Off: no-op. On/Verbose: rewrites with the picked vision model, reading
+   *  whatever images the generation itself will condition on — `sendPrompt` is
+   *  what actually goes to the backend either way. `displayEnhanced` is that
+   *  same rewrite, but only in Verbose mode: the caller attaches it to the chat
+   *  message so it renders underneath the user's own typed prompt, right in the
+   *  chat window. On keeps the rewrite invisible — `displayEnhanced` is null.
+   *  Fails soft: an unreachable Ollama, or no vision model picked/installed,
+   *  just means the typed prompt goes out as-is (`/api/flux/enhance` has the
+   *  same fallback contract). */
+  async function maybeAutoEnhance(
+    prompt: string,
+    op: GenOp,
+    images: string[]
+  ): Promise<{ sendPrompt: string; displayEnhanced: string | null }> {
+    if (enhancerMode === "off" || !effectiveEnhanceModel) {
+      return { sendPrompt: prompt, displayEnhanced: null };
+    }
+    const seen = imagesFor(op, images);
+    const mode = modeFor(op, seen);
+    try {
+      const { prompt: rewritten } = await enhancePrompt({
+        prompt,
+        mode,
+        model: effectiveEnhanceModel,
+        image_hashes: await ensureHashes(seen),
+        ollama_url: ollamaUrl,
+        // Only meaningful for a studio pose; the backend ignores it elsewhere.
+        ...(op === "control" && studioMaps.length > 0 && studioMeta ? studioMeta : {}),
+      });
+      if (rewritten && rewritten !== prompt) {
+        return {
+          sendPrompt: rewritten,
+          displayEnhanced: enhancerMode === "verbose" ? rewritten : null,
+        };
+      }
+    } catch {
+      // Swallow — the typed prompt goes out unchanged below.
+    }
+    return { sendPrompt: prompt, displayEnhanced: null };
+  }
+
+  async function submitComposer() {
     const trimmed = composerText.trim();
     if (genMode) {
-      if (!trimmed) return; // a prompt is required to generate
-      // img2img source: the attached image, else the first pinned-panel image.
-      // Only one image is used (img2img can't merge several).
-      const genImages = composerImages.length
-        ? composerImages.slice(0, 1)
-        : pinnedImages.slice(0, 1);
-      generateImage(trimmed, genImages);
+      if (!trimmed || enhancing) return; // a prompt is required to generate
+      // Source images come from the message attachments, else the pinned panel.
+      const attached = composerImages.length ? composerImages : pinnedImages;
+      let op: GenOp;
+      let imgs: string[];
+      if (genOp === "animate") {
+        // The one image becomes the video's first frame. `imagesFor` caps it at one:
+        // Wan I2V has a single start frame, so a second would be dropped in silence.
+        if (attached.length === 0) {
+          setError("Animate needs a source image to bring to life (attach or pin one).");
+          return;
+        }
+        op = "animate";
+        imgs = imagesFor("animate", attached);
+      } else if (genOp === "compose") {
+        // Blend every available reference image (needs at least one).
+        if (attached.length === 0) {
+          setError("Combine needs at least one reference image (attach or pin some).");
+          return;
+        }
+        op = "compose";
+        imgs = attached;
+      } else if (genOp === "edit") {
+        // The first image is the one being edited; any others are references the
+        // instruction can pull subjects from ("add the man from the second photo").
+        if (attached.length === 0) {
+          setError("Edit needs a source image to change (attach or pin one).");
+          return;
+        }
+        op = "edit";
+        imgs = attached;
+      } else if (genOp === "control") {
+        // Three ways in: a pose built in the studio, an image to derive maps from,
+        // or a finished map attached directly. Only the middle one has a "source".
+        if (studioMaps.length === 0) {
+          if (attached.length === 0) {
+            setError(
+              "Control needs a pose. Open the Pose Studio to build one, or attach an image whose pose you want copied."
+            );
+            return;
+          }
+          if (gen.controlKinds.length === 0 && gen.structureLock < 1) {
+            setError(
+              "With no control type selected the attached image is used as a finished control map — there's no source image left to lock onto. Pick a control type, or set the structure lock back to 1."
+            );
+            return;
+          }
+        } else if (gen.structureLock < 1 && !(gen.studioSource && attached.length > 0)) {
+          setError(
+            "A studio pose on its own has no source image to lock onto — the maps are the whole signal. Attach the scene photo and tick “use it as the scene”, or set the structure lock back to 1."
+          );
+          return;
+        }
+        op = "control";
+        imgs = attached;
+      } else {
+        // create: txt2img, or img2img from a single source image.
+        op = "create";
+        imgs = imagesFor("create", attached);
+      }
+      // Settings-level auto-enhance (if on) runs before the box is cleared
+      // below. Verbose's rewrite rides along to `generateImage`, which attaches
+      // it to the chat message it's about to create.
+      setEnhancing(true);
+      const { sendPrompt, displayEnhanced } = await maybeAutoEnhance(trimmed, op, imgs);
+      setEnhancing(false);
+      generateImage(trimmed, op, imgs, sendPrompt, displayEnhanced);
     } else {
       if (!trimmed && composerImages.length === 0) return;
       send(trimmed, composerImages);
@@ -680,17 +1140,28 @@ export default function App() {
         setOllamaUrl={setOllamaUrl}
         models={models}
         refreshModels={refreshModels}
+        fluxModels={fluxModels}
+        refreshFlux={refreshFlux}
         chats={chats}
         currentChatId={currentChatId}
         onNewChat={newChat}
         onOpenChat={openChat}
         onDeleteChat={removeChat}
+        enhancerModel={enhancerModel}
+        setEnhancerModel={setEnhancerModel}
+        enhancerMode={enhancerMode}
+        setEnhancerMode={setEnhancerMode}
+        enhanceTemplate={enhanceTemplate}
+        setEnhanceTemplate={setEnhanceTemplate}
       />
       <main className="main">
         <header className="topbar">
           <h1>👁️ Vision Model Chat</h1>
           <div className="topbar-actions">
             {usage && <ContextMeter used={usage.used} numCtx={usage.num_ctx} />}
+            {fluxAvailable && (
+              <GenModelPill op={genOp} picked={gen.fluxModel} models={fluxModels} gen={gen} />
+            )}
             {model && <span className="model-pill">{model}</span>}
             {messages.length > 0 && (
               <button className="btn ghost" onClick={newChat}>
@@ -712,6 +1183,7 @@ export default function App() {
             <Chat
               messages={messages}
               streaming={streaming}
+              progress={progress}
               disabled={!model && !genMode}
               onDropFiles={addComposerFiles}
             />
@@ -736,17 +1208,44 @@ export default function App() {
             setSystemImage={setSystemImage}
             genMode={genMode}
             setGenMode={setGenMode}
-            sdAvailable={sdInfo.available}
-            sdModels={sdInfo.models}
+            genOp={genOp}
+            setGenOp={changeOp}
+            fluxAvailable={fluxAvailable}
+            fluxModels={fluxModels}
             gen={gen}
             setGen={setGen}
+            enhancing={enhancing}
+            pinnedCount={pinnedImages.length}
             pinnedInit={pinnedImages[0] ?? null}
-            onModelPulled={() => {
-              getSdInfo().then(setSdInfo).catch(() => {});
+            preprocessors={preprocessors}
+            studioMaps={studioMaps}
+            studioMeta={studioMeta}
+            onOpenStudio={() => setStudioOpen(true)}
+            onClearStudioMaps={() => {
+              setStudioMaps([]);
+              setStudioMeta(null);
             }}
           />
         </div>
       </main>
+      {studioOpen && (
+        <Suspense
+          fallback={<div className="studio-backdrop"><div className="studio-loading">Loading the Pose Studio…</div></div>}
+        >
+          <PoseStudio
+            onClose={() => setStudioOpen(false)}
+            sceneImage={composerImages[0] ?? pinnedImages[0] ?? null}
+            onUse={(maps, meta) => {
+              setStudioMaps(maps);
+              setStudioMeta(meta);
+              // Posing is only meaningful in the Control tab, and arriving there
+              // is what the user was doing — don't make them find the tab too.
+              setGenMode(true);
+              if (genOp !== "control") changeOp("control");
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

@@ -5,14 +5,19 @@ durable, browsable history. Chat/message rows live in a SQLite file; image
 *bytes* live as files on disk (deduped by sha256 content hash) with a `hash`
 registry row. Thumbnails (generated client-side) are stored under the same hash.
 
-`sqlite3` and `hashlib` are stdlib — no new dependencies.
+Full images are kept in whatever format they arrived in — `images.mime` records
+which, and the file's extension follows it. Thumbnails are always JPEG. Encoding
+policy lives in `images.py`; this module only stores what that hands it.
 """
 import base64
 import hashlib
+import re
 import sqlite3
 import time
 import uuid
 from pathlib import Path
+
+from . import images
 
 # --------------------------------------------------------------------------- #
 # Paths
@@ -108,16 +113,59 @@ def _strip_data_url(data_url: str) -> bytes:
     return base64.b64decode(b64)
 
 
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def image_path(h: str) -> Path | None:
+    """The stored file for a hash, whatever format it's in — or None if absent.
+
+    Globs rather than reading `images.mime`, so it resolves a file the registry
+    disagrees with (or predates) and needs no migration for images stored back when
+    everything was `.jpg`. The hex guard matters: hashes arrive straight off request
+    bodies, and this builds a path from one.
+    """
+    if not _HEX64.fullmatch(h or ""):
+        return None
+    return next(IMAGES_DIR.glob(f"{h}.*"), None)
+
+
+def image_url(h: str) -> str:
+    """The URL that serves a stored image, extension included."""
+    p = image_path(h)
+    return f"/api/images/{h}{p.suffix if p else '.png'}"
+
+
+def _ext_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """hash -> file extension, for every registered image.
+
+    One query, built once per request that needs to name several images. The
+    alternative — globbing per hash — is a filesystem hit per image per chat load.
+    A hash with no row here isn't guessed at; callers fall back to `image_path`,
+    which reads the answer off the disk rather than inventing a second one.
+    """
+    return {
+        r["hash"]: images.MIME_TO_EXT[r["mime"]]
+        for r in conn.execute("SELECT hash, mime FROM images")
+        if r["mime"] in images.MIME_TO_EXT
+    }
+
+
 def save_image(full_data_url: str, thumb_data_url: str | None = None) -> str:
     """Persist one image (full + optional thumbnail) deduped by content hash.
 
-    Returns the sha256 hash. Both the full image and its thumbnail are stored
-    under the same hash so the sidebar can request `/api/thumbs/<hash>.jpg`.
-    """
-    raw = _strip_data_url(full_data_url)
-    h = hashlib.sha256(raw).hexdigest()
+    Returns the sha256 hash. The full image keeps its own format (see
+    `images.normalize_for_store`); the thumbnail is always JPEG, so the sidebar can
+    always request `/api/thumbs/<hash>.jpg`.
 
-    full_path = IMAGES_DIR / f"{h}.jpg"
+    The hash is taken over the *stored* bytes, not the uploaded ones. Hashing the
+    upload instead would leave the hash naming something that isn't on disk, and
+    dedupe comparing images we no longer have.
+    """
+    raw = images.normalize_for_store(_strip_data_url(full_data_url))
+    h = hashlib.sha256(raw).hexdigest()
+    mime, ext = images.sniff(raw)
+
+    full_path = IMAGES_DIR / f"{h}.{ext}"
     if not full_path.exists():
         full_path.write_bytes(raw)
 
@@ -128,8 +176,8 @@ def save_image(full_data_url: str, thumb_data_url: str | None = None) -> str:
 
     with _connect() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO images(hash, mime, created_at) VALUES (?, 'image/jpeg', ?)",
-            (h, _now()),
+            "INSERT OR IGNORE INTO images(hash, mime, created_at) VALUES (?, ?, ?)",
+            (h, mime, _now()),
         )
     return h
 
@@ -153,7 +201,9 @@ def _gc_orphan_images(conn: sqlite3.Connection) -> None:
         h = row["hash"]
         if h in referenced:
             continue
-        (IMAGES_DIR / f"{h}.jpg").unlink(missing_ok=True)
+        p = image_path(h)
+        if p:
+            p.unlink(missing_ok=True)
         (THUMBS_DIR / f"{h}.jpg").unlink(missing_ok=True)
         conn.execute("DELETE FROM images WHERE hash = ?", (h,))
 
@@ -199,6 +249,12 @@ def get_chat(chat_id: str) -> dict | None:
         if not c:
             return None
 
+        # Images keep their own format, so every URL here needs its extension.
+        # Read them once rather than globbing the store per image; anything the
+        # registry doesn't know falls back to the disk rather than to a guess.
+        exts = _ext_map(conn)
+        url = lambda h: f"/api/images/{h}.{exts[h]}" if h in exts else image_url(h)  # noqa: E731
+
         messages = []
         for m in conn.execute(
             "SELECT * FROM messages WHERE chat_id = ? ORDER BY ordinal", (chat_id,)
@@ -216,17 +272,13 @@ def get_chat(chat_id: str) -> dict | None:
                     "role": m["role"],
                     "content": m["content"],
                     "model": m["model"],
-                    "images": [f"/api/images/{r['image_hash']}.jpg" for r in imgs],
-                    "context_images": [f"/api/images/{r['image_hash']}.jpg" for r in ctx],
+                    "images": [url(r["image_hash"]) for r in imgs],
+                    "context_images": [url(r["image_hash"]) for r in ctx],
                 }
             )
 
-        pinned = [f"/api/images/{h}.jpg" for h in _pinned_hashes(conn, chat_id)]
-        sys_img = (
-            f"/api/images/{c['system_image_hash']}.jpg"
-            if c["system_image_hash"]
-            else None
-        )
+        pinned = [url(h) for h in _pinned_hashes(conn, chat_id)]
+        sys_img = url(c["system_image_hash"]) if c["system_image_hash"] else None
         return {
             "id": c["id"],
             "title": c["title"],

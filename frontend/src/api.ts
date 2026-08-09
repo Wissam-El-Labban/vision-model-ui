@@ -2,6 +2,7 @@ import type {
   ChatDetail,
   ChatMessage,
   ChatSummary,
+  ControlKind,
   RunningModel,
   VersionInfo,
 } from "./types";
@@ -153,70 +154,559 @@ export async function pullModel(
 }
 
 // --------------------------------------------------------------------------- #
-// Local image generation (diffusers)
+// Image models. A FLUX.2 model serves every mode; a FLUX.1 one serves exactly one
+// (dev creates, Kontext edits) — hence `roles`, not `role`.
 // --------------------------------------------------------------------------- #
-export interface SdModel {
+export type FluxRole = "create" | "edit" | "animate";
+
+export interface FluxModel {
+  name: string; // the weight file, which is what /api/generate takes
+  label: string;
+  roles: FluxRole[];
+  bundle: string | null; // catalog id, or null for a user-added model
+  family: string;
+  size_gb: number;
+  /** The text encoder the graph will actually load — the backend's `encoder_for`,
+   *  so this can't drift from what runs. FLUX.1 reports its pair as "a + b". */
+  encoder: string;
+  /** The LoRAs chained onto this transformer, in attach order. Empty when none. */
+  loras: FluxLoraPick[];
+}
+
+/** An installable model: its weights, text encoder and VAE, downloaded together. */
+export interface FluxBundle {
   id: string;
   label: string;
-  downloaded: boolean;
-  turbo: boolean;
-  photoreal: boolean;
+  blurb: string;
+  family: string;
+  roles: FluxRole[];
   size_gb: number;
+  vram_gb: number;
+  gated: boolean;
+  installed: boolean;
+  needed_gb: number; // still to download (a part-finished install counts what it has)
 }
 
-export interface SdInfo {
-  available: boolean;
-  device: string;
-  models: SdModel[];
+export interface FluxInstalling {
+  id: string;
+  label: string;
+  file: string;
+  pct: number;
+  done: number;
+  total: number;
+  index: number; // file N…
+  count: number; // …of M
 }
 
-export async function getSdInfo(): Promise<SdInfo> {
-  const res = await fetch("/api/generate/models");
-  if (!res.ok) throw new Error(`sd models: ${res.status}`);
+export interface FluxCatalog {
+  runtime_ready: boolean; // engine installed — enough to download a model
+  available: boolean; // ...and a model installed, so we can actually generate
+  disk_free_gb: number;
+  bundles: FluxBundle[];
+  hf_token: "saved" | "env" | null;
+  /** A download running on the server right now — it outlives the page that started
+   *  it, so a reload can find it here rather than assuming nothing is happening. */
+  installing: FluxInstalling | null;
+}
+
+export interface FluxProgress {
+  file: string;
+  done: number;
+  total: number;
+  pct: number;
+  index?: number; // file N…
+  count?: number; // …of M (a sharded encoder arrives in pieces, then gets stitched)
+}
+
+export async function getFluxModels(): Promise<{ available: boolean; models: FluxModel[] }> {
+  const res = await fetch("/api/flux/models");
+  if (!res.ok) throw new Error(`flux models: ${res.status}`);
   return res.json();
 }
 
-/** Explicitly download an image model (opt-in). Streams status lines. */
-export async function pullSdModel(
-  model: string,
-  onStatus: (message: string) => void
+export async function getFluxCatalog(): Promise<FluxCatalog> {
+  const res = await fetch("/api/flux/catalog");
+  if (!res.ok) throw new Error(`flux catalog: ${res.status}`);
+  return res.json();
+}
+
+/** Install a catalog model. Tens of GB, so progress streams file by file. */
+export async function installFluxBundle(
+  id: string,
+  onStatus: (message: string) => void,
+  onProgress: (p: FluxProgress) => void
 ): Promise<void> {
-  const res = await fetch("/api/generate/pull", {
+  const res = await fetch("/api/flux/install", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model }),
+    body: JSON.stringify({ id }),
   });
-  if (!res.ok) throw new Error(`sd pull: ${res.status}`);
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `flux install: ${res.status}`);
+  }
+  let failure: string | null = null;
   await readLines(res, (line) => {
     try {
       const ev = JSON.parse(line);
       if (ev.type === "status") onStatus(ev.message as string);
-      else if (ev.type === "error") throw new Error(ev.message);
+      else if (ev.type === "progress") onProgress(ev as FluxProgress);
+      else if (ev.type === "error") failure = ev.message as string;
     } catch {
       /* ignore keepalives */
     }
   });
+  if (failure) throw new Error(failure);
+}
+
+export async function deleteFluxBundle(id: string): Promise<void> {
+  const res = await fetch(`/api/flux/bundles/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `flux bundle delete: ${res.status}`);
+  }
+}
+
+// --------------------------------------------------------------------------- #
+// Text encoders — the conditioning half of a FLUX.2 model. The bundled one is a
+// default, not a fixture: any checkpoint of the same architecture works, and a lighter
+// quant is the usual reason to swap ([dev]'s Mistral is 48 GB in bf16).
+// --------------------------------------------------------------------------- #
+export interface FluxTextEncoder {
+  name: string;
+  size_gb: number;
+  default_for: string[]; // labels of the models that ship with this one
+  /** Bundle ids whose architecture this encoder matches — the only models it can
+   *  serve. Computed from the checkpoint's embedding shape, so a lighter quant of the
+   *  right architecture still fits and a different architecture never does. An
+   *  encoder whose architecture can't be read (a GGUF, say) fits everything rather
+   *  than nothing, so detection can't hide a working option. */
+  fits: string[];
+}
+
+export interface FluxTextEncoders {
+  encoders: FluxTextEncoder[];
+  selected: Record<string, string>; // bundle id -> the encoder it will load
+}
+
+export async function getTextEncoders(): Promise<FluxTextEncoders> {
+  const res = await fetch("/api/flux/text-encoders");
+  if (!res.ok) throw new Error(`text encoders: ${res.status}`);
+  return res.json();
+}
+
+/** Add one from HuggingFace. These run to 48 GB and a sharded repo is fetched piece by
+ *  piece and then stitched, so progress streams the same way an install's does. */
+export async function pullTextEncoder(
+  repo: string,
+  onStatus: (message: string) => void,
+  onProgress: (p: FluxProgress) => void
+): Promise<void> {
+  const res = await fetch("/api/flux/text-encoders/pull", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `text encoder pull: ${res.status}`);
+  }
+  let failure: string | null = null;
+  await readLines(res, (line) => {
+    try {
+      const ev = JSON.parse(line);
+      if (ev.type === "status") onStatus(ev.message as string);
+      else if (ev.type === "progress") onProgress(ev as FluxProgress);
+      else if (ev.type === "error") failure = ev.message as string;
+    } catch {
+      /* ignore keepalives */
+    }
+  });
+  if (failure) throw new Error(failure);
+}
+
+/** Point a model at a different encoder. An empty name restores its default. */
+export async function selectTextEncoder(bundleId: string, name: string): Promise<void> {
+  const res = await fetch("/api/flux/text-encoders/select", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bundle_id: bundleId, name }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `select encoder: ${res.status}`);
+  }
+}
+
+export async function deleteTextEncoder(name: string): Promise<void> {
+  const res = await fetch(`/api/flux/text-encoders/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `delete encoder: ${res.status}`);
+  }
+}
+
+// --------------------------------------------------------------------------- #
+// LoRA adapters — an optional low-rank patch over a model's transformer, the
+// practical way to change what a model renders without replacing a 64 GB
+// checkpoint. Every model starts with none and can be put back to none.
+// --------------------------------------------------------------------------- #
+export interface FluxLora {
+  name: string;
+  size_mb: number; // patches, not checkpoints — MB, not GB
+  /** Transformer filenames this adapter was trained against — the only ones it can
+   *  patch. An adapter for another base binds to almost none of the layers it names
+   *  and reads as one that barely works, rather than as a mistake, so it isn't
+   *  offered. Empty means nothing installed fits it; an adapter whose base can't be
+   *  determined fits everything rather than nothing. */
+  fits: string[];
+}
+
+/** One attached adapter and its weight. */
+export interface FluxLoraPick {
+  name: string;
+  strength: number;
+  /** Whether this is the model's *control* adapter — the one that teaches it to obey
+   *  a control map, and so the one the Control tab's strength dial scales. Flagged by
+   *  the user rather than guessed from the filename: an adapter's name is a hint and
+   *  its job is something only the person who installed it knows. */
+  control?: boolean;
+}
+
+export interface FluxLoras {
+  loras: FluxLora[];
+  /** Transformer filename -> its attached picks, in attach order. An empty array
+   *  means none. Keyed per transformer, not per bundle: FLUX.1 ships dev and Kontext
+   *  together and their adapters don't cross. */
+  selected: Record<string, FluxLoraPick[]>;
+}
+
+export async function getLoras(): Promise<FluxLoras> {
+  const res = await fetch("/api/flux/loras");
+  if (!res.ok) throw new Error(`loras: ${res.status}`);
+  return res.json();
+}
+
+/** Add one from HuggingFace (owner/repo:file, or a repo holding exactly one).
+ *  Streams progress like the other pulls, though a LoRA is MBs not GBs. */
+/** Where a LoRA is being installed from. HuggingFace wants `owner/repo[:file]`;
+ *  CivitAI wants a page URL, a download URL, an AIR, or the id out of any of them. */
+export type LoraSource = "huggingface" | "civitai";
+
+export async function pullLora(
+  repo: string,
+  source: LoraSource,
+  onStatus: (message: string) => void,
+  onProgress: (p: FluxProgress) => void
+): Promise<void> {
+  const res = await fetch("/api/flux/loras/pull", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo, source }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `lora pull: ${res.status}`);
+  }
+  let failure: string | null = null;
+  await readLines(res, (line) => {
+    try {
+      const ev = JSON.parse(line);
+      if (ev.type === "status") onStatus(ev.message as string);
+      else if (ev.type === "progress") onProgress(ev as FluxProgress);
+      else if (ev.type === "error") failure = ev.message as string;
+    } catch {
+      /* ignore keepalives */
+    }
+  });
+  if (failure) throw new Error(failure);
+}
+
+/** Replace the whole set of LoRAs attached to one transformer. An empty array
+ *  detaches everything — the "None" option. */
+export async function setLoraPicks(model: string, picks: FluxLoraPick[]): Promise<void> {
+  const res = await fetch("/api/flux/loras/select", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model, picks }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `select loras: ${res.status}`);
+  }
+}
+
+/** Remove a LoRA from disk. Any model using it falls back to none. */
+export async function deleteLora(name: string): Promise<void> {
+  const res = await fetch(`/api/flux/loras/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `delete lora: ${res.status}`);
+  }
+}
+
+// --------------------------------------------------------------------------- #
+// Control preprocessors — the models that turn a source image into a control map.
+// Not transformers: they never appear in the model picker and are named by the
+// control kind a generation asks for, not chosen per generation.
+// --------------------------------------------------------------------------- #
+export interface FluxPreprocessor {
+  kind: ControlKind;
+  /** Install id, or null for one that needs no weights (canny). */
+  id: string | null;
+  installed: boolean;
+  /** True when the control kind is a built-in filter rather than a downloaded model,
+   *  so the panel offers no install or delete for it. */
+  builtin: boolean;
+  label: string;
+  note: string;
+  /** Download size before install, on-disk size after. 0 for a built-in. */
+  size_gb: number;
+}
+
+export async function getPreprocessors(): Promise<FluxPreprocessor[]> {
+  const res = await fetch("/api/flux/preprocessors");
+  if (!res.ok) throw new Error(`preprocessors: ${res.status}`);
+  return (await res.json()).preprocessors ?? [];
+}
+
+export async function installPreprocessor(
+  id: string,
+  onStatus: (message: string) => void,
+  onProgress: (p: FluxProgress) => void
+): Promise<void> {
+  const res = await fetch("/api/flux/preprocessors/install", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `preprocessor install: ${res.status}`);
+  }
+  let failure: string | null = null;
+  await readLines(res, (line) => {
+    try {
+      const ev = JSON.parse(line);
+      if (ev.type === "status") onStatus(ev.message as string);
+      else if (ev.type === "progress") onProgress(ev as FluxProgress);
+      else if (ev.type === "error") failure = ev.message as string;
+    } catch {
+      /* ignore keepalives */
+    }
+  });
+  if (failure) throw new Error(failure);
+}
+
+export async function deletePreprocessor(id: string): Promise<void> {
+  const res = await fetch(`/api/flux/preprocessors/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `delete preprocessor: ${res.status}`);
+  }
+}
+
+// --------------------------------------------------------------------------- #
+// HuggingFace token — only needed for gated repos. It lives on the server; the
+// browser can set or clear it but never reads it back.
+// --------------------------------------------------------------------------- #
+export type HfTokenSource = "saved" | "env" | null;
+
+export async function getHfToken(): Promise<HfTokenSource> {
+  const res = await fetch("/api/settings/hf-token");
+  if (!res.ok) throw new Error(`hf token: ${res.status}`);
+  return (await res.json()).source;
+}
+
+/** Validated against HuggingFace before it's saved, so a bad paste fails here. */
+export async function setHfToken(token: string): Promise<string> {
+  const res = await fetch("/api/settings/hf-token", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  const body = await res.json().catch(() => ({ detail: res.statusText }));
+  if (!res.ok) throw new Error(body.detail ?? `hf token: ${res.status}`);
+  return body.user as string;
+}
+
+export async function clearHfToken(): Promise<void> {
+  const res = await fetch("/api/settings/hf-token", { method: "DELETE" });
+  if (!res.ok) throw new Error(`hf token: ${res.status}`);
+}
+
+/** The CivitAI API key, stored and reported exactly like the HuggingFace token —
+ *  set or cleared here, never read back. Not validated on save: CivitAI has no cheap
+ *  whoami, so a bad key surfaces on the next download instead. */
+export async function getCivitaiToken(): Promise<HfTokenSource> {
+  const res = await fetch("/api/settings/civitai-token");
+  if (!res.ok) throw new Error(`civitai token: ${res.status}`);
+  return (await res.json()).source;
+}
+
+export async function setCivitaiToken(token: string): Promise<HfTokenSource> {
+  const res = await fetch("/api/settings/civitai-token", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  const body = await res.json().catch(() => ({ detail: res.statusText }));
+  if (!res.ok) throw new Error(body.detail ?? `civitai token: ${res.status}`);
+  return body.source as HfTokenSource;
+}
+
+/** Download an extra FLUX UNet from a HuggingFace repo (owner/name or
+ *  owner/name:file.gguf). Streams coarse progress. */
+export async function pullFluxModel(
+  repo: string,
+  onStatus: (message: string) => void,
+  onProgress: (p: FluxProgress) => void
+): Promise<void> {
+  const res = await fetch("/api/flux/pull", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo }),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `flux pull: ${res.status}`);
+  }
+  let failure: string | null = null;
+  await readLines(res, (line) => {
+    try {
+      const ev = JSON.parse(line);
+      if (ev.type === "status") onStatus(ev.message as string);
+      else if (ev.type === "progress") onProgress(ev as FluxProgress);
+      else if (ev.type === "error") failure = ev.message as string;
+    } catch {
+      /* ignore keepalives */
+    }
+  });
+  if (failure) throw new Error(failure);
+}
+
+export async function deleteFluxModel(name: string): Promise<void> {
+  const res = await fetch(`/api/flux/models/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `flux delete: ${res.status}`);
+  }
+}
+
+export type GenMode = "txt2img" | "img2img" | "edit" | "compose" | "control" | "animate";
+
+/** Rewrite a prompt with a local vision model that can see the attached images.
+ *  Always resolves: if Ollama is unreachable the backend falls back to its static
+ *  template and says so via `source`. */
+export async function enhancePrompt(params: {
+  prompt: string;
+  mode: GenMode;
+  model: string;
+  image_hashes?: string[];
+  ollama_url: string;
+  /** control only: how many figures the studio pose holds, and whether they
+   *  touch. The maps aren't sent to the vision model, so without this a
+   *  two-person pose is briefed as a one-person scene. */
+  subjects?: number;
+  contact?: boolean;
+}): Promise<{ prompt: string; source: "vlm" | "template" }> {
+  const res = await fetch("/api/flux/enhance", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `enhance: ${res.status}`);
+  }
+  return res.json();
 }
 
 export interface GenerateParams {
-  mode: "txt2img" | "img2img";
-  model: string;
+  mode: GenMode;
+  // The chat to record this generation in. The backend writes both turns itself,
+  // from a thread that outlives this page — which is what makes a result survive
+  // a reload. The chat must already exist (`putChat`); null skips recording.
+  chat_id?: string | null;
+  flux_model?: string | null; // which FLUX UNet ("" / null = that mode's default)
   prompt: string;
-  negative_prompt: string;
-  init_image_hash?: string | null;
+  // What the user actually typed, when `prompt` is an auto-enhancer's rewrite of
+  // it — recorded to chat history in its place so a reload shows what was shown
+  // live. Omit when they're the same.
+  display_prompt?: string | null;
+  init_image_hash?: string | null; // img2img / edit: the source image; control: the structure source
+  ref_image_hashes?: string[]; // compose: reference images to fuse
   steps?: number | null;
   guidance?: number | null;
-  strength?: number | null;
+  strength?: number | null; // img2img: how far to drift from the source
+  enhance?: boolean; // wrap create prompts in a photoreal template
   width: number;
   height: number;
+  seconds?: number | null; // animate: clip length (capped at 5s)
+  // control. All optional — a client that predates control sends none of them and
+  // gets exactly the behaviour it always did.
+  control_kinds?: ControlKind[]; // maps to derive from init_image_hash
+  control_map_hashes?: string[]; // maps to use as-is (a re-roll, or one drawn elsewhere)
+  structure_lock?: number; // 1 = maps guide only; lower starts from the source's geometry
+  control_strength?: number | null; // scales the model's control-adapter LoRA
+  canny_low?: number | null;
+  canny_high?: number | null;
   seed?: number | null;
   ollama_url: string;
 }
 
+/** A `control` event: one derived control map, emitted before the final image. */
+export interface GeneratedControlMap {
+  kind: ControlKind;
+  hash: string;
+  url: string;
+}
+
+/** The final `image` event. `url` and `model_label` are what the backend actually
+ *  did — the store's URL carries the real extension, and `model` names the
+ *  transformer that ran, which is not necessarily the one that was requested.
+ *
+ *  `kind` discriminates a still from a video. Both arrive as this one event so the
+ *  stream has a single terminal path; only what the client does with `url` differs. */
+export interface GeneratedImage {
+  kind?: "image" | "video";
+  hash: string;
+  seed: number;
+  width: number;
+  height: number;
+  url?: string;
+  model?: string;
+  model_label?: string;
+}
+
+/** One backend progress snapshot: the whole job's share done, the stage producing
+ *  it, and the sampler counters (0 outside sampling).
+ *
+ *  `live` is false when the update is the backend's own estimate ticking through a
+ *  silent model load rather than news from ComfyUI — the difference between "still
+ *  working" and "still there", and only the latter clears a stall. */
+export interface GenProgressEvent {
+  frac: number;
+  stage: string;
+  live: boolean;
+  step: number;
+  total: number;
+}
+
 interface GenerateHandlers {
   onStatus?: (message: string) => void;
-  onProgress?: (step: number, total: number) => void;
-  onImage: (r: { hash: string; seed: number; width: number; height: number }) => void;
+  onProgress?: (p: GenProgressEvent) => void;
+  onImage: (r: GeneratedImage) => void;
+  /** A control map, emitted before the image it conditioned. Zero or more. */
+  onControlMap?: (m: GeneratedControlMap) => void;
   onError?: (message: string) => void;
 }
 
@@ -245,9 +735,16 @@ export async function generate(
     }
     if (ev.type === "status") handlers.onStatus?.(ev.message as string);
     else if (ev.type === "progress")
-      handlers.onProgress?.(ev.step as number, ev.total as number);
-    else if (ev.type === "image")
-      handlers.onImage(ev as unknown as { hash: string; seed: number; width: number; height: number });
+      handlers.onProgress?.({
+        frac: Math.max(0, Math.min(1, (ev.frac as number) ?? 0)),
+        stage: (ev.stage as string) ?? "",
+        live: ev.live !== false,
+        step: (ev.step as number) ?? 0,
+        total: (ev.total as number) ?? 0,
+      });
+    else if (ev.type === "image") handlers.onImage(ev as unknown as GeneratedImage);
+    else if (ev.type === "control")
+      handlers.onControlMap?.(ev as unknown as GeneratedControlMap);
     else if (ev.type === "error") handlers.onError?.(ev.message as string);
   });
 }

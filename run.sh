@@ -30,6 +30,22 @@ if ! command -v "$PYTHON" &> /dev/null; then
     exit 1
 fi
 
+# git + curl are required to fetch ComfyUI and install Ollama. Vanilla
+# Debian/Ubuntu images often ship without them, so install them up front (before
+# the FLUX section, which may be skipped, and Ollama, which also needs curl).
+for _tool in git curl; do
+    if ! command -v "$_tool" &> /dev/null; then
+        echo -e "${YELLOW}$_tool not found. Installing...${NC}"
+        if command -v apt-get &> /dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y "$_tool"
+        fi
+        if ! command -v "$_tool" &> /dev/null; then
+            echo -e "${RED}✗ '$_tool' is required but couldn't be installed. Install it and re-run.${NC}"
+            exit 1
+        fi
+    fi
+done
+
 # Vanilla Debian/Ubuntu ship python3 without ensurepip, so `python3 -m venv`
 # fails ("ensurepip is not available"). pyenv-built Pythons bundle it, so this
 # check passes untouched on pyenv machines and only the vanilla path installs
@@ -67,10 +83,30 @@ if [ ! -f "$VENV_DIR/bin/activate" ]; then
     echo -e "${GREEN}✓ Virtual environment created${NC}"
 fi
 source "$VENV_DIR/bin/activate"
-echo -e "${BLUE}Installing backend dependencies...${NC}"
-pip install --upgrade pip --quiet
-pip install -r "$REQUIREMENTS_FILE" --quiet
-echo -e "${GREEN}✓ Backend dependencies ready${NC}"
+
+# Reinstalling on every launch costs a PyPI round-trip, which makes an offline start
+# impossible even when the venv is already complete — and this app is built to run
+# without a network once its models are down. So ask pip, offline (--no-index never
+# opens a socket), whether the venv already satisfies requirements.txt, and only reach
+# for the network when it genuinely doesn't. Takes well under a second.
+deps_satisfied() {
+    pip install -r "$REQUIREMENTS_FILE" \
+        --no-index --quiet --disable-pip-version-check --no-input > /dev/null 2>&1
+}
+
+if deps_satisfied; then
+    echo -e "${GREEN}✓ Backend dependencies already installed${NC}"
+else
+    echo -e "${BLUE}Installing backend dependencies...${NC}"
+    pip install --upgrade pip --quiet || true  # nice to have; not worth failing the run
+    if ! pip install -r "$REQUIREMENTS_FILE" --quiet; then
+        echo -e "${RED}✗ Could not install the backend dependencies.${NC}"
+        echo -e "${RED}  If you're offline: connect once so they can be fetched. After that${NC}"
+        echo -e "${RED}  this step is skipped entirely and the app starts with no network.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Backend dependencies ready${NC}"
+fi
 
 # --- Frontend build --------------------------------------------------------- #
 echo ""
@@ -100,6 +136,85 @@ fi
 npm run build
 popd > /dev/null
 echo -e "${GREEN}✓ Frontend built${NC}"
+
+# --- Image generation: the FLUX engine (ComfyUI sidecar) -------------------- #
+# ALL image generation runs here — the backend venv above holds no torch at all.
+# This installs the *engine* only. No weights: which model to run is the user's
+# choice (a 48 GB card wants FLUX.2, a 24 GB one wants quantized FLUX.1), and it's
+# 30-50 GB either way, so models are installed from the app's Models panel instead
+# of behind a startup script. See backend/flux_catalog.py.
+#
+# Idempotent and local. Chat-only users can skip the engine too: SKIP_FLUX=1 ./run.sh
+echo ""
+echo -e "${BLUE}========================================${NC}"
+echo -e "${BLUE}Setting up the image engine...${NC}"
+echo -e "${BLUE}========================================${NC}"
+echo ""
+
+FLUX_DIR="flux_runtime"
+COMFY_DIR="$FLUX_DIR/ComfyUI"
+CVENV="$FLUX_DIR/cvenv"
+# Pinned to the exact commits this workflow was validated against.
+COMFY_COMMIT="51bf508a0b1bde9416a0c221b0f33f8325305229"
+GGUF_COMMIT="6ea2651e7df66d7585f6ffee804b20e92fb38b8a"
+
+# Mirror flux_client.runtime_ready(): the venv and ComfyUI, not the weights.
+flux_installed() {
+    [ -x "$CVENV/bin/python" ] || return 1
+    [ -f "$COMFY_DIR/main.py" ] || return 1
+    return 0
+}
+
+# Report what's installed, and tell a fresh machine where to get a model.
+models_hint() {
+    local unets
+    unets="$(ls "$COMFY_DIR/models/unet"/*.gguf "$COMFY_DIR/models/unet"/*.safetensors 2>/dev/null | wc -l)"
+    if [ "$unets" -gt 0 ]; then
+        echo -e "${GREEN}✓ $unets image model file(s) installed${NC}"
+    else
+        echo -e "${YELLOW}No image model installed yet — open the app and install one in the${NC}"
+        echo -e "${YELLOW}Models panel (FLUX.2 [dev] recommended; needs ~50 GB and a 48 GB GPU).${NC}"
+    fi
+}
+
+if [ "${SKIP_FLUX:-0}" = "1" ]; then
+    echo -e "${YELLOW}SKIP_FLUX=1 — skipping the image engine (image generation will be unavailable).${NC}"
+elif flux_installed; then
+    echo -e "${GREEN}✓ Image engine already installed${NC}"
+    models_hint
+else
+    # 1. ComfyUI + the GGUF loader node, pinned to known-good commits.
+    if [ ! -f "$COMFY_DIR/main.py" ]; then
+        echo -e "${YELLOW}Cloning ComfyUI...${NC}"
+        git clone --quiet https://github.com/comfyanonymous/ComfyUI "$COMFY_DIR"
+        git -C "$COMFY_DIR" checkout --quiet "$COMFY_COMMIT"
+    fi
+    if [ ! -d "$COMFY_DIR/custom_nodes/ComfyUI-GGUF" ]; then
+        echo -e "${YELLOW}Cloning ComfyUI-GGUF loader node...${NC}"
+        git clone --quiet https://github.com/city96/ComfyUI-GGUF \
+            "$COMFY_DIR/custom_nodes/ComfyUI-GGUF"
+        git -C "$COMFY_DIR/custom_nodes/ComfyUI-GGUF" checkout --quiet "$GGUF_COMMIT"
+    fi
+
+    # 2. ComfyUI's own venv — CUDA 12.1 torch (like the backend) + node deps.
+    if [ ! -x "$CVENV/bin/python" ]; then
+        echo -e "${YELLOW}Creating ComfyUI virtual environment...${NC}"
+        rm -rf "$CVENV"
+        "$PYTHON" -m venv "$CVENV"
+    fi
+    echo -e "${BLUE}Installing ComfyUI dependencies (torch + runtime, this is slow)...${NC}"
+    "$CVENV/bin/pip" install --upgrade pip --quiet
+    "$CVENV/bin/pip" install --quiet --extra-index-url https://download.pytorch.org/whl/cu121 \
+        -r "$COMFY_DIR/requirements.txt"
+    "$CVENV/bin/pip" install --quiet -r "$COMFY_DIR/custom_nodes/ComfyUI-GGUF/requirements.txt"
+
+    if flux_installed; then
+        echo -e "${GREEN}✓ Image engine ready${NC}"
+        models_hint
+    else
+        echo -e "${RED}✗ Image engine setup incomplete — image generation unavailable.${NC}"
+    fi
+fi
 
 # --- Ollama ----------------------------------------------------------------- #
 echo ""
