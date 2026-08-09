@@ -17,8 +17,8 @@ Built with a **React (Vite + TypeScript)** frontend and a **FastAPI** backend th
   remove, unload from VRAM, and view running models.
 - **Image generation** — create, edit and combine images locally on FLUX. Models are installed
   from the app, not at setup; see below.
-- **Agent mode** — say what you want in plain words and a local model picks the workflow, picks
-  which images it applies to, and writes the prompt. See below.
+- **Agent mode** (**beta**) — say what you want in plain words and a local model picks the workflow,
+  picks which images it applies to, and writes the prompt. See below.
 - **In-app Ollama updates** — the UI tells you when a newer Ollama is available and lets you choose
   to upgrade with one click (local installs only). Updates are **opt-in**, never forced.
 - **Per-image rotate** in the composer (client-side, via canvas).
@@ -65,7 +65,12 @@ You can also add any single-file FLUX.1 transformer from a HuggingFace repo (`ow
 `owner/model:file.safetensors`) from that panel. Those extras run on FLUX.1's text encoder, so the
 FLUX.1 model has to be installed alongside them.
 
-## Agent mode
+## Agent mode (beta)
+
+> **Beta.** This one is not finished. The agent picks the workflow, the images and the prompt for
+> you, and it gets those calls wrong often enough to notice — and when it does, the result still
+> looks like a normal answer rather than an error. Use **🎨 Generate** when you already know what
+> you want; Agent is for when you'd rather describe it and see.
 
 The **🤖 Agent** tab is the Generate tab without the homework. Instead of choosing Create / Edit /
 Combine yourself and arranging the attachments so the right one lands first, you describe what you

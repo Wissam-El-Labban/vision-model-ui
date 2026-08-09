@@ -375,16 +375,30 @@ export default function Composer({
             title={
               models.agent.length === 0
                 ? noAgentModel
-                : "Say what you want — the model picks the workflow, picks the images and writes the prompt"
+                : "Beta — say what you want and the model picks the workflow, the images " +
+                  "and the prompt. It gets those choices wrong sometimes; Generate is the " +
+                  "one to use when you already know what you want."
             }
           >
             🤖 Agent
+            {/* The badge rides on the tab, not just the hint below it: the hint only
+                renders once you're already in agent mode, so on its own it can't warn
+                anyone deciding whether to switch. */}
+            <span className="beta-badge">beta</span>
           </button>
         </div>
       )}
 
       {agentMode && (
         <div className="agent-hint">
+          {/* Say what "beta" actually means here, rather than leaving the badge to
+              imply it. The failure mode is a wrong *choice* — the wrong workflow, the
+              wrong image — not a crash, so it's worth naming: it looks like it worked. */}
+          <span className="beta-note">
+            Beta — the agent picks the workflow, the images and the prompt for you, and
+            it gets those calls wrong often enough to notice. Switch to 🎨 Generate to
+            drive the model yourself.
+          </span>{" "}
           {images.length || pinnedCount ? (
             <>
               Ask a question about these images, or ask for a new one. The agent sees

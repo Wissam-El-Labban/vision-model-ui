@@ -2253,6 +2253,32 @@ textarea {
   cursor: not-allowed;
 }
 
+/* Agent mode is not finished, and the tab has to say so before it's clicked.
+   Amber rather than red: this is "expect rough edges", not "something is wrong". */
+.beta-badge {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+}
+
+/* On the active tab the amber-on-purple loses too much contrast, so the badge
+   inverts to sit on the accent fill instead. */
+.mode-tab.active .beta-badge {
+  border-color: rgba(255, 255, 255, 0.55);
+  color: #fff;
+}
+
+.beta-note {
+  color: var(--amber);
+}
+
 /* Agent mode has no sub-tabs and no per-op hints — picking the workflow is the
    agent's job — so one line stands in for both. */
 .agent-hint {
