@@ -39,6 +39,7 @@ _DIRS = {"unet": UNET_DIR, "clip": CLIP_DIR, "text_encoders": TE_DIR, "vae": VAE
 
 FAMILY_FLUX1 = "flux1"
 FAMILY_FLUX2 = "flux2"
+FAMILY_QWEN = "qwen"
 FAMILY_WAN = "wan"
 
 ROLE_CREATE = "create"
@@ -148,6 +149,66 @@ BUNDLES = [
                 # Qwen3's tokenizer ships inside ComfyUI, so nothing to embed.
                 "embed": None,
             },
+        ],
+    },
+    {
+        "id": "qwen-image-2512-fp8",
+        "label": "Qwen-Image 2512 — fp8",
+        "family": FAMILY_QWEN,
+        "roles": [ROLE_CREATE],
+        "blurb": ("Alibaba's 20B text-to-image model, the December 2512 refresh. The best "
+                  "there is at rendering legible text inside an image, English and Chinese "
+                  "alike. Ungated — no HuggingFace token needed. Creates only; edits and "
+                  "combines still run on FLUX.2."),
+        "size_gb": 30.1,
+        # Estimate: the fp8 transformer resident (20.4 GB) plus activations at Qwen's
+        # native 1328x1328. The text encoder is a separate 9.4 GB load that ComfyUI
+        # evicts before sampling starts. Measure on real hardware and correct this.
+        "vram_gb": 28,
+        "gated": False,
+        "unet": "qwen_image_2512_fp8_e4m3fn.safetensors",
+        # Already fp8 — casting it again would only degrade it, same as FLUX.2's mix.
+        "weight_dtype": "default",
+        # Qwen conditions on Qwen2.5-VL-7B. ComfyUI's `qwen_image` CLIP type reads it
+        # directly, so unlike FLUX.2's encoders there is nothing to stitch or re-key.
+        "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+        "vae": "qwen_image_vae.safetensors",
+        # Qwen publishes diffusers-sharded weights (Qwen/Qwen-Image-2512); these are
+        # ComfyUI's single-file repackages of the same release, which is what CLIPLoader
+        # and UNETLoader take. Same arrangement as the Wan bundle below.
+        "files": [
+            ("Comfy-Org/Qwen-Image_ComfyUI",
+             "split_files/diffusion_models/qwen_image_2512_fp8_e4m3fn.safetensors", "unet"),
+            ("Comfy-Org/Qwen-Image_ComfyUI",
+             "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors", "text_encoders"),
+            ("Comfy-Org/Qwen-Image_ComfyUI",
+             "split_files/vae/qwen_image_vae.safetensors", "vae"),
+        ],
+    },
+    {
+        "id": "qwen-image-fp8",
+        "label": "Qwen-Image — fp8",
+        "family": FAMILY_QWEN,
+        "roles": [ROLE_CREATE],
+        "blurb": ("The original August 2025 Qwen-Image, superseded by 2512 above — the same "
+                  "architecture, retrained. Worth installing only to compare the two: it "
+                  "shares 2512's text encoder and VAE, so it costs ~20 GB once 2512 is in."),
+        # The whole bundle. `needed_gb` subtracts whatever 2512 already put on disk, so
+        # the button shows the ~20 GB that is actually outstanding.
+        "size_gb": 30.1,
+        "vram_gb": 28,
+        "gated": False,
+        "unet": "qwen_image_fp8_e4m3fn.safetensors",
+        "weight_dtype": "default",
+        "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+        "vae": "qwen_image_vae.safetensors",
+        "files": [
+            ("Comfy-Org/Qwen-Image_ComfyUI",
+             "split_files/diffusion_models/qwen_image_fp8_e4m3fn.safetensors", "unet"),
+            ("Comfy-Org/Qwen-Image_ComfyUI",
+             "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors", "text_encoders"),
+            ("Comfy-Org/Qwen-Image_ComfyUI",
+             "split_files/vae/qwen_image_vae.safetensors", "vae"),
         ],
     },
     {

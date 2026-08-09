@@ -60,8 +60,8 @@ export function resolveFlux(picked: string, models: FluxModel[], role: FluxRole)
  * of the same family, gets its own value rather than inheriting dev's. FLUX.1
  * is mode-scaled: dev needs ~3.5 to bind a text-only prompt, while Kontext
  * wants ~2.5 — at 3.5 it clings to the reference image and ignores the
- * instruction. Wan's 3.5 is a different quantity that happens to share the
- * number: a real CFG scale over a real negative branch, not FLUX's distilled
+ * instruction. Wan's 3.5 and Qwen's 4 are a different quantity that happens to
+ * share the scale: a real CFG over a real negative branch, not FLUX's distilled
  * guidance embedding. Mirrors the backend's `_default_guidance`. Resolves
  * through `resolveFlux` so the guidance follows the model that will actually
  * run, not whichever one happens to sort first. */
@@ -70,6 +70,7 @@ export function guidanceFor(op: GenOp, models: FluxModel[], picked = ""): number
   const name = resolveFlux(picked, models, role);
   const pickedModel = models.find((m) => m.name === name);
   if (pickedModel?.family === "wan") return 3.5;
+  if (pickedModel?.family === "qwen") return 4;
   if (pickedModel?.family === "flux2") {
     return pickedModel.bundle === "flux2-klein-9b" ? 3.5 : 2.5;
   }
@@ -79,13 +80,16 @@ export function guidanceFor(op: GenOp, models: FluxModel[], picked = ""): number
 /** The step count a mode starts at, which depends on the model that will run it.
  *
  * Every model defaults to 20 except [klein] — a distilled 9B variant that, like
- * Wan's Lightning LoRA path, converges in far fewer steps — and FLUX.2 [dev],
- * which wants more to hit its ceiling. Mirrors the backend's `_default_steps`;
- * resolves through `resolveFlux` for the same reason `guidanceFor` does. */
+ * Wan's Lightning LoRA path, converges in far fewer steps — FLUX.2 [dev], which
+ * wants more to hit its ceiling, and Qwen-Image 2512, whose 50 is its own
+ * published setting. Mirrors the backend's `_default_steps`; resolves through
+ * `resolveFlux` for the same reason `guidanceFor` does. */
 export function stepsFor(op: GenOp, models: FluxModel[], picked = ""): number {
   const name = resolveFlux(picked, models, roleFor(op));
   const pickedModel = models.find((m) => m.name === name);
   if (pickedModel?.bundle === "flux2-klein-9b") return 8;
+  if (pickedModel?.family === "qwen")
+    return pickedModel.bundle === "qwen-image-fp8" ? 20 : 50;
   if (pickedModel?.family === "flux2") return 35;
   return 20;
 }

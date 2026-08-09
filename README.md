@@ -42,17 +42,24 @@ engine entirely with `SKIP_FLUX=1 ./run.sh` if you only want chat.
 
 Install a model from the sidebar's **🖼️ Image Models** panel. Nothing generates until you do.
 
-| Model | Download | VRAM | Notes |
-| --- | --- | --- | --- |
-| **FLUX.2 [dev]** — fp8 | ~50 GB | 48 GB | Best photorealism. One model does create, edit *and* combine. |
-| **FLUX.1 dev + Kontext** — Q8 GGUF | ~31 GB | 24 GB | Quantized; two transformers, dev creates and Kontext edits. |
+| Model | Download | VRAM | Does | Notes |
+| --- | --- | --- | --- | --- |
+| **FLUX.2 [dev]** | ~100 GB | 46 GB | create + edit | Best photorealism. Gated. bf16 on disk, cast to fp8 at load. |
+| **FLUX.2 [klein] 9B** | ~35 GB | 32 GB | create + edit | Distilled 9B, runs in bf16 with no quantization, 8 steps. Gated. |
+| **Qwen-Image 2512** — fp8 | ~30 GB | 28 GB | create | The best there is at legible text inside an image, English and Chinese. Ungated. |
+| **Qwen-Image** — fp8 | ~30 GB | 28 GB | create | The original; superseded by 2512. Shares its encoder and VAE, so ~20 GB if 2512 is installed. |
+| **Wan 2.2 I2V A14B** — fp16 | ~69 GB | 80 GB | animate | One image → a 5-second 720p video. Ungated. |
 
-Downloads resume if interrupted, and the weights are used entirely offline afterwards.
+The list is in quality order, and the first installed model that can serve a mode is what that mode
+runs on by default — so installing Qwen does not displace FLUX.2 for Create; pick it in the model
+picker. Qwen creates only; edit and combine stay on FLUX.2.
 
-Both models above are ungated. A **HuggingFace token** is only needed to install a gated model
-(Black Forest Labs' own repos, for instance): paste one into the same panel — it is validated on
-save, stored `0600` on the server, and never sent back to the browser. `HF_TOKEN` in the
-environment works too.
+Downloads resume if interrupted, and the weights are used entirely offline afterwards. The panel
+checks free disk space before starting and refuses rather than filling the disk mid-download.
+
+A **HuggingFace token** is only needed for the gated models (Black Forest Labs' own repos): paste
+one into the same panel — it is validated on save, stored `0600` on the server, and never sent back
+to the browser. `HF_TOKEN` in the environment works too.
 
 You can also add any single-file FLUX.1 transformer from a HuggingFace repo (`owner/model`, or
 `owner/model:file.safetensors`) from that panel. Those extras run on FLUX.1's text encoder, so the

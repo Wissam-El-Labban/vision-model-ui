@@ -94,6 +94,30 @@ FLUX2_GUIDANCE = 2.5
 KLEIN_GUIDANCE = 3.5
 GUIDANCE_MIN, GUIDANCE_MAX = 0.5, 10.0
 
+# Qwen-Image, from ComfyUI's own templates for it (image_qwen_Image_2512.json and
+# image_qwen_image.json, shipped in comfyui_workflow_templates).
+#
+# QWEN_CFG is a real CFG scale over a real negative branch — the same quantity Wan's
+# is, and not the distilled guidance embedding FLUX rides on FluxGuidance. That costs
+# two forward passes per step, which is why the step counts here are the models' own
+# reference settings rather than something tuned down: at cfg 1 the negative branch
+# does nothing and the output falls apart.
+QWEN_STEPS = 50           # 2512's reference setting
+QWEN_BASE_STEPS = 20      # the original's
+QWEN_CFG = 4.0
+# Qwen samples on a shifted sigma schedule that only ModelSamplingAuraFlow applies;
+# without the patch the sampler runs on the wrong schedule and returns mush.
+QWEN_SHIFT = 3.1
+# Qwen's native resolution is 1328x1328 — ~1.76 MP, not FLUX's 1 MP.
+QWEN_PIXELS = 1328 * 1328
+# ComfyUI's 2512 template ships this negative prompt, and at cfg 4 the uncond branch
+# is live so it is actually read (the base Qwen template ships an empty one). Roughly:
+# "low resolution, low quality, deformed limbs, deformed fingers, oversaturated, waxy,
+# featureless faces, over-smoothed, AI-looking, muddled composition, blurry or
+# distorted text". This app exposes no negative prompt field, so it is a constant.
+QWEN_NEGATIVE = ("低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，"
+                 "人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲")
+
 # How the model lays out multiple reference images. See `_conditioning`.
 REF_METHOD = "offset"
 
@@ -299,6 +323,13 @@ def _flux2_resolution(pil) -> tuple[int, int]:
     return _area_resolution(pil, 1024 * 1024)
 
 
+def _qwen_resolution(pil) -> tuple[int, int]:
+    """The same area fit, at Qwen's larger native budget. Mirrors `_scale_node`'s
+    ImageScaleToTotalPixels for the family, so the size reported up front is the size
+    that is actually sampled."""
+    return _area_resolution(pil, QWEN_PIXELS)
+
+
 def _wan_resolution(pil) -> tuple[int, int]:
     """The 720p-budget shape a Wan I2V start frame is sampled at.
 
@@ -326,6 +357,8 @@ def _source_resolution(unet, pil) -> tuple[int, int]:
         return _wan_resolution(pil)
     if fam == cat.FAMILY_FLUX2:
         return _flux2_resolution(pil)
+    if fam == cat.FAMILY_QWEN:
+        return _qwen_resolution(pil)
     return _kontext_resolution(pil)
 
 
@@ -333,6 +366,8 @@ def _default_guidance(unet, role: str) -> float:
     fam = cat.family_of(unet)
     if fam == cat.FAMILY_WAN:
         return WAN_CFG
+    if fam == cat.FAMILY_QWEN:
+        return QWEN_CFG
     if fam == cat.FAMILY_FLUX2:
         bundle = cat.bundle_of_unet(unet)
         if bundle and bundle["id"] == "flux2-klein-9b":
@@ -345,6 +380,10 @@ def _default_steps(unet) -> int:
     bundle = cat.bundle_of_unet(unet)
     if bundle and bundle["id"] == "flux2-klein-9b":
         return KLEIN_STEPS
+    if cat.family_of(unet) == cat.FAMILY_QWEN:
+        # 2512 is published at 50 steps, the original at 20. Both are the models' own
+        # reference settings; neither is distilled, so cutting them costs quality.
+        return QWEN_BASE_STEPS if bundle and bundle["id"] == "qwen-image-fp8" else QWEN_STEPS
     if cat.family_of(unet) == cat.FAMILY_FLUX2:
         return FLUX2_STEPS
     return DEFAULT_STEPS
@@ -671,6 +710,24 @@ def _loaders(unet: str, control_scale: float | None = None) -> dict:
             "clip": _clip_node(clip, "flux2"),
             "vae": {"class_type": "VAELoader", "inputs": {"vae_name": b["vae"]}},
         }, control_scale)
+    if cat.family_of(unet) == cat.FAMILY_QWEN:
+        b = cat.bundle_of_unet(unet)
+        g = _with_lora(unet, {
+            "unet": _unet_node(unet),
+            # One encoder, not a pair: ComfyUI's `qwen_image` CLIP type reads
+            # Qwen2.5-VL directly. No `_check_encoder_layout` — that check is keyed to
+            # FLUX.2's detection path and would reject a perfectly good Qwen encoder.
+            "clip": _clip_node(b["clip"], "qwen_image"),
+            "vae": {"class_type": "VAELoader", "inputs": {"vae_name": b["vae"]}},
+        }, control_scale)
+        # The sigma shift is a *model patch*, so it has to be the last one on the
+        # chain — after any LoRA. `_with_lora` has already made `unet` the patched
+        # output, so take the same trick one step further: the AuraFlow node inherits
+        # the name every graph builder refers to, and nothing downstream changes.
+        g["unet_pre"] = g.pop("unet")
+        g["unet"] = {"class_type": "ModelSamplingAuraFlow",
+                     "inputs": {"model": ["unet_pre", 0], "shift": QWEN_SHIFT}}
+        return g
     return _with_lora(unet, {
         "unet": _unet_node(unet),
         "clip": _dual_clip_node(CLIP_L, T5, "flux"),
@@ -678,11 +735,16 @@ def _loaders(unet: str, control_scale: float | None = None) -> dict:
     }, control_scale)
 
 
-def _sampler(g: dict, unet, latent_src, steps, seed, width, height, denoise=1.0) -> None:
+def _sampler(g: dict, unet, latent_src, steps, seed, width, height, denoise=1.0,
+             guidance=1.0) -> None:
     """Add the sampling nodes, writing the output latent to `g["sampler"]` output 0.
 
     FLUX.1 samples through KSampler at cfg=1.0 — the negative branch is unused, which
     is why this app exposes no negative prompt; guidance rides on FluxGuidance instead.
+
+    Qwen shares that KSampler but not that arrangement: it reads no guidance embedding,
+    so the scale has to be a real cfg over a real negative branch. Hence `guidance`,
+    which every other family ignores.
 
     FLUX.2 has no negative branch at all (a BasicGuider, not a CFG pair) and needs a
     sequence-length-aware sigma schedule, which only Flux2Scheduler computes — the
@@ -691,10 +753,11 @@ def _sampler(g: dict, unet, latent_src, steps, seed, width, height, denoise=1.0)
     Flux2Scheduler into SamplerCustomAdvanced.
     """
     if cat.family_of(unet) != cat.FAMILY_FLUX2:
+        cfg = guidance if cat.family_of(unet) == cat.FAMILY_QWEN else 1.0
         g["sampler"] = {
             "class_type": "KSampler",
             "inputs": {"model": ["unet", 0], "positive": ["guide", 0], "negative": ["neg", 0],
-                       "latent_image": list(latent_src), "seed": seed, "steps": steps, "cfg": 1.0,
+                       "latent_image": list(latent_src), "seed": seed, "steps": steps, "cfg": cfg,
                        "sampler_name": "euler", "scheduler": "simple", "denoise": denoise},
         }
         return
@@ -728,11 +791,19 @@ def _conditioning(unet, prompt: str, guidance: float, ref_latents=()) -> dict:
     reference arrives as its own token block with its own RoPE offsets — the images
     stay distinct. FLUX.2 and Kontext both understand this; a plain FLUX.1 dev
     transformer ignores it, so create graphs pass nothing.
+
+    Qwen returns early: its negative branch is live (see `_sampler`) so it gets real
+    negative text, and it has no FluxGuidance node to end on — `guide` is simply the
+    positive encode. Its bundles are create-only, so `ref_latents` is always empty.
     """
     flux2 = cat.family_of(unet) == cat.FAMILY_FLUX2
     g = {"pos": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}}}
     if not flux2:
         g["neg"] = {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["clip", 0]}}
+    if cat.family_of(unet) == cat.FAMILY_QWEN:
+        g["neg"]["inputs"]["text"] = QWEN_NEGATIVE
+        g["guide"] = g.pop("pos")
+        return g
     src = "pos"
     for i, lat in enumerate(ref_latents):
         node = f"ref{i}"
@@ -756,7 +827,11 @@ def _conditioning(unet, prompt: str, guidance: float, ref_latents=()) -> dict:
 
 def _empty_latent(unet, width, height) -> dict:
     """FLUX.1's VAE is 16-channel (EmptySD3LatentImage — the 4-channel SD latent would
-    decode to noise); FLUX.2's is 128-channel and has its own node."""
+    decode to noise); FLUX.2's is 128-channel and has its own node.
+
+    Qwen falls in with FLUX.1 here, and does so correctly rather than by accident: its
+    latent format is Wan21 (comfy/supported_models.py), which is also 16-channel.
+    """
     cls = ("EmptyFlux2LatentImage" if cat.family_of(unet) == cat.FAMILY_FLUX2
            else "EmptySD3LatentImage")
     return {"class_type": cls, "inputs": {"width": width, "height": height, "batch_size": 1}}
@@ -765,11 +840,17 @@ def _empty_latent(unet, width, height) -> dict:
 def _scale_node(unet, src) -> dict:
     """Snap an input image to a resolution its family was trained on. Kontext has a
     fixed table of ~1 MP shapes; FLUX.2 just wants ~1 MP on a multiple of 16 (its VAE
-    downscale), which keeps the token count — and the VRAM — bounded either way."""
-    if cat.family_of(unet) == cat.FAMILY_FLUX2:
+    downscale), which keeps the token count — and the VRAM — bounded either way.
+
+    Qwen takes the same area fit at its own, larger budget: it is trained at 1328x1328
+    and squeezing it into Kontext's 1 MP table throws away resolution it can use.
+    """
+    fam = cat.family_of(unet)
+    if fam == cat.FAMILY_FLUX2 or fam == cat.FAMILY_QWEN:
+        megapixels = round(QWEN_PIXELS / 1e6, 2) if fam == cat.FAMILY_QWEN else 1.0
         return {"class_type": "ImageScaleToTotalPixels",
                 "inputs": {"image": list(src), "upscale_method": "area",
-                           "megapixels": 1.0, "resolution_steps": 16}}
+                           "megapixels": megapixels, "resolution_steps": 16}}
     return {"class_type": "FluxKontextImageScale", "inputs": {"image": list(src)}}
 
 
@@ -787,7 +868,7 @@ def _txt2img_graph(prompt, width, height, steps, guidance, seed, prefix, unet):
     g = _loaders(unet)
     g.update(_conditioning(unet, prompt, guidance))
     g["latent"] = _empty_latent(unet, width, height)
-    _sampler(g, unet, ("latent", 0), steps, seed, width, height)
+    _sampler(g, unet, ("latent", 0), steps, seed, width, height, guidance=guidance)
     g.update(_tail(prefix))
     return g
 
@@ -801,7 +882,8 @@ def _img2img_graph(image_name, prompt, strength, steps, guidance, seed, width, h
     g["img"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
     g["scale"] = _scale_node(unet, ("img", 0))
     g["enc"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["scale", 0], "vae": ["vae", 0]}}
-    _sampler(g, unet, ("enc", 0), steps, seed, width, height, denoise=strength)
+    _sampler(g, unet, ("enc", 0), steps, seed, width, height, denoise=strength,
+             guidance=guidance)
     g.update(_tail(prefix))
     return g
 
@@ -828,7 +910,7 @@ def _edit_graph(scene_name, ref_names, prompt, steps, guidance, seed, width, hei
     scene = _encode_image(g, unet, scene_name, "enc")
     refs = [scene] + [_encode_image(g, unet, n, f"src{i}") for i, n in enumerate(ref_names)]
     g.update(_conditioning(unet, prompt, guidance, ref_latents=refs))
-    _sampler(g, unet, scene, steps, seed, width, height)
+    _sampler(g, unet, scene, steps, seed, width, height, guidance=guidance)
     g.update(_tail(prefix))
     return g
 
@@ -848,7 +930,7 @@ def _compose_graph(image_names, prompt, width, height, steps, guidance, seed, pr
     refs = [_encode_image(g, unet, n, f"src{i}") for i, n in enumerate(image_names)]
     g.update(_conditioning(unet, prompt, guidance, ref_latents=refs))
     g["latent"] = _empty_latent(unet, width, height)
-    _sampler(g, unet, ("latent", 0), steps, seed, width, height)
+    _sampler(g, unet, ("latent", 0), steps, seed, width, height, guidance=guidance)
     g.update(_tail(prefix))
     return g
 
@@ -1007,7 +1089,8 @@ def _control_graph(control_names, ref_names, source_name, lock, control_scale, p
     else:
         g["latent"] = _empty_latent(unet, width, height)
         latent = ("latent", 0)
-    _sampler(g, unet, latent, steps, seed, width, height, denoise=min(lock, 1.0))
+    _sampler(g, unet, latent, steps, seed, width, height, denoise=min(lock, 1.0),
+             guidance=guidance)
     g.update(_tail(prefix))
     return g
 
@@ -1166,7 +1249,7 @@ _NODE_SECONDS = {
     "CLIPLoader": 3.0, "DualCLIPLoader": 3.0, "CLIPLoaderGGUF": 20.0,
     "VAELoader": 1.0,
     "LoraLoaderModelOnly": 5.0, "LoraLoader": 5.0,
-    "ModelSamplingSD3": 0.5,
+    "ModelSamplingSD3": 0.5, "ModelSamplingAuraFlow": 0.5,
     # Where the text encoder is really loaded, on the run that loads it.
     "CLIPTextEncode": 60.0,
     "LoadImage": 0.5, "VAEEncode": 2.0, "WanImageToVideo": 4.0,
@@ -1216,6 +1299,7 @@ _STAGE_LABELS = {
     "Flux2Scheduler": "Preparing the schedule", "SplitSigmas": "Preparing the schedule",
     "RandomNoise": "Preparing the noise", "BasicGuider": "Preparing the sampler",
     "KSamplerSelect": "Preparing the sampler", "ModelSamplingSD3": "Preparing the sampler",
+    "ModelSamplingAuraFlow": "Preparing the sampler",
     "WanImageToVideo": "Preparing the frames",
     "KSampler": "Generating", "KSamplerAdvanced": "Generating",
     "SamplerCustomAdvanced": "Generating",
@@ -2855,15 +2939,15 @@ def clip_for(bundle: dict) -> str:
 def encoder_for(unet: str) -> str:
     """The text encoder(s) `_loaders` will attach to this transformer, for display.
 
-    Mirrors `_loaders`'s three cases exactly — FLUX.2's swappable pick, Wan's bundled
-    umt5, FLUX.1's fixed CLIP-L + T5 pair — so the header can't name one encoder while
-    the graph loads another. `family_of` returns FLUX.1 for a user-added UNet with no
-    bundle, which is the same fallback `_loaders` takes.
+    Mirrors `_loaders`'s four cases exactly — FLUX.2's swappable pick, Qwen's and Wan's
+    bundled single encoder, FLUX.1's fixed CLIP-L + T5 pair — so the header can't name
+    one encoder while the graph loads another. `family_of` returns FLUX.1 for a
+    user-added UNet with no bundle, which is the same fallback `_loaders` takes.
     """
     family = cat.family_of(unet)
     if family == cat.FAMILY_FLUX2:
         return clip_for(cat.bundle_of_unet(unet))
-    if family == cat.FAMILY_WAN:
+    if family in (cat.FAMILY_QWEN, cat.FAMILY_WAN):
         b = cat.bundle_of_unet(unet)
         return b["clip"] if b else ""
     return f"{CLIP_L} + {T5}"
