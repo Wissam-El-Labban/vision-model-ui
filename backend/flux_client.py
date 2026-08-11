@@ -105,6 +105,17 @@ GUIDANCE_MIN, GUIDANCE_MAX = 0.5, 10.0
 QWEN_STEPS = 50           # 2512's reference setting
 QWEN_BASE_STEPS = 20      # the original's
 QWEN_CFG = 4.0
+# The edit models are separate checkpoints with their own published settings, and they
+# are not the create ones' — 2511 runs longer and lower, the original shorter and lower
+# still. Straight from ComfyUI's image_qwen_image_edit_2511.json / _edit.json.
+QWEN_EDIT_STEPS, QWEN_EDIT_CFG = 40, 3.0
+QWEN_EDIT1_STEPS, QWEN_EDIT1_CFG = 20, 2.5
+# CFGNorm rescales the CFG result back to the conditional's norm. Every Qwen *edit*
+# template ships it at 1.0 and none of the create ones do: at cfg 3-4 over a real
+# uncond branch the combined prediction drifts hot, and an edit shows it as a colour
+# shift against the source that a from-scratch generation has nothing to be judged
+# against. Not applied to the create models, to stay with their published graphs.
+QWEN_CFG_NORM = 1.0
 # Qwen samples on a shifted sigma schedule that only ModelSamplingAuraFlow applies;
 # without the patch the sampler runs on the wrong schedule and returns mush.
 QWEN_SHIFT = 3.1
@@ -117,6 +128,23 @@ QWEN_PIXELS = 1328 * 1328
 # distorted text". This app exposes no negative prompt field, so it is a constant.
 QWEN_NEGATIVE = ("低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，"
                  "人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲")
+# Per checkpoint, because within this one family the published settings differ by more
+# than the families do from each other. Keyed by bundle id; anything not listed (a
+# future Qwen bundle, or a user-added Qwen transformer) falls back to the create
+# defaults, which is the safer of the two — too many steps costs time, too few costs
+# the image. `flux.ts` mirrors both tables; they must not drift apart.
+_QWEN_STEPS_BY_ID = {
+    "qwen-image-2512-fp8": QWEN_STEPS,
+    "qwen-image-fp8": QWEN_BASE_STEPS,
+    "qwen-image-edit-2511": QWEN_EDIT_STEPS,
+    "qwen-image-edit": QWEN_EDIT1_STEPS,
+}
+_QWEN_CFG_BY_ID = {
+    "qwen-image-2512-fp8": QWEN_CFG,
+    "qwen-image-fp8": QWEN_CFG,
+    "qwen-image-edit-2511": QWEN_EDIT_CFG,
+    "qwen-image-edit": QWEN_EDIT1_CFG,
+}
 
 # How the model lays out multiple reference images. See `_conditioning`.
 REF_METHOD = "offset"
@@ -357,7 +385,9 @@ def _source_resolution(unet, pil) -> tuple[int, int]:
         return _wan_resolution(pil)
     if fam == cat.FAMILY_FLUX2:
         return _flux2_resolution(pil)
-    if fam == cat.FAMILY_QWEN:
+    # Only the create models get Qwen's larger budget; the edit ones run Kontext's
+    # table, exactly as `_scale_node` wires them.
+    if fam == cat.FAMILY_QWEN and not _qwen_edits(unet):
         return _qwen_resolution(pil)
     return _kontext_resolution(pil)
 
@@ -367,7 +397,7 @@ def _default_guidance(unet, role: str) -> float:
     if fam == cat.FAMILY_WAN:
         return WAN_CFG
     if fam == cat.FAMILY_QWEN:
-        return QWEN_CFG
+        return _QWEN_CFG_BY_ID.get((cat.bundle_of_unet(unet) or {}).get("id"), QWEN_CFG)
     if fam == cat.FAMILY_FLUX2:
         bundle = cat.bundle_of_unet(unet)
         if bundle and bundle["id"] == "flux2-klein-9b":
@@ -381,9 +411,10 @@ def _default_steps(unet) -> int:
     if bundle and bundle["id"] == "flux2-klein-9b":
         return KLEIN_STEPS
     if cat.family_of(unet) == cat.FAMILY_QWEN:
-        # 2512 is published at 50 steps, the original at 20. Both are the models' own
-        # reference settings; neither is distilled, so cutting them costs quality.
-        return QWEN_BASE_STEPS if bundle and bundle["id"] == "qwen-image-fp8" else QWEN_STEPS
+        # Every Qwen checkpoint publishes its own settings and they are all different.
+        # None of them is distilled, so cutting the count costs quality rather than
+        # only time — that trade is the Lightning LoRAs' job, not the default's.
+        return _QWEN_STEPS_BY_ID.get((bundle or {}).get("id"), QWEN_STEPS)
     if cat.family_of(unet) == cat.FAMILY_FLUX2:
         return FLUX2_STEPS
     return DEFAULT_STEPS
@@ -652,6 +683,44 @@ def _dual_clip_node(name1: str, name2: str, kind: str) -> dict:
             "inputs": {"clip_name1": name1, "clip_name2": name2, "type": kind}}
 
 
+def _qwen_edits(unet: str) -> bool:
+    """Whether this Qwen model is one of the *edit* checkpoints.
+
+    Qwen splits the two jobs across separate transformers, so within the family the
+    graph still forks: the edit models condition through TextEncodeQwenImageEdit* and
+    take CFGNorm, the create ones use a plain CLIPTextEncode and don't. Roles are what
+    the split actually means, so ask them rather than matching on bundle ids.
+    """
+    return (cat.family_of(unet) == cat.FAMILY_QWEN
+            and ROLE_EDIT in cat.roles_of(unet))
+
+
+def _qwen_edit_encode(unet: str, text: str, ref_images) -> dict:
+    """One Qwen edit conditioning node: the instruction plus its reference images.
+
+    This single node replaces the whole CLIPTextEncode -> ReferenceLatent chain the
+    other families build. It tokenizes each image for the VL encoder at 384x384, VAE-
+    encodes it at 1 MP as a reference latent, and prefixes the prompt with a
+    "Picture N:" marker per image — none of which ReferenceLatent does, which is why
+    feeding a Qwen edit model that chain instead produces an image that ignores its
+    references.
+
+    The image count is the generation's, not a preference: the original edit model's
+    node has one image input and 2511's "Plus" has three. Anything past the node's
+    limit is dropped here rather than silently ignored deeper in.
+    """
+    b = cat.bundle_of_unet(unet)
+    node = (b or {}).get("edit_encode") or "TextEncodeQwenImageEditPlus"
+    inputs = {"clip": ["clip", 0], "prompt": text, "vae": ["vae", 0]}
+    if node == "TextEncodeQwenImageEdit":
+        if ref_images:
+            inputs["image"] = list(ref_images[0])
+    else:
+        for i, ref in enumerate(ref_images[:3]):
+            inputs[f"image{i + 1}"] = list(ref)
+    return {"class_type": node, "inputs": inputs}
+
+
 def _with_lora(unet: str, loaders: dict, control_scale: float | None = None) -> dict:
     """Chain the model's selected LoRAs onto its transformer, one node per adapter.
 
@@ -712,22 +781,28 @@ def _loaders(unet: str, control_scale: float | None = None) -> dict:
         }, control_scale)
     if cat.family_of(unet) == cat.FAMILY_QWEN:
         b = cat.bundle_of_unet(unet)
-        g = _with_lora(unet, {
-            "unet": _unet_node(unet),
+        # The model chain upstream of any LoRA, in ComfyUI's own order for this family:
+        # loader -> ModelSamplingAuraFlow -> (edit only) CFGNorm. `_with_lora` renames
+        # whatever is called `unet` to `unet_base` and chains the adapters onto it, so
+        # naming the last patch `unet` puts the LoRAs after these — which is where the
+        # Qwen templates put them.
+        g = {
+            "unet_raw": _unet_node(unet),
             # One encoder, not a pair: ComfyUI's `qwen_image` CLIP type reads
             # Qwen2.5-VL directly. No `_check_encoder_layout` — that check is keyed to
             # FLUX.2's detection path and would reject a perfectly good Qwen encoder.
             "clip": _clip_node(b["clip"], "qwen_image"),
             "vae": {"class_type": "VAELoader", "inputs": {"vae_name": b["vae"]}},
-        }, control_scale)
-        # The sigma shift is a *model patch*, so it has to be the last one on the
-        # chain — after any LoRA. `_with_lora` has already made `unet` the patched
-        # output, so take the same trick one step further: the AuraFlow node inherits
-        # the name every graph builder refers to, and nothing downstream changes.
-        g["unet_pre"] = g.pop("unet")
-        g["unet"] = {"class_type": "ModelSamplingAuraFlow",
-                     "inputs": {"model": ["unet_pre", 0], "shift": QWEN_SHIFT}}
-        return g
+        }
+        shift = {"class_type": "ModelSamplingAuraFlow",
+                 "inputs": {"model": ["unet_raw", 0], "shift": QWEN_SHIFT}}
+        if _qwen_edits(unet):
+            g["unet_shift"] = shift
+            g["unet"] = {"class_type": "CFGNorm",
+                         "inputs": {"model": ["unet_shift", 0], "strength": QWEN_CFG_NORM}}
+        else:
+            g["unet"] = shift
+        return _with_lora(unet, g, control_scale)
     return _with_lora(unet, {
         "unet": _unet_node(unet),
         "clip": _dual_clip_node(CLIP_L, T5, "flux"),
@@ -783,7 +858,34 @@ def _sampler(g: dict, unet, latent_src, steps, seed, width, height, denoise=1.0,
     }
 
 
-def _conditioning(unet, prompt: str, guidance: float, ref_latents=()) -> dict:
+def _qwen_edit_conditioning(unet, prompt: str, ref_images) -> dict:
+    """Qwen's edit conditioning: one encode node per branch, positive and negative.
+
+    The negative is the same node over the same images with an empty instruction,
+    which is what every Qwen edit template ships — the uncond branch has to see the
+    references too, or CFG pulls the result away from the image it is meant to be
+    editing.
+
+    2511 adds a layout choice on top, for the same reason Kontext has one: with more
+    than one reference the model needs to know how they are arranged. Its own template
+    pins "index_timestep_zero" and so does the bundle.
+    """
+    b = cat.bundle_of_unet(unet)
+    g = {"pos": _qwen_edit_encode(unet, prompt, ref_images),
+         "neg_enc": _qwen_edit_encode(unet, "", ref_images)}
+    method = (b or {}).get("ref_method")
+    if method and len(ref_images) > 1:
+        g["guide"] = {"class_type": "FluxKontextMultiReferenceLatentMethod",
+                      "inputs": {"conditioning": ["pos", 0], "reference_latents_method": method}}
+        g["neg"] = {"class_type": "FluxKontextMultiReferenceLatentMethod",
+                    "inputs": {"conditioning": ["neg_enc", 0], "reference_latents_method": method}}
+        return g
+    g["guide"] = g.pop("pos")
+    g["neg"] = g.pop("neg_enc")
+    return g
+
+
+def _conditioning(unet, prompt: str, guidance: float, ref_latents=(), ref_images=()) -> dict:
     """Text conditioning shared by every graph. `guide` is what the sampler reads.
 
     `ref_latents` chains one `ReferenceLatent` node per encoded reference image. The
@@ -792,10 +894,17 @@ def _conditioning(unet, prompt: str, guidance: float, ref_latents=()) -> dict:
     stay distinct. FLUX.2 and Kontext both understand this; a plain FLUX.1 dev
     transformer ignores it, so create graphs pass nothing.
 
-    Qwen returns early: its negative branch is live (see `_sampler`) so it gets real
-    negative text, and it has no FluxGuidance node to end on — `guide` is simply the
-    positive encode. Its bundles are create-only, so `ref_latents` is always empty.
+    `ref_images` is the same set of references *before* they were encoded, and only
+    Qwen's edit models use it: their encode node takes pixels, tokenizes them for the
+    VL encoder and does its own VAE pass, so it needs the image, not the latent. Every
+    caller that builds references through `_encode_image` has both to hand.
+
+    Qwen's create models return early instead: their negative branch is live (see
+    `_sampler`) so it gets real negative text, and there is no FluxGuidance node to end
+    on — `guide` is simply the positive encode.
     """
+    if _qwen_edits(unet):
+        return _qwen_edit_conditioning(unet, prompt, ref_images)
     flux2 = cat.family_of(unet) == cat.FAMILY_FLUX2
     g = {"pos": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}}}
     if not flux2:
@@ -842,15 +951,22 @@ def _scale_node(unet, src) -> dict:
     fixed table of ~1 MP shapes; FLUX.2 just wants ~1 MP on a multiple of 16 (its VAE
     downscale), which keeps the token count — and the VRAM — bounded either way.
 
-    Qwen takes the same area fit at its own, larger budget: it is trained at 1328x1328
-    and squeezing it into Kontext's 1 MP table throws away resolution it can use.
+    Qwen's *create* models take the same area fit at their own, larger budget: they are
+    trained at 1328x1328 and squeezing a source into Kontext's 1 MP table throws away
+    resolution they can use. Its *edit* models go the other way and use Kontext's table
+    outright, which is what their own templates do — TextEncodeQwenImageEdit* rescales
+    every reference to 1 MP internally anyway, so a larger input buys nothing and only
+    puts the sampled latent out of step with the references.
     """
     fam = cat.family_of(unet)
-    if fam == cat.FAMILY_FLUX2 or fam == cat.FAMILY_QWEN:
-        megapixels = round(QWEN_PIXELS / 1e6, 2) if fam == cat.FAMILY_QWEN else 1.0
+    if fam == cat.FAMILY_QWEN and not _qwen_edits(unet):
         return {"class_type": "ImageScaleToTotalPixels",
                 "inputs": {"image": list(src), "upscale_method": "area",
-                           "megapixels": megapixels, "resolution_steps": 16}}
+                           "megapixels": round(QWEN_PIXELS / 1e6, 2), "resolution_steps": 16}}
+    if fam == cat.FAMILY_FLUX2:
+        return {"class_type": "ImageScaleToTotalPixels",
+                "inputs": {"image": list(src), "upscale_method": "area",
+                           "megapixels": 1.0, "resolution_steps": 16}}
     return {"class_type": "FluxKontextImageScale", "inputs": {"image": list(src)}}
 
 
@@ -897,6 +1013,14 @@ def _encode_image(g, unet, name, key):
     return (key, 0)
 
 
+def _scaled_image(latent_ref):
+    """The scaled *pixels* behind an `_encode_image` latent, for the consumers that
+    want the image rather than its encoding — Qwen's edit nodes, which VAE-encode
+    their references themselves. Derived here so only one place knows the key
+    layout `_encode_image` writes."""
+    return (f"{latent_ref[0]}_scale", 0)
+
+
 def _edit_graph(scene_name, ref_names, prompt, steps, guidance, seed, width, height,
                 prefix, unet):
     """Instruction-edit `scene_name` (FLUX.2, or FLUX.1 Kontext).
@@ -909,7 +1033,8 @@ def _edit_graph(scene_name, ref_names, prompt, steps, guidance, seed, width, hei
     g = _loaders(unet)
     scene = _encode_image(g, unet, scene_name, "enc")
     refs = [scene] + [_encode_image(g, unet, n, f"src{i}") for i, n in enumerate(ref_names)]
-    g.update(_conditioning(unet, prompt, guidance, ref_latents=refs))
+    g.update(_conditioning(unet, prompt, guidance, ref_latents=refs,
+                           ref_images=[_scaled_image(r) for r in refs]))
     _sampler(g, unet, scene, steps, seed, width, height, guidance=guidance)
     g.update(_tail(prefix))
     return g
@@ -928,7 +1053,8 @@ def _compose_graph(image_names, prompt, width, height, steps, guidance, seed, pr
     """
     g = _loaders(unet)
     refs = [_encode_image(g, unet, n, f"src{i}") for i, n in enumerate(image_names)]
-    g.update(_conditioning(unet, prompt, guidance, ref_latents=refs))
+    g.update(_conditioning(unet, prompt, guidance, ref_latents=refs,
+                           ref_images=[_scaled_image(r) for r in refs]))
     g["latent"] = _empty_latent(unet, width, height)
     _sampler(g, unet, ("latent", 0), steps, seed, width, height, guidance=guidance)
     g.update(_tail(prefix))
@@ -1081,7 +1207,8 @@ def _control_graph(control_names, ref_names, source_name, lock, control_scale, p
             + [_encode_image(g, unet, n, f"src{i}") for i, n in enumerate(ref_names)])
     if not refs:
         raise ValueError("A control generation needs at least one control map.")
-    g.update(_conditioning(unet, prompt, guidance, ref_latents=refs))
+    g.update(_conditioning(unet, prompt, guidance, ref_latents=refs,
+                           ref_images=[_scaled_image(r) for r in refs]))
     if lock < 1.0:
         if not source_name:
             raise ValueError("Structure lock needs the source image it locks to.")
@@ -1250,8 +1377,12 @@ _NODE_SECONDS = {
     "VAELoader": 1.0,
     "LoraLoaderModelOnly": 5.0, "LoraLoader": 5.0,
     "ModelSamplingSD3": 0.5, "ModelSamplingAuraFlow": 0.5,
+    "CFGNorm": 0.3,
     # Where the text encoder is really loaded, on the run that loads it.
     "CLIPTextEncode": 60.0,
+    # Qwen's edit encode does the same encoder load, and a VAE pass per reference on
+    # top of it — it is the whole conditioning chain in one node.
+    "TextEncodeQwenImageEdit": 65.0, "TextEncodeQwenImageEditPlus": 65.0,
     "LoadImage": 0.5, "VAEEncode": 2.0, "WanImageToVideo": 4.0,
     "VAEDecode": 3.0, "SaveImage": 0.5, "SaveWEBM": 10.0,
     # Control preprocessors. Priced here rather than left to `_OTHER_NODE_SECONDS`
@@ -1289,6 +1420,8 @@ _STAGE_LABELS = {
     "VAELoader": "Loading the VAE",
     "LoraLoaderModelOnly": "Applying the LoRA", "LoraLoader": "Applying the LoRA",
     "CLIPTextEncode": "Reading the prompt", "FluxGuidance": "Reading the prompt",
+    "TextEncodeQwenImageEdit": "Reading the prompt and images",
+    "TextEncodeQwenImageEditPlus": "Reading the prompt and images",
     "ReferenceLatent": "Reading the reference images",
     "FluxKontextMultiReferenceLatentMethod": "Reading the reference images",
     "LoadImage": "Reading the source image", "VAEEncode": "Encoding the source image",
@@ -1299,6 +1432,7 @@ _STAGE_LABELS = {
     "Flux2Scheduler": "Preparing the schedule", "SplitSigmas": "Preparing the schedule",
     "RandomNoise": "Preparing the noise", "BasicGuider": "Preparing the sampler",
     "KSamplerSelect": "Preparing the sampler", "ModelSamplingSD3": "Preparing the sampler",
+    "ModelSamplingAuraFlow": "Preparing the sampler", "CFGNorm": "Preparing the sampler",
     "ModelSamplingAuraFlow": "Preparing the sampler",
     "WanImageToVideo": "Preparing the frames",
     "KSampler": "Generating", "KSamplerAdvanced": "Generating",

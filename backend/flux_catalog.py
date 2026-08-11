@@ -211,6 +211,79 @@ BUNDLES = [
              "split_files/vae/qwen_image_vae.safetensors", "vae"),
         ],
     },
+    # Qwen splits create and edit across separate checkpoints, the way FLUX.1 split dev
+    # and Kontext — so the edit models are their own bundles, not a second transformer
+    # inside the ones above. They share the encoder and VAE with them, though, so
+    # installing a second Qwen bundle only costs its transformer.
+    #
+    # `edit_encode` names the node that turns the instruction *and* the reference
+    # images into conditioning. Qwen does not use ReferenceLatent: the encode node
+    # takes the images directly, tokenizes them for the VL encoder and VAE-encodes them
+    # as references itself, so the whole `_conditioning` chain is one node. The two
+    # generations differ — 2511 takes up to three images through the "Plus" node, the
+    # original takes one — which is why the class is named per bundle.
+    #
+    # `ref_method` is how multiple references are laid out; 2511 wants
+    # "index_timestep_zero" and ships that in its own template. Pinned rather than left
+    # to ComfyUI's checkpoint-sniffed default (model_detection.py:823) for the same
+    # reason `flux_client.REF_METHOD` is: an upgrade must not silently change it.
+    {
+        "id": "qwen-image-edit-2511",
+        "label": "Qwen-Image Edit 2511 — fp8",
+        "family": FAMILY_QWEN,
+        "roles": [ROLE_EDIT],
+        "blurb": ("Instruction editing on Qwen — the newest edit release (there is no 2512 "
+                  "edit model; 2512 was text-to-image only). Takes up to three reference "
+                  "images at once, so it combines as well as it edits. Ungated. Pairs with "
+                  "Qwen-Image 2512 above and shares its encoder and VAE."),
+        "size_gb": 30.2,
+        "vram_gb": 28,
+        "gated": False,
+        "unet": "qwen_image_edit_2511_fp8mixed.safetensors",
+        # fp8mixed is already quantized and deliberately keeps some layers higher —
+        # casting it again would throw that away. Same reasoning as FLUX.2's checkpoint.
+        "weight_dtype": "default",
+        "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+        "vae": "qwen_image_vae.safetensors",
+        "edit_encode": "TextEncodeQwenImageEditPlus",
+        "ref_method": "index_timestep_zero",
+        "files": [
+            ("Comfy-Org/Qwen-Image-Edit_ComfyUI",
+             "split_files/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors", "unet"),
+            ("Comfy-Org/Qwen-Image_ComfyUI",
+             "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors", "text_encoders"),
+            ("Comfy-Org/Qwen-Image_ComfyUI",
+             "split_files/vae/qwen_image_vae.safetensors", "vae"),
+        ],
+    },
+    {
+        "id": "qwen-image-edit",
+        "label": "Qwen-Image Edit — fp8",
+        "family": FAMILY_QWEN,
+        "roles": [ROLE_EDIT],
+        "blurb": ("The original August 2025 edit model, superseded by 2511 above. One "
+                  "reference image rather than three, and a weaker grasp of multi-step "
+                  "instructions. Install it only to compare the two."),
+        "size_gb": 30.1,
+        "vram_gb": 28,
+        "gated": False,
+        "unet": "qwen_image_edit_fp8_e4m3fn.safetensors",
+        "weight_dtype": "default",
+        "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+        "vae": "qwen_image_vae.safetensors",
+        # The original predates the "Plus" node: one image input, and no multi-reference
+        # layout to choose because there is only ever one reference.
+        "edit_encode": "TextEncodeQwenImageEdit",
+        "ref_method": None,
+        "files": [
+            ("Comfy-Org/Qwen-Image-Edit_ComfyUI",
+             "split_files/diffusion_models/qwen_image_edit_fp8_e4m3fn.safetensors", "unet"),
+            ("Comfy-Org/Qwen-Image_ComfyUI",
+             "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors", "text_encoders"),
+            ("Comfy-Org/Qwen-Image_ComfyUI",
+             "split_files/vae/qwen_image_vae.safetensors", "vae"),
+        ],
+    },
     {
         "id": "wan22-i2v-a14b-fp16",
         "label": "Wan 2.2 I2V A14B — fp16",

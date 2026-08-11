@@ -48,11 +48,18 @@ Install a model from the sidebar's **🖼️ Image Models** panel. Nothing gener
 | **FLUX.2 [klein] 9B** | ~35 GB | 32 GB | create + edit | Distilled 9B, runs in bf16 with no quantization, 8 steps. Gated. |
 | **Qwen-Image 2512** — fp8 | ~30 GB | 28 GB | create | The best there is at legible text inside an image, English and Chinese. Ungated. |
 | **Qwen-Image** — fp8 | ~30 GB | 28 GB | create | The original; superseded by 2512. Shares its encoder and VAE, so ~20 GB if 2512 is installed. |
+| **Qwen-Image Edit 2511** — fp8 | ~30 GB | 28 GB | edit + combine | Instruction editing on Qwen, up to three reference images at once. The newest edit release. Ungated. |
+| **Qwen-Image Edit** — fp8 | ~30 GB | 28 GB | edit + combine | The original edit model; one reference image, weaker on multi-step instructions. |
 | **Wan 2.2 I2V A14B** — fp16 | ~69 GB | 80 GB | animate | One image → a 5-second 720p video. Ungated. |
 
+Qwen splits create and edit across separate checkpoints the way FLUX.1 split dev and Kontext, so
+covering both jobs means installing two — but all four Qwen bundles share one text encoder and one
+VAE, so the second costs only its transformer (~20 GB). There is no "Qwen-Image Edit 2512": 2512 was
+a text-to-image refresh, and 2511 is the current edit model.
+
 The list is in quality order, and the first installed model that can serve a mode is what that mode
-runs on by default — so installing Qwen does not displace FLUX.2 for Create; pick it in the model
-picker. Qwen creates only; edit and combine stay on FLUX.2.
+runs on by default — so installing Qwen does not displace FLUX.2 for Create or Edit; pick it in the
+model picker.
 
 Downloads resume if interrupted, and the weights are used entirely offline afterwards. The panel
 checks free disk space before starting and refuses rather than filling the disk mid-download.
