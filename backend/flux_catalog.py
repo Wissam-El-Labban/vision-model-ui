@@ -151,103 +151,73 @@ BUNDLES = [
             },
         ],
     },
-    {
-        "id": "qwen-image-2512-fp8",
-        "label": "Qwen-Image 2512 — fp8",
-        "family": FAMILY_QWEN,
-        "roles": [ROLE_CREATE],
-        "blurb": ("Alibaba's 20B text-to-image model, the December 2512 refresh. The best "
-                  "there is at rendering legible text inside an image, English and Chinese "
-                  "alike. Ungated — no HuggingFace token needed. Creates only; edits and "
-                  "combines still run on FLUX.2."),
-        "size_gb": 30.1,
-        # Estimate: the fp8 transformer resident (20.4 GB) plus activations at Qwen's
-        # native 1328x1328. The text encoder is a separate 9.4 GB load that ComfyUI
-        # evicts before sampling starts. Measure on real hardware and correct this.
-        "vram_gb": 28,
-        "gated": False,
-        "unet": "qwen_image_2512_fp8_e4m3fn.safetensors",
-        # Already fp8 — casting it again would only degrade it, same as FLUX.2's mix.
-        "weight_dtype": "default",
-        # Qwen conditions on Qwen2.5-VL-7B. ComfyUI's `qwen_image` CLIP type reads it
-        # directly, so unlike FLUX.2's encoders there is nothing to stitch or re-key.
-        "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
-        "vae": "qwen_image_vae.safetensors",
-        # Qwen publishes diffusers-sharded weights (Qwen/Qwen-Image-2512); these are
-        # ComfyUI's single-file repackages of the same release, which is what CLIPLoader
-        # and UNETLoader take. Same arrangement as the Wan bundle below.
-        "files": [
-            ("Comfy-Org/Qwen-Image_ComfyUI",
-             "split_files/diffusion_models/qwen_image_2512_fp8_e4m3fn.safetensors", "unet"),
-            ("Comfy-Org/Qwen-Image_ComfyUI",
-             "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors", "text_encoders"),
-            ("Comfy-Org/Qwen-Image_ComfyUI",
-             "split_files/vae/qwen_image_vae.safetensors", "vae"),
-        ],
-    },
-    {
-        "id": "qwen-image-fp8",
-        "label": "Qwen-Image — fp8",
-        "family": FAMILY_QWEN,
-        "roles": [ROLE_CREATE],
-        "blurb": ("The original August 2025 Qwen-Image, superseded by 2512 above — the same "
-                  "architecture, retrained. Worth installing only to compare the two: it "
-                  "shares 2512's text encoder and VAE, so it costs ~20 GB once 2512 is in."),
-        # The whole bundle. `needed_gb` subtracts whatever 2512 already put on disk, so
-        # the button shows the ~20 GB that is actually outstanding.
-        "size_gb": 30.1,
-        "vram_gb": 28,
-        "gated": False,
-        "unet": "qwen_image_fp8_e4m3fn.safetensors",
-        "weight_dtype": "default",
-        "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
-        "vae": "qwen_image_vae.safetensors",
-        "files": [
-            ("Comfy-Org/Qwen-Image_ComfyUI",
-             "split_files/diffusion_models/qwen_image_fp8_e4m3fn.safetensors", "unet"),
-            ("Comfy-Org/Qwen-Image_ComfyUI",
-             "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors", "text_encoders"),
-            ("Comfy-Org/Qwen-Image_ComfyUI",
-             "split_files/vae/qwen_image_vae.safetensors", "vae"),
-        ],
-    },
-    # Qwen splits create and edit across separate checkpoints, the way FLUX.1 split dev
-    # and Kontext — so the edit models are their own bundles, not a second transformer
-    # inside the ones above. They share the encoder and VAE with them, though, so
-    # installing a second Qwen bundle only costs its transformer.
+    # Qwen splits create and edit across two separately fine-tuned checkpoints of one
+    # 20B architecture — the same shape FLUX.1 had, where dev created and Kontext
+    # edited. So a Qwen bundle ships both: `unet` creates, `unet_edit` edits, and
+    # `_default_for` picks between them by role. One install covers every image mode.
     #
-    # `edit_encode` names the node that turns the instruction *and* the reference
-    # images into conditioning. Qwen does not use ReferenceLatent: the encode node
-    # takes the images directly, tokenizes them for the VL encoder and VAE-encodes them
-    # as references itself, so the whole `_conditioning` chain is one node. The two
-    # generations differ — 2511 takes up to three images through the "Plus" node, the
-    # original takes one — which is why the class is named per bundle.
+    # They are paired by generation, not mixed: the December text-to-image refresh
+    # (2512) goes with the December edit model (2511, the newest edit release — there
+    # is no "Edit 2512"), and the August originals go together. Both transformers in a
+    # bundle share its text encoder and VAE, which is why a 50 GB bundle is two 20 GB
+    # transformers plus ~10 GB of parts, not two 30 GB models.
+    #
+    # `unet_labels` names them apart in the picker. Without it both rows render the
+    # bundle's label and read as one model behaving differently per tab.
+    #
+    # `edit_encode` names the node that turns the instruction *and* the reference images
+    # into conditioning, and applies to `unet_edit` alone. Qwen does not use
+    # ReferenceLatent: the encode node takes the images directly, tokenizes them for the
+    # VL encoder and VAE-encodes them as references itself, so the whole `_conditioning`
+    # chain collapses into one node. The generations differ — 2511 takes up to three
+    # images through the "Plus" node, the original takes one — which is why the class is
+    # named per bundle rather than assumed.
     #
     # `ref_method` is how multiple references are laid out; 2511 wants
     # "index_timestep_zero" and ships that in its own template. Pinned rather than left
     # to ComfyUI's checkpoint-sniffed default (model_detection.py:823) for the same
     # reason `flux_client.REF_METHOD` is: an upgrade must not silently change it.
     {
-        "id": "qwen-image-edit-2511",
-        "label": "Qwen-Image Edit 2511 — fp8",
+        "id": "qwen-image-2512",
+        "label": "Qwen-Image 2512 + Edit 2511 — fp8",
         "family": FAMILY_QWEN,
-        "roles": [ROLE_EDIT],
-        "blurb": ("Instruction editing on Qwen — the newest edit release (there is no 2512 "
-                  "edit model; 2512 was text-to-image only). Takes up to three reference "
-                  "images at once, so it combines as well as it edits. Ungated. Pairs with "
-                  "Qwen-Image 2512 above and shares its encoder and VAE."),
-        "size_gb": 30.2,
+        "roles": [ROLE_CREATE, ROLE_EDIT],
+        "blurb": ("Alibaba's 20B model, December refresh — both halves. The best there is "
+                  "at rendering legible text inside an image, English and Chinese alike, "
+                  "and the edit half takes up to three reference images at once. Ungated — "
+                  "no HuggingFace token needed. Two 20 GB transformers: one loads at a "
+                  "time, so it needs no more VRAM than either alone."),
+        "size_gb": 50.6,
+        # Estimate: one fp8 transformer resident (20.4 GB) plus activations at Qwen's
+        # native 1328x1328. Only ever one at a time — ComfyUI evicts the create half
+        # before loading the edit half — and the 9.4 GB encoder is a separate load it
+        # evicts too. Measure on real hardware and correct this.
         "vram_gb": 28,
         "gated": False,
-        "unet": "qwen_image_edit_2511_fp8mixed.safetensors",
-        # fp8mixed is already quantized and deliberately keeps some layers higher —
-        # casting it again would throw that away. Same reasoning as FLUX.2's checkpoint.
+        "unet": "qwen_image_2512_fp8_e4m3fn.safetensors",
+        "unet_edit": "qwen_image_edit_2511_fp8mixed.safetensors",
+        "unet_labels": {
+            "qwen_image_2512_fp8_e4m3fn.safetensors": "Qwen-Image 2512",
+            "qwen_image_edit_2511_fp8mixed.safetensors": "Qwen-Image Edit 2511",
+        },
+        # Both are already quantized — the create half plain fp8, the edit half fp8mixed,
+        # which deliberately keeps some layers higher. Casting either again would only
+        # degrade it, the same reasoning FLUX.2's checkpoint gets.
         "weight_dtype": "default",
+        # Qwen conditions on Qwen2.5-VL-7B, and both halves share the one encoder.
+        # ComfyUI's `qwen_image` CLIP type reads it directly, so unlike FLUX.2's
+        # encoders there is nothing to stitch or re-key.
         "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
         "vae": "qwen_image_vae.safetensors",
         "edit_encode": "TextEncodeQwenImageEditPlus",
         "ref_method": "index_timestep_zero",
+        # Qwen publishes diffusers-sharded weights (Qwen/Qwen-Image-2512 and
+        # Qwen/Qwen-Image-Edit-2511); these are ComfyUI's single-file repackages of the
+        # same releases, which is what CLIPLoader and UNETLoader take. Same arrangement
+        # as the Wan bundle below.
         "files": [
+            ("Comfy-Org/Qwen-Image_ComfyUI",
+             "split_files/diffusion_models/qwen_image_2512_fp8_e4m3fn.safetensors", "unet"),
             ("Comfy-Org/Qwen-Image-Edit_ComfyUI",
              "split_files/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors", "unet"),
             ("Comfy-Org/Qwen-Image_ComfyUI",
@@ -257,25 +227,35 @@ BUNDLES = [
         ],
     },
     {
-        "id": "qwen-image-edit",
-        "label": "Qwen-Image Edit — fp8",
+        "id": "qwen-image",
+        "label": "Qwen-Image + Edit — fp8",
         "family": FAMILY_QWEN,
-        "roles": [ROLE_EDIT],
-        "blurb": ("The original August 2025 edit model, superseded by 2511 above. One "
-                  "reference image rather than three, and a weaker grasp of multi-step "
-                  "instructions. Install it only to compare the two."),
-        "size_gb": 30.1,
+        "roles": [ROLE_CREATE, ROLE_EDIT],
+        "blurb": ("The original August 2025 pair, superseded by the December one above — "
+                  "the same architecture, retrained. Worth installing only to compare the "
+                  "two. Its edit half takes one reference image rather than three. Shares "
+                  "the encoder and VAE with 2512, so it costs ~41 GB once that is in."),
+        # The whole bundle. `needed_gb` subtracts whatever 2512 already put on disk, so
+        # the button shows only what is actually outstanding.
+        "size_gb": 50.5,
         "vram_gb": 28,
         "gated": False,
-        "unet": "qwen_image_edit_fp8_e4m3fn.safetensors",
+        "unet": "qwen_image_fp8_e4m3fn.safetensors",
+        "unet_edit": "qwen_image_edit_fp8_e4m3fn.safetensors",
+        "unet_labels": {
+            "qwen_image_fp8_e4m3fn.safetensors": "Qwen-Image",
+            "qwen_image_edit_fp8_e4m3fn.safetensors": "Qwen-Image Edit",
+        },
         "weight_dtype": "default",
         "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
         "vae": "qwen_image_vae.safetensors",
-        # The original predates the "Plus" node: one image input, and no multi-reference
-        # layout to choose because there is only ever one reference.
+        # The original edit model predates the "Plus" node: one image input, and no
+        # multi-reference layout to choose because there is only ever one reference.
         "edit_encode": "TextEncodeQwenImageEdit",
         "ref_method": None,
         "files": [
+            ("Comfy-Org/Qwen-Image_ComfyUI",
+             "split_files/diffusion_models/qwen_image_fp8_e4m3fn.safetensors", "unet"),
             ("Comfy-Org/Qwen-Image-Edit_ComfyUI",
              "split_files/diffusion_models/qwen_image_edit_fp8_e4m3fn.safetensors", "unet"),
             ("Comfy-Org/Qwen-Image_ComfyUI",
@@ -551,7 +531,23 @@ def roles_of(unet: str) -> list[str]:
     """
     b = bundle_of_unet(unet)
     if b and b["family"] != FAMILY_FLUX1:
-        return list(b["roles"])
+        edit_unet = b.get("unet_edit")
+        if not edit_unet:
+            return list(b["roles"])
+        # A bundle whose transformers split by role states the *union* in `roles` —
+        # that is what the install offers — but the two files are not interchangeable
+        # and the picker has to say so per file, or a create-only transformer gets
+        # offered for an edit it cannot do.
+        #
+        # The split is deliberately lopsided. The edit half keeps every role: its
+        # encode node takes its images optionally, so with none attached it is a
+        # perfectly good text-to-image model, and control (an edit-role op here) is
+        # its job anyway. The create half loses `edit` — a plain CLIPTextEncode has
+        # nowhere to put a source image, so an edit asked of it silently ignores the
+        # picture and answers the prompt alone.
+        if os.path.basename(unet or "") == edit_unet:
+            return list(b["roles"])
+        return [r for r in b["roles"] if r != ROLE_EDIT]
     # A user-added model: a Kontext transformer takes a ReferenceLatent and a plain dev
     # one ignores it, and the filename is the only signal we have for which it is.
     return [ROLE_EDIT] if "kontext" in os.path.basename(unet or "").lower() else [ROLE_CREATE]

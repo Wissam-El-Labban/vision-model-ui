@@ -129,21 +129,22 @@ QWEN_PIXELS = 1328 * 1328
 QWEN_NEGATIVE = ("低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，"
                  "人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲")
 # Per checkpoint, because within this one family the published settings differ by more
-# than the families do from each other. Keyed by bundle id; anything not listed (a
-# future Qwen bundle, or a user-added Qwen transformer) falls back to the create
-# defaults, which is the safer of the two — too many steps costs time, too few costs
-# the image. `flux.ts` mirrors both tables; they must not drift apart.
-_QWEN_STEPS_BY_ID = {
-    "qwen-image-2512-fp8": QWEN_STEPS,
-    "qwen-image-fp8": QWEN_BASE_STEPS,
-    "qwen-image-edit-2511": QWEN_EDIT_STEPS,
-    "qwen-image-edit": QWEN_EDIT1_STEPS,
+# than the families do from each other — and since a bundle now ships two transformers
+# with different answers, the key is the *weight file*, not the bundle. Anything not
+# listed (a future Qwen checkpoint, or a user-added one) falls back to the create
+# defaults, the safer of the two: too many steps costs time, too few costs the image.
+# `flux.ts` mirrors both tables off the same filenames; they must not drift apart.
+_QWEN_STEPS_BY_UNET = {
+    "qwen_image_2512_fp8_e4m3fn.safetensors": QWEN_STEPS,
+    "qwen_image_fp8_e4m3fn.safetensors": QWEN_BASE_STEPS,
+    "qwen_image_edit_2511_fp8mixed.safetensors": QWEN_EDIT_STEPS,
+    "qwen_image_edit_fp8_e4m3fn.safetensors": QWEN_EDIT1_STEPS,
 }
-_QWEN_CFG_BY_ID = {
-    "qwen-image-2512-fp8": QWEN_CFG,
-    "qwen-image-fp8": QWEN_CFG,
-    "qwen-image-edit-2511": QWEN_EDIT_CFG,
-    "qwen-image-edit": QWEN_EDIT1_CFG,
+_QWEN_CFG_BY_UNET = {
+    "qwen_image_2512_fp8_e4m3fn.safetensors": QWEN_CFG,
+    "qwen_image_fp8_e4m3fn.safetensors": QWEN_CFG,
+    "qwen_image_edit_2511_fp8mixed.safetensors": QWEN_EDIT_CFG,
+    "qwen_image_edit_fp8_e4m3fn.safetensors": QWEN_EDIT1_CFG,
 }
 
 # How the model lays out multiple reference images. See `_conditioning`.
@@ -397,7 +398,7 @@ def _default_guidance(unet, role: str) -> float:
     if fam == cat.FAMILY_WAN:
         return WAN_CFG
     if fam == cat.FAMILY_QWEN:
-        return _QWEN_CFG_BY_ID.get((cat.bundle_of_unet(unet) or {}).get("id"), QWEN_CFG)
+        return _QWEN_CFG_BY_UNET.get(os.path.basename(unet or ""), QWEN_CFG)
     if fam == cat.FAMILY_FLUX2:
         bundle = cat.bundle_of_unet(unet)
         if bundle and bundle["id"] == "flux2-klein-9b":
@@ -414,7 +415,7 @@ def _default_steps(unet) -> int:
         # Every Qwen checkpoint publishes its own settings and they are all different.
         # None of them is distilled, so cutting the count costs quality rather than
         # only time — that trade is the Lightning LoRAs' job, not the default's.
-        return _QWEN_STEPS_BY_ID.get((bundle or {}).get("id"), QWEN_STEPS)
+        return _QWEN_STEPS_BY_UNET.get(os.path.basename(unet or ""), QWEN_STEPS)
     if cat.family_of(unet) == cat.FAMILY_FLUX2:
         return FLUX2_STEPS
     return DEFAULT_STEPS
@@ -684,15 +685,21 @@ def _dual_clip_node(name1: str, name2: str, kind: str) -> dict:
 
 
 def _qwen_edits(unet: str) -> bool:
-    """Whether this Qwen model is one of the *edit* checkpoints.
+    """Whether this file is a Qwen *edit* transformer.
 
-    Qwen splits the two jobs across separate transformers, so within the family the
-    graph still forks: the edit models condition through TextEncodeQwenImageEdit* and
-    take CFGNorm, the create ones use a plain CLIPTextEncode and don't. Roles are what
-    the split actually means, so ask them rather than matching on bundle ids.
+    Qwen splits the two jobs across separately fine-tuned checkpoints that now ship in
+    one bundle, so the fork is per *file*, not per bundle or per role: the edit weights
+    condition through TextEncodeQwenImageEdit* and take CFGNorm, the create weights use
+    a plain CLIPTextEncode and don't.
+
+    Deliberately not asked of `roles_of` — the edit half carries `create` too (it can
+    generate from a bare prompt), so roles no longer identify which weights these are.
+    Only the filename does.
     """
-    return (cat.family_of(unet) == cat.FAMILY_QWEN
-            and ROLE_EDIT in cat.roles_of(unet))
+    b = cat.bundle_of_unet(unet)
+    if not b or b["family"] != cat.FAMILY_QWEN:
+        return False
+    return os.path.basename(unet or "") == b.get("unet_edit")
 
 
 def _qwen_edit_encode(unet: str, text: str, ref_images) -> dict:
@@ -705,20 +712,47 @@ def _qwen_edit_encode(unet: str, text: str, ref_images) -> dict:
     feeding a Qwen edit model that chain instead produces an image that ignores its
     references.
 
-    The image count is the generation's, not a preference: the original edit model's
-    node has one image input and 2511's "Plus" has three. Anything past the node's
-    limit is dropped here rather than silently ignored deeper in.
+    With no images at all this is still a valid text-to-image encode — every image
+    input on the node is optional — which is what lets the edit half serve `create`.
     """
-    b = cat.bundle_of_unet(unet)
-    node = (b or {}).get("edit_encode") or "TextEncodeQwenImageEditPlus"
     inputs = {"clip": ["clip", 0], "prompt": text, "vae": ["vae", 0]}
+    node = _qwen_edit_node(unet)
     if node == "TextEncodeQwenImageEdit":
         if ref_images:
             inputs["image"] = list(ref_images[0])
     else:
-        for i, ref in enumerate(ref_images[:3]):
+        for i, ref in enumerate(ref_images):
             inputs[f"image{i + 1}"] = list(ref)
     return {"class_type": node, "inputs": inputs}
+
+
+def _qwen_edit_node(unet: str) -> str:
+    """Which encode node this bundle's edit half uses."""
+    return (cat.bundle_of_unet(unet) or {}).get("edit_encode") or "TextEncodeQwenImageEditPlus"
+
+
+# How many reference images each encode node actually has inputs for. The original
+# edit model takes one; 2511's "Plus" takes three. Hard limits of the node, not a
+# tuning choice.
+_QWEN_REF_LIMIT = {"TextEncodeQwenImageEdit": 1, "TextEncodeQwenImageEditPlus": 3}
+
+
+def _check_qwen_refs(unet: str, ref_images) -> None:
+    """Refuse more references than the encode node has inputs for.
+
+    Compose and control both hand over as many images as the user attached, and this
+    family is the first with a hard ceiling on that. Silently keeping the first few
+    would be the worst outcome: the run succeeds, looks normal, and quietly ignores
+    pictures the user deliberately attached — so say it up front instead.
+    """
+    limit = _QWEN_REF_LIMIT.get(_qwen_edit_node(unet), 3)
+    if len(ref_images) <= limit:
+        return
+    raise RuntimeError(
+        f"{_label(unet)} takes at most {limit} image{'s' if limit > 1 else ''} at once "
+        f"and {len(ref_images)} were attached. Remove "
+        f"{len(ref_images) - limit} of them, or switch to a FLUX.2 model, which has no "
+        f"such limit.")
 
 
 def _with_lora(unet: str, loaders: dict, control_scale: float | None = None) -> dict:
@@ -870,6 +904,7 @@ def _qwen_edit_conditioning(unet, prompt: str, ref_images) -> dict:
     than one reference the model needs to know how they are arranged. Its own template
     pins "index_timestep_zero" and so does the bundle.
     """
+    _check_qwen_refs(unet, ref_images)
     b = cat.bundle_of_unet(unet)
     g = {"pos": _qwen_edit_encode(unet, prompt, ref_images),
          "neg_enc": _qwen_edit_encode(unet, "", ref_images)}

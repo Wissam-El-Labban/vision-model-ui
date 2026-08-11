@@ -54,23 +54,24 @@ export function resolveFlux(picked: string, models: FluxModel[], role: FluxRole)
   return forRole.find((m) => m.name === picked)?.name ?? forRole[0]?.name ?? "";
 }
 
-/** Qwen's per-checkpoint defaults, mirroring the backend's `_QWEN_STEPS_BY_ID`
- *  and `_QWEN_CFG_BY_ID` (flux_client.py). Within this one family the published
- *  settings vary more than the families do from each other — the create models
- *  run long at cfg 4, the edit ones shorter and lower — so they are a table
- *  rather than a family-wide constant. Anything unlisted falls back to the
- *  create defaults, the same way the backend does. */
+/** Qwen's per-checkpoint defaults, mirroring the backend's `_QWEN_STEPS_BY_UNET`
+ *  and `_QWEN_CFG_BY_UNET` (flux_client.py). Within this one family the published
+ *  settings vary more than the families do from each other — the create halves
+ *  run long at cfg 4, the edit halves shorter and lower — so they are a table
+ *  rather than a family-wide constant. Keyed by weight *file* rather than bundle,
+ *  because one Qwen bundle ships both halves and they disagree. Anything unlisted
+ *  falls back to the create defaults, the same way the backend does. */
 const QWEN_STEPS: Record<string, number> = {
-  "qwen-image-2512-fp8": 50,
-  "qwen-image-fp8": 20,
-  "qwen-image-edit-2511": 40,
-  "qwen-image-edit": 20,
+  "qwen_image_2512_fp8_e4m3fn.safetensors": 50,
+  "qwen_image_fp8_e4m3fn.safetensors": 20,
+  "qwen_image_edit_2511_fp8mixed.safetensors": 40,
+  "qwen_image_edit_fp8_e4m3fn.safetensors": 20,
 };
 const QWEN_CFG: Record<string, number> = {
-  "qwen-image-2512-fp8": 4,
-  "qwen-image-fp8": 4,
-  "qwen-image-edit-2511": 3,
-  "qwen-image-edit": 2.5,
+  "qwen_image_2512_fp8_e4m3fn.safetensors": 4,
+  "qwen_image_fp8_e4m3fn.safetensors": 4,
+  "qwen_image_edit_2511_fp8mixed.safetensors": 3,
+  "qwen_image_edit_fp8_e4m3fn.safetensors": 2.5,
 };
 
 /** The guidance a mode starts at, which depends on the model that will run it.
@@ -89,7 +90,7 @@ export function guidanceFor(op: GenOp, models: FluxModel[], picked = ""): number
   const name = resolveFlux(picked, models, role);
   const pickedModel = models.find((m) => m.name === name);
   if (pickedModel?.family === "wan") return 3.5;
-  if (pickedModel?.family === "qwen") return QWEN_CFG[pickedModel.bundle ?? ""] ?? 4;
+  if (pickedModel?.family === "qwen") return QWEN_CFG[pickedModel.name] ?? 4;
   if (pickedModel?.family === "flux2") {
     return pickedModel.bundle === "flux2-klein-9b" ? 3.5 : 2.5;
   }
@@ -107,7 +108,7 @@ export function stepsFor(op: GenOp, models: FluxModel[], picked = ""): number {
   const name = resolveFlux(picked, models, roleFor(op));
   const pickedModel = models.find((m) => m.name === name);
   if (pickedModel?.bundle === "flux2-klein-9b") return 8;
-  if (pickedModel?.family === "qwen") return QWEN_STEPS[pickedModel.bundle ?? ""] ?? 50;
+  if (pickedModel?.family === "qwen") return QWEN_STEPS[pickedModel.name] ?? 50;
   if (pickedModel?.family === "flux2") return 35;
   return 20;
 }
