@@ -436,8 +436,14 @@ export default function ImageModels({ models, onChanged }: Props) {
   // together and each takes its own adapter. Wan is excluded — its graph can't
   // apply one — mirroring the backend's `_takes_lora` (flux_client.py).
   const loraModels = models.filter((m) => m.family !== "wan");
-  // Only FLUX.2 models take a swappable encoder; FLUX.1's is wired into its graph.
-  const flux2 = (cat?.bundles ?? []).filter((b) => b.family === "flux2" && b.installed);
+  // FLUX.2 and Qwen each name one encoder per bundle and load it through CLIPLoader,
+  // so either can be pointed at another checkpoint of the same architecture. FLUX.1's
+  // CLIP-L + T5 pair is wired into its graph as a constant, and Wan's is loaded by its
+  // own graph — neither is swappable. Mirrors the backend's
+  // `_SWAPPABLE_ENCODER_FAMILIES` (flux_client.py).
+  const swappable = (cat?.bundles ?? []).filter(
+    (b) => (b.family === "flux2" || b.family === "qwen") && b.installed
+  );
 
   return (
     <div className="section">
@@ -574,10 +580,10 @@ export default function ImageModels({ models, onChanged }: Props) {
               {/* Text encoders. Separate from the model because they're separable: the
                   bundled one is a default, and swapping in a lighter quant of the same
                   architecture is the main way to fit a big model on a small card. */}
-              {flux2.length > 0 && (
+              {swappable.length > 0 && (
                 <>
                   <label className="lbl">Text encoders</label>
-                  {flux2.map((b) => (
+                  {swappable.map((b) => (
                     <div key={b.id} className="row">
                       <span className="muted small te-model">{b.label}</span>
                       <select

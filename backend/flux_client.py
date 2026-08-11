@@ -823,9 +823,12 @@ def _loaders(unet: str, control_scale: float | None = None) -> dict:
         g = {
             "unet_raw": _unet_node(unet),
             # One encoder, not a pair: ComfyUI's `qwen_image` CLIP type reads
-            # Qwen2.5-VL directly. No `_check_encoder_layout` — that check is keyed to
-            # FLUX.2's detection path and would reject a perfectly good Qwen encoder.
-            "clip": _clip_node(b["clip"], "qwen_image"),
+            # Qwen2.5-VL directly. Through `clip_for`, so a user's swapped-in encoder
+            # is what actually loads — reading `b["clip"]` here would have left the
+            # picker changing a setting the graph then ignored. No
+            # `_check_encoder_layout`: that check is keyed to FLUX.2's detection path
+            # and would reject a perfectly good Qwen encoder.
+            "clip": _clip_node(clip_for(b), "qwen_image"),
             "vae": {"class_type": "VAELoader", "inputs": {"vae_name": b["vae"]}},
         }
         shift = {"class_type": "ModelSamplingAuraFlow",
@@ -3081,7 +3084,7 @@ def delete_bundle(bundle_id: str) -> None:
     # above and leaves the settings it isn't removing alone.
     for name in cat.unets_of(b):
         settings.set_loras(name, [])
-    if b["family"] == cat.FAMILY_FLUX2:
+    if b["family"] in _SWAPPABLE_ENCODER_FAMILIES:
         settings.set_text_encoder(bundle_id, "")
 
 
@@ -3114,9 +3117,10 @@ def encoder_for(unet: str) -> str:
     user-added UNet with no bundle, which is the same fallback `_loaders` takes.
     """
     family = cat.family_of(unet)
-    if family == cat.FAMILY_FLUX2:
-        return clip_for(cat.bundle_of_unet(unet))
-    if family in (cat.FAMILY_QWEN, cat.FAMILY_WAN):
+    if family in _SWAPPABLE_ENCODER_FAMILIES:
+        b = cat.bundle_of_unet(unet)
+        return clip_for(b) if b else ""
+    if family == cat.FAMILY_WAN:
         b = cat.bundle_of_unet(unet)
         return b["clip"] if b else ""
     return f"{CLIP_L} + {T5}"
@@ -3281,6 +3285,15 @@ def _fits(add_on: int | None, model: int | None) -> bool:
     return add_on is None or model is None or add_on == model
 
 
+# Which families load their text encoder as a swappable file. FLUX.2 and Qwen both
+# name one encoder per bundle and load it through CLIPLoader, so either can be pointed
+# at another checkpoint of the same architecture — a lighter quant to fit a smaller
+# card, or a differently-tuned build of the same model. FLUX.1 is excluded because its
+# CLIP-L + T5 pair is wired into the graph as a constant, and Wan because its encoder
+# is loaded by its own bespoke graph.
+_SWAPPABLE_ENCODER_FAMILIES = (cat.FAMILY_FLUX2, cat.FAMILY_QWEN)
+
+
 def list_text_encoders() -> list[dict]:
     """Every text encoder on disk, with the models each one is the default for and the
     ones it can actually serve.
@@ -3295,7 +3308,7 @@ def list_text_encoders() -> list[dict]:
     defaults: dict[str, list[str]] = {}
     wanted: dict[str, int | None] = {}
     for b in cat.BUNDLES:
-        if b["family"] == cat.FAMILY_FLUX2:
+        if b["family"] in _SWAPPABLE_ENCODER_FAMILIES:
             defaults.setdefault(b["clip"], []).append(b["label"])
             # Measured against the encoder the bundle ships with, *not* against the
             # transformer: a projection sits between them and the two widths are not
@@ -3317,13 +3330,14 @@ def list_text_encoders() -> list[dict]:
 
 
 def selected_text_encoders() -> dict[str, str]:
-    """What each FLUX.2 model is currently set to load."""
-    return {b["id"]: clip_for(b) for b in cat.BUNDLES if b["family"] == cat.FAMILY_FLUX2}
+    """What each model with a swappable encoder is currently set to load."""
+    return {b["id"]: clip_for(b) for b in cat.BUNDLES
+            if b["family"] in _SWAPPABLE_ENCODER_FAMILIES}
 
 
 def set_text_encoder(bundle_id: str, name: str) -> None:
     b = cat.get(bundle_id)
-    if b["family"] != cat.FAMILY_FLUX2:
+    if b["family"] not in _SWAPPABLE_ENCODER_FAMILIES:
         raise ValueError(f"{b['label']} doesn't take a swappable text encoder.")
     safe = os.path.basename(name or "")
     if safe and not (cat.TE_DIR / safe).exists():
@@ -3473,7 +3487,8 @@ def delete_text_encoder(name: str) -> None:
     if not p.exists():
         raise FileNotFoundError(safe)
     for b in cat.BUNDLES:
-        if b["family"] == cat.FAMILY_FLUX2 and cat.installed(b) and clip_for(b) == safe:
+        if (b["family"] in _SWAPPABLE_ENCODER_FAMILIES
+                and cat.installed(b) and clip_for(b) == safe):
             raise ValueError(f"{b['label']} is using {safe}. Point it at another encoder first.")
     p.unlink()
 
