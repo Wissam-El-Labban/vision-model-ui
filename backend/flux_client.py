@@ -486,8 +486,25 @@ def ensure_server(on_status=None) -> None:
     for _ in range(120):  # up to ~60s for boot
         if _server_up():
             return
+        if _proc.poll() is not None:
+            # Died during boot — almost always a missing dependency in an install that
+            # was cut off. Waiting out the clock only hides the reason, so surface it.
+            log.close()
+            raise RuntimeError(f"FLUX engine exited while starting: {_boot_error()} "
+                               f"Re-run ./run.sh to repair the engine install.")
         time.sleep(0.5)
-    raise RuntimeError("FLUX engine failed to start in time.")
+    raise RuntimeError("FLUX engine failed to start in time "
+                       f"(see {_RUNTIME / 'comfyui.log'}).")
+
+
+def _boot_error() -> str:
+    """The last meaningful line of the sidecar's log — the exception, for a crash."""
+    try:
+        lines = (_RUNTIME / "comfyui.log").read_text(errors="replace").splitlines()
+    except OSError:
+        return "(no log)"
+    lines = [ln.strip() for ln in lines if ln.strip()]
+    return lines[-1] if lines else "(empty log)"
 
 
 def free() -> None:

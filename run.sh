@@ -158,11 +158,16 @@ CVENV="$FLUX_DIR/cvenv"
 COMFY_COMMIT="51bf508a0b1bde9416a0c221b0f33f8325305229"
 GGUF_COMMIT="6ea2651e7df66d7585f6ffee804b20e92fb38b8a"
 
-# Mirror flux_client.runtime_ready(): the venv and ComfyUI, not the weights.
+# The venv and ComfyUI, not the weights — plus the venv's dependencies, checked
+# offline the same way as the backend's. A pip install cut off partway leaves the
+# venv in place without torch; checking only for the interpreter would call that
+# installed forever, and ComfyUI would die on import every time the app started it.
 flux_installed() {
     [ -x "$CVENV/bin/python" ] || return 1
     [ -f "$COMFY_DIR/main.py" ] || return 1
-    return 0
+    "$CVENV/bin/pip" install -r "$COMFY_DIR/requirements.txt" \
+        -r "$COMFY_DIR/custom_nodes/ComfyUI-GGUF/requirements.txt" \
+        --no-index --quiet --disable-pip-version-check --no-input > /dev/null 2>&1
 }
 
 # Report what's installed, and tell a fresh machine where to get a model.
@@ -183,6 +188,7 @@ elif flux_installed; then
     echo -e "${GREEN}✓ Image engine already installed${NC}"
     models_hint
 else
+    [ -x "$CVENV/bin/python" ] && echo -e "${YELLOW}Image engine setup is incomplete — finishing it...${NC}"
     # 1. ComfyUI + the GGUF loader node, pinned to known-good commits.
     if [ ! -f "$COMFY_DIR/main.py" ]; then
         echo -e "${YELLOW}Cloning ComfyUI...${NC}"
