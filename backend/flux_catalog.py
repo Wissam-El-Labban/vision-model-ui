@@ -39,6 +39,7 @@ _DIRS = {"unet": UNET_DIR, "clip": CLIP_DIR, "text_encoders": TE_DIR, "vae": VAE
 
 FAMILY_FLUX1 = "flux1"
 FAMILY_FLUX2 = "flux2"
+FAMILY_FLUX3 = "flux3"
 FAMILY_QWEN = "qwen"
 FAMILY_WAN = "wan"
 
@@ -77,6 +78,45 @@ STAGING_DIR = MODELS_DIR / ".shards"
 # small-enough one wants — casting it again (as the size heuristic for user-added models
 # would) only degrades it. A checkpoint too big for the card says so explicitly instead.
 BUNDLES = [
+    # FLUX 3 is its own family, not a FLUX.2 variant, although ComfyUI derives its model
+    # class from Flux2 and it decodes through the same 128-channel VAE. The graph is
+    # different where it matters: a plain KSampler on euler/simple (the timestep shift
+    # is baked into ComfyUI's Flux3 config, so there is no Flux2Scheduler), no
+    # FluxGuidance (the distilled checkpoint has no guidance embedding), and a
+    # Qwen3-VL-4B encoder that loads only under CLIP type `flux3`.
+    #
+    # From BFL's ComfyUI packaging, not the reference repo (flux-3-image-klein). Those
+    # are the same distilled weights, but the reference repo ships its encoder in
+    # diffusers layout, which is the re-keying trap FLUX.2 [dev]'s encoder hit (below).
+    # The packaging's files load as they are. bf16 throughout: the repo's int8/nvfp4
+    # variants exist for 8 GB cards and Blackwell, and on this GPU they only cost quality.
+    {
+        "id": "flux3-klein",
+        "label": "FLUX 3 Image Klein — from Black Forest Labs",
+        "family": FAMILY_FLUX3,
+        "roles": [ROLE_CREATE, ROLE_EDIT],
+        "blurb": ("BFL's newest distilled model: 16 steps, no guidance, and edits or "
+                  "combines up to 10 reference images. Gated: accept the licence (FLUX "
+                  "Kommunity — non-commercial, or under $5M revenue) on HuggingFace and "
+                  "save a token first. Full bf16."),
+        "size_gb": 20.3,
+        "vram_gb": 31,
+        "gated": True,
+        "unet": "flux3-image-klein-bf16.safetensors",
+        "weight_dtype": "default",
+        "clip": "qwen3vl_4b_bf16.safetensors",
+        "vae": "flux2-vae.safetensors",
+        "files": [
+            ("black-forest-labs/flux-3-image-klein-comfy",
+             "diffusion_models/flux3-image-klein-bf16.safetensors", "unet"),
+            ("black-forest-labs/flux-3-image-klein-comfy",
+             "text_encoders/qwen3vl_4b_bf16.safetensors", "text_encoders"),
+            # Not the same file as either FLUX.2 bundle's VAE, which are saved under their
+            # own names, so this one keeps the upstream name without colliding.
+            ("black-forest-labs/flux-3-image-klein-comfy",
+             "vae/flux2-vae.safetensors", "vae"),
+        ],
+    },
     {
         "id": "flux2-dev-bfl",
         "label": "FLUX.2 [dev] — from Black Forest Labs",

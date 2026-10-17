@@ -90,6 +90,9 @@ export function guidanceFor(op: GenOp, models: FluxModel[], picked = ""): number
   const name = resolveFlux(picked, models, role);
   const pickedModel = models.find((m) => m.name === name);
   if (pickedModel?.family === "wan") return 3.5;
+  // FLUX 3 Klein is guidance-distilled: a real cfg of 1 (no negative pass) is its
+  // published setting, and raising it only costs time.
+  if (pickedModel?.family === "flux3") return 1;
   if (pickedModel?.family === "qwen") return QWEN_CFG[pickedModel.name] ?? 4;
   if (pickedModel?.family === "flux2") {
     return pickedModel.bundle === "flux2-klein-9b" ? 3.5 : 2.5;
@@ -101,13 +104,14 @@ export function guidanceFor(op: GenOp, models: FluxModel[], picked = ""): number
  *
  * Every model defaults to 20 except [klein] — a distilled 9B variant that, like
  * Wan's Lightning LoRA path, converges in far fewer steps — FLUX.2 [dev], which
- * wants more to hit its ceiling, and the Qwen checkpoints, which each publish
- * their own. Mirrors the backend's `_default_steps`; resolves through
+ * wants more to hit its ceiling, FLUX 3 Klein (16, its published setting), and
+ * the Qwen checkpoints, which each publish their own. Mirrors the backend's `_default_steps`; resolves through
  * `resolveFlux` for the same reason `guidanceFor` does. */
 export function stepsFor(op: GenOp, models: FluxModel[], picked = ""): number {
   const name = resolveFlux(picked, models, roleFor(op));
   const pickedModel = models.find((m) => m.name === name);
   if (pickedModel?.bundle === "flux2-klein-9b") return 8;
+  if (pickedModel?.family === "flux3") return 16;
   if (pickedModel?.family === "qwen") return QWEN_STEPS[pickedModel.name] ?? 50;
   if (pickedModel?.family === "flux2") return 35;
   return 20;

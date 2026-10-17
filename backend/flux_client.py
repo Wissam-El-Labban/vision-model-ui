@@ -11,6 +11,8 @@ No weights ship with the runtime — the user installs a *bundle* from the UI (s
   - **flux2** — FLUX.2 [dev]. One 32B transformer serves every mode: text
     conditioning through a Mistral-3 encoder, plus optional `ReferenceLatent`s for
     edit/compose. Samples through `SamplerCustomAdvanced` with no negative branch.
+  - **flux3** — FLUX 3 Image Klein. FLUX.2's VAE, latent and `ReferenceLatent` chain,
+    but a Qwen3-VL-4B encoder, no guidance embedding, and a plain KSampler.
   - **flux1** — FLUX.1, two transformers split by role: dev for `create` (pure text
     conditioning), Kontext for `edit`/`compose` (additionally takes a
     `ReferenceLatent` of the source image, which is what preserves identity). Using
@@ -93,6 +95,18 @@ CREATE_GUIDANCE = 3.5
 FLUX2_GUIDANCE = 2.5
 KLEIN_GUIDANCE = 3.5
 GUIDANCE_MIN, GUIDANCE_MAX = 0.5, 10.0
+
+# FLUX 3 Image Klein, from BFL's model card and ComfyUI's own templates for it
+# (image_flux3_klein_distilled_t2i.json / _image_edit.json): 16 steps, euler/simple,
+# cfg 1. The checkpoint is step- and guidance-distilled, so there is no guidance
+# embedding to drive and the value is a real KSampler cfg. At 1 the uncond pass is
+# skipped entirely. BFL's note is that raising it "does not help", and it doubles the
+# cost of every step, which is why the default is the floor and not a midpoint.
+FLUX3_STEPS = 16
+FLUX3_GUIDANCE = 1.0
+# References the model was trained to take at once (BFL's model card). Edit, compose
+# and control all chain one ReferenceLatent per image, so the limit covers them all.
+FLUX3_REF_LIMIT = 10
 
 # Qwen-Image, from ComfyUI's own templates for it (image_qwen_Image_2512.json and
 # image_qwen_image.json, shipped in comfyui_workflow_templates).
@@ -384,7 +398,7 @@ def _source_resolution(unet, pil) -> tuple[int, int]:
     fam = cat.family_of(unet)
     if fam == cat.FAMILY_WAN:
         return _wan_resolution(pil)
-    if fam == cat.FAMILY_FLUX2:
+    if fam in (cat.FAMILY_FLUX2, cat.FAMILY_FLUX3):
         return _flux2_resolution(pil)
     # Only the create models get Qwen's larger budget; the edit ones run Kontext's
     # table, exactly as `_scale_node` wires them.
@@ -399,6 +413,8 @@ def _default_guidance(unet, role: str) -> float:
         return WAN_CFG
     if fam == cat.FAMILY_QWEN:
         return _QWEN_CFG_BY_UNET.get(os.path.basename(unet or ""), QWEN_CFG)
+    if fam == cat.FAMILY_FLUX3:
+        return FLUX3_GUIDANCE
     if fam == cat.FAMILY_FLUX2:
         bundle = cat.bundle_of_unet(unet)
         if bundle and bundle["id"] == "flux2-klein-9b":
@@ -411,6 +427,8 @@ def _default_steps(unet) -> int:
     bundle = cat.bundle_of_unet(unet)
     if bundle and bundle["id"] == "flux2-klein-9b":
         return KLEIN_STEPS
+    if cat.family_of(unet) == cat.FAMILY_FLUX3:
+        return FLUX3_STEPS
     if cat.family_of(unet) == cat.FAMILY_QWEN:
         # Every Qwen checkpoint publishes its own settings and they are all different.
         # None of them is distilled, so cutting the count costs quality rather than
@@ -830,6 +848,15 @@ def _loaders(unet: str, control_scale: float | None = None) -> dict:
             "clip": _clip_node(clip, "flux2"),
             "vae": {"class_type": "VAELoader", "inputs": {"vae_name": b["vae"]}},
         }, control_scale)
+    if cat.family_of(unet) == cat.FAMILY_FLUX3:
+        b = cat.bundle_of_unet(unet)
+        # Qwen3-VL-4B under CLIP type `flux3`, which taps it at the 8 layers FLUX 3
+        # reads. No `_check_encoder_layout`, which is keyed to FLUX.2's detection path.
+        return _with_lora(unet, {
+            "unet": _unet_node(unet),
+            "clip": _clip_node(b["clip"], "flux3"),
+            "vae": {"class_type": "VAELoader", "inputs": {"vae_name": b["vae"]}},
+        }, control_scale)
     if cat.family_of(unet) == cat.FAMILY_QWEN:
         b = cat.bundle_of_unet(unet)
         # The model chain upstream of any LoRA, in ComfyUI's own order for this family:
@@ -880,9 +907,15 @@ def _sampler(g: dict, unet, latent_src, steps, seed, width, height, denoise=1.0,
     stock "simple" schedule is wrong for it. That combination only exists on the
     custom-sampler path, so it assembles RandomNoise + BasicGuider + KSamplerSelect +
     Flux2Scheduler into SamplerCustomAdvanced.
+
+    FLUX 3 goes back to KSampler on euler/simple, the way its own templates do. Its
+    timestep shift is a fixed property of the model config rather than a schedule the
+    sampler has to compute. Like Qwen it has no guidance embedding, so `guidance` is the
+    real cfg, and the default of 1 skips the negative branch.
     """
-    if cat.family_of(unet) != cat.FAMILY_FLUX2:
-        cfg = guidance if cat.family_of(unet) == cat.FAMILY_QWEN else 1.0
+    fam = cat.family_of(unet)
+    if fam != cat.FAMILY_FLUX2:
+        cfg = guidance if fam in (cat.FAMILY_QWEN, cat.FAMILY_FLUX3) else 1.0
         g["sampler"] = {
             "class_type": "KSampler",
             "inputs": {"model": ["unet", 0], "positive": ["guide", 0], "negative": ["neg", 0],
@@ -960,6 +993,8 @@ def _conditioning(unet, prompt: str, guidance: float, ref_latents=(), ref_images
     """
     if _qwen_edits(unet):
         return _qwen_edit_conditioning(unet, prompt, ref_images)
+    if cat.family_of(unet) == cat.FAMILY_FLUX3:
+        return _flux3_conditioning(unet, prompt, ref_latents)
     flux2 = cat.family_of(unet) == cat.FAMILY_FLUX2
     g = {"pos": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}}}
     if not flux2:
@@ -989,6 +1024,36 @@ def _conditioning(unet, prompt: str, guidance: float, ref_latents=(), ref_images
     return g
 
 
+def _flux3_conditioning(unet, prompt: str, ref_latents) -> dict:
+    """FLUX 3's conditioning: the text, then one `ReferenceLatent` per reference.
+
+    The same chain FLUX.2 builds, which is all the template's `ReferenceMultiLatent`
+    does too (it appends each image's latent in order). Two differences from FLUX.2:
+    no `FluxGuidance` at the end, since a guidance-distilled checkpoint has nothing to
+    read it with, and a negative branch, because KSampler wants one. It is the
+    template's zeroed positive. At the default cfg 1 it is never evaluated, and above 1
+    it is the uncond the model expects.
+    """
+    if len(ref_latents) > FLUX3_REF_LIMIT:
+        raise RuntimeError(
+            f"{_label(unet)} takes at most {FLUX3_REF_LIMIT} images at once and "
+            f"{len(ref_latents)} were attached. Remove "
+            f"{len(ref_latents) - FLUX3_REF_LIMIT} of them.")
+    g = {"pos": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["clip", 0]}},
+         "neg": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["pos", 0]}}}
+    # The last node of the chain is named `guide`, which is what the sampler reads.
+    src = "pos"
+    for i, lat in enumerate(ref_latents):
+        node = "guide" if i == len(ref_latents) - 1 else f"ref{i}"
+        g[node] = {"class_type": "ReferenceLatent",
+                   "inputs": {"conditioning": [src, 0], "latent": list(lat)}}
+        src = node
+    if not ref_latents:
+        g["guide"] = g.pop("pos")
+        g["neg"]["inputs"]["conditioning"] = ["guide", 0]
+    return g
+
+
 def _empty_latent(unet, width, height) -> dict:
     """FLUX.1's VAE is 16-channel (EmptySD3LatentImage — the 4-channel SD latent would
     decode to noise); FLUX.2's is 128-channel and has its own node.
@@ -996,7 +1061,8 @@ def _empty_latent(unet, width, height) -> dict:
     Qwen falls in with FLUX.1 here, and does so correctly rather than by accident: its
     latent format is Wan21 (comfy/supported_models.py), which is also 16-channel.
     """
-    cls = ("EmptyFlux2LatentImage" if cat.family_of(unet) == cat.FAMILY_FLUX2
+    cls = ("EmptyFlux2LatentImage"
+           if cat.family_of(unet) in (cat.FAMILY_FLUX2, cat.FAMILY_FLUX3)
            else "EmptySD3LatentImage")
     return {"class_type": cls, "inputs": {"width": width, "height": height, "batch_size": 1}}
 
@@ -1018,7 +1084,8 @@ def _scale_node(unet, src) -> dict:
         return {"class_type": "ImageScaleToTotalPixels",
                 "inputs": {"image": list(src), "upscale_method": "area",
                            "megapixels": round(QWEN_PIXELS / 1e6, 2), "resolution_steps": 16}}
-    if fam == cat.FAMILY_FLUX2:
+    # FLUX 3 shares FLUX.2's VAE and its ~1 MP references (the template resizes to 1.0).
+    if fam in (cat.FAMILY_FLUX2, cat.FAMILY_FLUX3):
         return {"class_type": "ImageScaleToTotalPixels",
                 "inputs": {"image": list(src), "upscale_method": "area",
                            "megapixels": 1.0, "resolution_steps": 16}}
@@ -3137,7 +3204,7 @@ def encoder_for(unet: str) -> str:
     if family in _SWAPPABLE_ENCODER_FAMILIES:
         b = cat.bundle_of_unet(unet)
         return clip_for(b) if b else ""
-    if family == cat.FAMILY_WAN:
+    if family in (cat.FAMILY_WAN, cat.FAMILY_FLUX3):
         b = cat.bundle_of_unet(unet)
         return b["clip"] if b else ""
     return f"{CLIP_L} + {T5}"

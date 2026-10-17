@@ -154,17 +154,26 @@ echo ""
 FLUX_DIR="flux_runtime"
 COMFY_DIR="$FLUX_DIR/ComfyUI"
 CVENV="$FLUX_DIR/cvenv"
-# Pinned to the exact commits this workflow was validated against.
-COMFY_COMMIT="51bf508a0b1bde9416a0c221b0f33f8325305229"
+# Pinned to the exact commits this workflow was validated against. ComfyUI is v0.41.3:
+# FLUX 3 Klein needs 0.41.0 or later (its `flux3` CLIP type and model class).
+COMFY_COMMIT="8713616fcc321624e306bbd36be5906203dcb0dc"
 GGUF_COMMIT="6ea2651e7df66d7585f6ffee804b20e92fb38b8a"
 
 # The venv and ComfyUI, not the weights — plus the venv's dependencies, checked
 # offline the same way as the backend's. A pip install cut off partway leaves the
 # venv in place without torch; checking only for the interpreter would call that
 # installed forever, and ComfyUI would die on import every time the app started it.
+#
+# A clone on another commit counts as not installed, so bumping COMFY_COMMIT moves an
+# existing install onto it (and reinstalls its requirements) on the next run.
+comfy_at_pin() {
+    [ "$(git -C "$COMFY_DIR" rev-parse HEAD 2>/dev/null)" = "$COMFY_COMMIT" ]
+}
+
 flux_installed() {
     [ -x "$CVENV/bin/python" ] || return 1
     [ -f "$COMFY_DIR/main.py" ] || return 1
+    comfy_at_pin || return 1
     "$CVENV/bin/pip" install -r "$COMFY_DIR/requirements.txt" \
         -r "$COMFY_DIR/custom_nodes/ComfyUI-GGUF/requirements.txt" \
         --no-index --quiet --disable-pip-version-check --no-input > /dev/null 2>&1
@@ -178,7 +187,7 @@ models_hint() {
         echo -e "${GREEN}✓ $unets image model file(s) installed${NC}"
     else
         echo -e "${YELLOW}No image model installed yet — open the app and install one in the${NC}"
-        echo -e "${YELLOW}Models panel (FLUX.2 [dev] recommended; needs ~50 GB and a 48 GB GPU).${NC}"
+        echo -e "${YELLOW}Models panel (FLUX 3 Image Klein recommended; ~20 GB download, 32 GB+ GPU).${NC}"
     fi
 }
 
@@ -193,6 +202,10 @@ else
     if [ ! -f "$COMFY_DIR/main.py" ]; then
         echo -e "${YELLOW}Cloning ComfyUI...${NC}"
         git clone --quiet https://github.com/comfyanonymous/ComfyUI "$COMFY_DIR"
+        git -C "$COMFY_DIR" checkout --quiet "$COMFY_COMMIT"
+    elif ! comfy_at_pin; then
+        echo -e "${YELLOW}Updating ComfyUI to the pinned version...${NC}"
+        git -C "$COMFY_DIR" fetch --quiet origin
         git -C "$COMFY_DIR" checkout --quiet "$COMFY_COMMIT"
     fi
     if [ ! -d "$COMFY_DIR/custom_nodes/ComfyUI-GGUF" ]; then

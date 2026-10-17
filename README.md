@@ -34,7 +34,8 @@ and running, and serves everything at **http://127.0.0.1:8000**.
 
 > Requires Python 3.10+, Node.js 18+, and (on first run) internet access to install Ollama.
 
-`run.sh` also installs the image-generation *engine* (a ComfyUI sidecar in its own venv) but
+`run.sh` also installs the image-generation *engine* (a ComfyUI sidecar in its own venv, pinned to
+v0.41.3; an older install is moved onto the pin on the next run) but
 downloads **no image weights** — which model to run is your choice, and they are large. Skip the
 engine entirely with `SKIP_FLUX=1 ./run.sh` if you only want chat.
 
@@ -44,6 +45,7 @@ Install a model from the sidebar's **🖼️ Image Models** panel. Nothing gener
 
 | Model | Download | VRAM | Does | Notes |
 | --- | --- | --- | --- | --- |
+| **FLUX 3 Image Klein** | ~20 GB | 31 GB | create + edit + combine + control | BFL's newest. Distilled, 16 steps at cfg 1, up to 10 reference images. bf16. Gated ([licence](https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy)). |
 | **FLUX.2 [dev]** | ~100 GB | 46 GB | create + edit | Best photorealism. Gated. bf16 on disk, cast to fp8 at load. |
 | **FLUX.2 [klein] 9B** | ~35 GB | 32 GB | create + edit | Distilled 9B, runs in bf16 with no quantization, 8 steps. Gated. |
 | **Qwen-Image 2512 + Edit 2511** — fp8 | ~51 GB | 28 GB | create + edit + combine + control | The best there is at legible text inside an image, English and Chinese. Ungated. |
