@@ -18,6 +18,14 @@ DEFAULT_URL = "http://localhost:11434"
 # timeout so a cold model load on the first request doesn't look like a hang.
 CHAT_TIMEOUT = (10, 300)
 
+# Loading a model means reading its whole blob from disk (~45 s for a 9B model on
+# this box's EBS volume), so keep it resident well past Ollama's 5 minute default.
+KEEP_ALIVE = "30m"
+
+# The smallest window `context_size_for` hands out. Every call uses at least this,
+# because Ollama reloads the model whenever `num_ctx` changes between requests.
+MIN_CTX = 8192
+
 GITHUB_LATEST = "https://api.github.com/repos/ollama/ollama/releases/latest"
 
 
@@ -33,7 +41,7 @@ def context_size_for(messages):
     of images and cap it.
     """
     n_images = sum(len(m.get("images") or []) for m in messages)
-    return min(32768, max(8192, 4096 + 2048 * n_images))
+    return min(32768, max(MIN_CTX, 4096 + 2048 * n_images))
 
 
 def stream_chat(url, model, messages):
@@ -53,6 +61,7 @@ def stream_chat(url, model, messages):
         "messages": messages,
         "stream": True,
         "think": False,
+        "keep_alive": KEEP_ALIVE,
         "options": {"num_ctx": num_ctx},
     }
     response = requests.post(
@@ -106,6 +115,7 @@ def stream_chat_tools(url, model, messages, tools):
         "tools": tools,
         "stream": True,
         "think": False,
+        "keep_alive": KEEP_ALIVE,
         "options": {"num_ctx": num_ctx},
     }
     response = requests.post(
@@ -152,13 +162,13 @@ def stream_chat_tools(url, model, messages, tools):
             }
 
 
-def ask_once(url, model, system, user, num_ctx=2048):
+def ask_once(url, model, system, user, num_ctx=MIN_CTX):
     """One short text-only question, answered in full. "" on any failure.
 
-    No images and a small context on purpose: this is for classification-shaped
-    questions about what the user *asked for*, which the text answers on its own.
-    Skipping the vision tokens is what keeps it cheap enough to run before the
-    real turn.
+    No images on purpose: this is for classification-shaped questions about what
+    the user *asked for*, which the text answers on its own. Skipping the vision
+    tokens is what keeps it cheap enough to run before the real turn. The context
+    is the same as the turn that follows, so that turn reuses the loaded runner.
     """
     payload = {
         "model": model,
@@ -168,6 +178,7 @@ def ask_once(url, model, system, user, num_ctx=2048):
         ],
         "stream": False,
         "think": False,
+        "keep_alive": KEEP_ALIVE,
         "options": {"num_ctx": num_ctx},
     }
     try:
@@ -199,7 +210,8 @@ def generate_title(url, model, first_user, first_assistant):
         ],
         "stream": False,
         "think": False,
-        "options": {"num_ctx": 4096},
+        "keep_alive": KEEP_ALIVE,
+        "options": {"num_ctx": MIN_CTX},
     }
     try:
         response = requests.post(
@@ -395,6 +407,7 @@ def enhance_prompt(url, model, prompt, mode, images_b64=(), subjects=1, contact=
         "messages": messages,
         "stream": False,
         "think": False,
+        "keep_alive": KEEP_ALIVE,
         "options": {"num_ctx": context_size_for(messages)},
     }
     try:
@@ -585,6 +598,70 @@ def unload_all(url):
         )
         unloaded.append(name)
     return unloaded
+
+
+def gpu_total_gb():
+    """Total VRAM of the first GPU in GB, or None if it can't be read.
+
+    Only meaningful when Ollama runs on this machine; callers treat None as
+    "unknown" and fall back to unloading.
+    """
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout
+        return int(out.split()[0]) / 1024
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
+def loaded_vram_gb(url):
+    """VRAM held by Ollama's loaded models, in GB."""
+    return sum(m.get("size_vram") or 0 for m in running(url)) / 1e9
+
+
+def _model_size_gb(url, name):
+    """Size on disk of an installed model, in GB (None if not installed)."""
+    try:
+        models = requests.get(f"{url}/api/tags", timeout=5).json().get("models", [])
+    except (requests.RequestException, ValueError):
+        return None
+    for m in models:
+        if m.get("name") == name:
+            return (m.get("size") or 0) / 1e9
+    return None
+
+
+def warm(url, model, reserved_gb):
+    """Load `model` ahead of time so the next request doesn't pay the disk read.
+
+    Skipped when it's already loaded, or when it wouldn't fit beside `reserved_gb`
+    of VRAM held elsewhere (FLUX): a model that doesn't fit gets split onto the
+    CPU, and a slow model is worse than a cold one. The 1.2 covers the KV cache
+    and vision projector on top of the weights. Fails soft — this is only ever
+    an optimisation.
+    """
+    try:
+        loaded = running(url)
+        if any(m.get("name") == model for m in loaded):
+            return False
+        size = _model_size_gb(url, model)
+        total = gpu_total_gb()
+        if size is None or total is None:
+            return False
+        held = sum(m.get("size_vram") or 0 for m in loaded) / 1e9
+        if held + size * 1.2 + reserved_gb > total:
+            return False
+        requests.post(
+            f"{url}/api/chat",
+            json={"model": model, "messages": [], "keep_alive": KEEP_ALIVE,
+                  "options": {"num_ctx": MIN_CTX}},
+            timeout=CHAT_TIMEOUT,
+        )
+        return True
+    except requests.RequestException:
+        return False
 
 
 # --------------------------------------------------------------------------- #

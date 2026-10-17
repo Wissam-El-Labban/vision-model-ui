@@ -842,6 +842,10 @@ export default function App() {
               : {}),
             seed: gen.seed ? parseInt(gen.seed, 10) : null,
             ollama_url: ollamaUrl,
+            // Whichever model the next prompt will hit, so the backend can reload
+            // it while this image is on screen rather than on the next send.
+            warm_model:
+              (enhancerMode !== "off" ? effectiveEnhanceModel : model) || null,
           },
           {
             onStatus: (m) => {

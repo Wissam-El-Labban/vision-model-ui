@@ -149,6 +149,9 @@ class GenerateRequest(BaseModel):
     canny_high: float | None = None
     seed: int | None = None
     ollama_url: str = oc.DEFAULT_URL
+    # The Ollama model the user will want next (enhancer or chat). Loaded in the
+    # background once the image is done, if it fits beside FLUX. None = don't.
+    warm_model: str | None = None
     # The chat to record this generation in. The worker that runs the job outlives
     # the request, so it — not the browser — is what writes the turns. None means
     # don't record. The chat row must already exist (PUT /api/chats/<id>).
@@ -823,13 +826,62 @@ def _recorder(chat_id: str | None):
     return record
 
 
+# Headroom kept free beside both tenants: CUDA contexts, VAE decode spikes.
+_VRAM_MARGIN_GB = 2.0
+
+
+def _flux_vram_gb(unets) -> float | None:
+    """VRAM the largest of these UNets needs, or None if any is unknown (user-added)."""
+    needs = [(cat.bundle_of_unet(u) or {}).get("vram_gb") for u in unets]
+    return None if not needs or None in needs else float(max(needs))
+
+
+def _free_gpu_for_flux(ollama_url, unets, emit) -> None:
+    """Unload Ollama before FLUX runs — but only when the two can't share the GPU.
+
+    Unloading isn't free: reloading the vision model reads its whole blob back from
+    disk, ~45 s for a 9B model here, and every prompt enhancement paid it. So keep
+    it resident whenever its VRAM plus the FLUX bundle's fits. Anything unknown
+    (remote Ollama, no nvidia-smi, a user-added UNet) unloads as before.
+    """
+    try:
+        need = _flux_vram_gb(unets)
+        total = oc.gpu_total_gb()
+        if need is not None and total is not None:
+            held = oc.loaded_vram_gb(ollama_url)
+            if held + need + _VRAM_MARGIN_GB <= total:
+                if held:
+                    emit({"type": "status", "message": "Keeping vision model loaded…"})
+                return
+        emit({"type": "status", "message": "Freeing VRAM (unloading vision model)…"})
+        oc.unload_all(ollama_url)
+    except Exception:
+        pass  # best-effort; Ollama may be remote or already free
+
+
+def _warm_after(ollama_url, model, unets) -> None:
+    """Reload the chat/enhancer model in the background once FLUX is done.
+
+    The disk read then happens while the user looks at the result instead of on
+    their next prompt. FLUX stays resident in ComfyUI, so its VRAM is reserved.
+    """
+    if not model:
+        return
+    reserved = _flux_vram_gb(unets)
+    if reserved is None:
+        return  # can't tell whether it fits; a CPU-split model is worse than cold
+    threading.Thread(target=oc.warm, args=(ollama_url, model, reserved),
+                     daemon=True).start()
+
+
 @app.post("/api/generate")
 def generate(req: GenerateRequest):
     """Run a local image generation, streaming progress then the final image.
 
     Every mode runs on FLUX in the ComfyUI sidecar: create (txt2img/img2img) on
     FLUX dev, edit/compose on FLUX Kontext. The other GPU tenant (the Ollama vision
-    model) is freed first, since the GPU can't hold both. The synchronous call runs
+    model) is freed first when the GPU can't hold both (see `_free_gpu_for_flux`),
+    and reloaded in the background afterwards. The synchronous call runs
     in a worker thread that pushes events onto a queue the response generator drains.
     """
     if not fx.available():
@@ -847,13 +899,8 @@ def generate(req: GenerateRequest):
         record = _recorder(req.chat_id)
 
         def worker():
+            unet = None
             try:
-                emit({"type": "status", "message": "Freeing VRAM (unloading vision model)…"})
-                try:
-                    oc.unload_all(req.ollama_url)
-                except Exception:
-                    pass  # best-effort; Ollama may be remote or already free
-
                 # Resolve the transformer once, here, and pass the resolved name down
                 # (resolving is idempotent). A request naming a model that can't serve
                 # this mode still falls back rather than failing — a stale model list
@@ -866,6 +913,7 @@ def generate(req: GenerateRequest):
                           f"{os.path.basename(str(req.flux_model))} can't {req.mode} "
                           f"here — using {fx.label(unet)} instead"})
                 label = fx.label(unet)
+                _free_gpu_for_flux(req.ollama_url, [unet], emit)
 
                 # Record the prompt before sampling rather than after it. This thread
                 # outlives the request — a reload or a Stop drops the stream but not
@@ -898,6 +946,8 @@ def generate(req: GenerateRequest):
                 events.put({"type": "error", "message": str(exc)})
             finally:
                 events.put(None)  # sentinel: worker done
+                if unet:
+                    _warm_after(req.ollama_url, req.warm_model, [unet])
 
         threading.Thread(target=worker, daemon=True).start()
         while True:
@@ -1056,12 +1106,14 @@ def agent_turn(req: AgentRequest):
                     emit({"type": "done"})
                     return
 
-                emit({"type": "status",
-                      "message": "Freeing VRAM (unloading vision model)…"})
-                try:
-                    oc.unload_all(req.ollama_url)
-                except Exception:
-                    pass  # best-effort; Ollama may be remote or already free
+                unets = []
+                for _, _, spec in specs:
+                    try:
+                        unets.append(fx.resolve_unet(
+                            req.flux_model, fx.role_for_mode(spec["mode"])))
+                    except Exception:
+                        unets.append("")  # unknown: forces the safe unload
+                _free_gpu_for_flux(req.ollama_url, unets, emit)
 
                 for index, call, spec in specs:
                     step = _emitter(events, tool_index=index)
@@ -1100,6 +1152,7 @@ def agent_turn(req: AgentRequest):
                         step({"type": "tool_error", "index": index,
                               "name": call["name"], "message": str(exc)})
                 emit({"type": "done"})
+                _warm_after(req.ollama_url, req.model, unets)
             except Exception as exc:
                 events.put({"type": "error", "message": str(exc)})
             finally:

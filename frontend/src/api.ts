@@ -691,6 +691,8 @@ export interface GenerateParams {
   canny_high?: number | null;
   seed?: number | null;
   ollama_url: string;
+  /** Ollama model to reload in the background once the image is done. */
+  warm_model?: string | null;
 }
 
 /** A `control` event: one derived control map, emitted before the final image. */
