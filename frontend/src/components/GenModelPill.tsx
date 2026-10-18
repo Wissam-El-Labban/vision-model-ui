@@ -17,6 +17,8 @@ interface Props {
   picked: string;
   models: FluxModel[];
   gen: GenSettings;
+  /** Drop the steps/cfg/seed tail, for agent mode's row of several pills. */
+  compact?: boolean;
 }
 
 /** What a generate would actually run right now: the transformer the current op
@@ -26,7 +28,7 @@ interface Props {
  * agree on — so the header can't advertise a model the dispatch wouldn't pick. The
  * encoder comes from the backend's `encoder_for`, which mirrors the graph builder,
  * for the same reason. */
-export default function GenModelPill({ op, picked, models, gen }: Props) {
+export default function GenModelPill({ op, picked, models, gen, compact }: Props) {
   const name = resolveFlux(picked, models, roleFor(op));
   const model = models.find((m) => m.name === name);
   if (!model) return null;
@@ -90,10 +92,14 @@ export default function GenModelPill({ op, picked, models, gen }: Props) {
           🕹 {kindsLabel} · {lockLabel}
         </span>
       )}
-      <span className="gen-pill-sep">·</span>
-      <span className="gen-pill-settings">
-        {gen.steps} steps · {gen.guidance} cfg · {seedLabel}
-      </span>
+      {!compact && (
+        <>
+          <span className="gen-pill-sep">·</span>
+          <span className="gen-pill-settings">
+            {gen.steps} steps · {gen.guidance} cfg · {seedLabel}
+          </span>
+        </>
+      )}
     </span>
   );
 }

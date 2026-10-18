@@ -30,7 +30,15 @@ import {
   type Usage,
 } from "./api";
 import { fileToDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
-import { guidanceFor, imagesFor, modeFor, resolveFlux, roleFor, stepsFor } from "./flux";
+import {
+  agentModels,
+  guidanceFor,
+  imagesFor,
+  modeFor,
+  resolveFlux,
+  roleFor,
+  stepsFor,
+} from "./flux";
 import { buildOllamaContext } from "./chatContext";
 import type {
   AgentStep,
@@ -1477,6 +1485,27 @@ export default function App() {
             {fluxAvailable && !agentMode && (
               <GenModelPill op={genOp} picked={gen.fluxModel} models={fluxModels} gen={gen} />
             )}
+            {/* Agent mode: every model its switched-on tools could load — image,
+                video, or both. Compact, since there can be several and the shared
+                steps/cfg/seed would just repeat on each (they're in the tooltip). */}
+            {fluxAvailable &&
+              agentMode &&
+              agentModels(
+                agentTools.filter(
+                  (t) => agentToolCatalog.find((c) => c.id === t)?.available ?? true
+                ),
+                gen.fluxModel,
+                fluxModels
+              ).map(({ op, name }) => (
+                <GenModelPill
+                  key={name}
+                  op={op}
+                  picked={name}
+                  models={fluxModels}
+                  gen={gen}
+                  compact
+                />
+              ))}
             {model && <span className="model-pill">{model}</span>}
             {messages.length > 0 && (
               <button className="btn ghost" onClick={newChat}>

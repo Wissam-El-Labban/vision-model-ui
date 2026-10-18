@@ -1,5 +1,5 @@
 import type { FluxModel, FluxRole, GenMode } from "./api";
-import type { GenOp } from "./types";
+import type { AgentToolId, GenOp } from "./types";
 
 /** Which set of transformers a workflow draws from. A FLUX.2 model serves both
  *  image roles; on FLUX.1 the sets are disjoint (dev creates, Kontext edits).
@@ -10,6 +10,35 @@ export function roleFor(op: GenOp): FluxRole {
   // that role means, even though what comes out is a new image. Mirrors the
   // backend's `role_for_mode`.
   return op === "create" ? "create" : "edit";
+}
+
+/** The workflow each agent tool runs, for picking the model it will load. Mirrors
+ *  the backend's tool → mode mapping in agent.py. */
+const AGENT_TOOL_OP: Record<AgentToolId, GenOp> = {
+  create_image: "create",
+  edit_image: "edit",
+  combine_images: "compose",
+  control_image: "control",
+  animate_image: "animate",
+};
+
+/** The image/video models an agent turn could run on, given its switched-on
+ *  tools: one entry per distinct model, each with an op that resolves to it.
+ *  Image tools come first and video last; on FLUX.2 every image tool shares one
+ *  model, so that's usually one image entry, and FLUX.1's dev + Kontext split
+ *  shows as two. */
+export function agentModels(
+  tools: AgentToolId[],
+  picked: string,
+  models: FluxModel[]
+): { op: GenOp; name: string }[] {
+  const out: { op: GenOp; name: string }[] = [];
+  for (const op of ["create", "edit", "compose", "control", "animate"] as GenOp[]) {
+    if (!tools.some((t) => AGENT_TOOL_OP[t] === op)) continue;
+    const name = resolveFlux(picked, models, roleFor(op));
+    if (name && !out.some((m) => m.name === name)) out.push({ op, name });
+  }
+  return out;
 }
 
 /** The backend mode a composer workflow submits as.
