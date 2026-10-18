@@ -1967,9 +1967,12 @@ textarea {
   flex-shrink: 0;
 }
 
+/* Wide enough for a full Ollama name ("huihui_ai/Qwen3.8-abliterated:27b") —
+   the namespace and the tag are what tell two picks apart. Capped so a very long
+   name can't squeeze the textarea away on a narrow window. */
 .model-control select,
 .model-control input {
-  max-width: 150px;
+  max-width: min(420px, 40vw);
 }
 
 /* ---------- Image generation (Analyze / Generate) ---------- */

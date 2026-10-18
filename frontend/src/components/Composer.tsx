@@ -1082,6 +1082,7 @@ export default function Composer({
             {modelChoices.length > 0 ? (
               <select
                 value={activeModel}
+                title={activeModel}
                 onChange={(e) => setActiveModel(e.target.value)}
               >
                 {modelChoices.map((m) => (
