@@ -9,7 +9,7 @@ import type {
   GenSettings,
   GenOp,
 } from "../types";
-import type { FluxModel, FluxPreprocessor } from "../api";
+import { DOC_ACCEPT, type FluxModel, type FluxPreprocessor } from "../api";
 
 /** The control maps the Control tab offers, in the order they're worth reaching for.
  *
@@ -347,7 +347,7 @@ export default function Composer({
               : isCompose
                 ? "🖼️ Drop to add reference images to combine"
                 : "🖼️ Drop an image to generate from"
-            : "📎 Drop to attach to your message"}
+            : "📎 Drop images to attach · PDFs and text files go to Documents"}
         </div>
       )}
       {fluxAvailable && (
@@ -975,7 +975,7 @@ export default function Composer({
               ? "Attach images for the agent to work on"
               : genMode
                 ? "Attach a starting image (img2img)"
-                : "Attach images"
+                : "Attach images, or add PDFs / text files to Documents"
           }
           onClick={() => fileRef.current?.click()}
           disabled={dropDisabled}
@@ -985,7 +985,7 @@ export default function Composer({
         <input
           ref={fileRef}
           type="file"
-          accept="image/*"
+          accept={`image/*,${DOC_ACCEPT}`}
           multiple
           hidden
           onChange={(e) => {

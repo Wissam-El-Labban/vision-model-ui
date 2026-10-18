@@ -11,6 +11,7 @@ policy lives in `images.py`; this module only stores what that hands it.
 """
 import base64
 import hashlib
+import json
 import re
 import sqlite3
 import time
@@ -84,6 +85,29 @@ CREATE TABLE IF NOT EXISTS chat_pinned_images (
     image_hash TEXT NOT NULL,
     ordinal    INTEGER NOT NULL
 );
+-- Documents for retrieval. The bytes and the vector index live in data/rag/<id>/
+-- (see rag.py); this row is what the library lists and what a search is scoped by.
+CREATE TABLE IF NOT EXISTS documents (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    sha256      TEXT NOT NULL UNIQUE,
+    kind        TEXT NOT NULL,             -- pdf | text
+    size_bytes  INTEGER NOT NULL,
+    pages       INTEGER,
+    n_chunks    INTEGER NOT NULL DEFAULT 0,
+    embed_model TEXT,
+    dim         INTEGER,
+    status      TEXT NOT NULL,             -- indexing | ready | error
+    error       TEXT,
+    created_at  INTEGER NOT NULL
+);
+-- Which documents each chat answers from. Cascades both ways: deleting a document
+-- takes it out of every chat, deleting a chat drops its selection.
+CREATE TABLE IF NOT EXISTS chat_documents (
+    chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    doc_id  TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    PRIMARY KEY (chat_id, doc_id)
+);
 CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_pinned_chat ON chat_pinned_images(chat_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_msgimg_msg ON message_images(message_id, ordinal);
@@ -94,6 +118,17 @@ CREATE INDEX IF NOT EXISTS idx_msgctx_msg ON message_context_images(message_id, 
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        # Columns added after the first release. CREATE TABLE IF NOT EXISTS won't add
+        # them to an existing database, so add whichever are missing.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
+        if "sources_json" not in cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN sources_json TEXT")
+        # A server that died mid-index left the row saying so forever.
+        conn.execute(
+            "UPDATE documents SET status = 'error', "
+            "error = 'Indexing was interrupted — re-index to finish it.' "
+            "WHERE status = 'indexing'"
+        )
 
 
 init_db()
@@ -274,6 +309,7 @@ def get_chat(chat_id: str) -> dict | None:
                     "model": m["model"],
                     "images": [url(r["image_hash"]) for r in imgs],
                     "context_images": [url(r["image_hash"]) for r in ctx],
+                    "sources": json.loads(m["sources_json"]) if m["sources_json"] else [],
                 }
             )
 
@@ -286,6 +322,7 @@ def get_chat(chat_id: str) -> dict | None:
             "system_prompt": c["system_prompt"],
             "system_image": sys_img,
             "pinned": pinned,
+            "documents": _chat_doc_ids(conn, chat_id),
             "messages": messages,
         }
 
@@ -296,10 +333,13 @@ def upsert_chat(
     system_prompt: str,
     pinned_hashes: list[str],
     system_image_hash: str | None,
+    doc_ids: list[str] | None = None,
 ) -> None:
     """Create the chat row if new, else update its metadata + pinned images.
 
-    Title is never overwritten here (it's set once by the LLM titler).
+    Title is never overwritten here (it's set once by the LLM titler). `doc_ids`
+    replaces the chat's document selection; None leaves it as it is, so a caller
+    that doesn't know about documents can't clear them.
     """
     now = _now()
     with _connect() as conn:
@@ -327,6 +367,15 @@ def upsert_chat(
             "INSERT INTO chat_pinned_images(chat_id, image_hash, ordinal) VALUES (?, ?, ?)",
             [(chat_id, h, i) for i, h in enumerate(pinned_hashes)],
         )
+        if doc_ids is not None:
+            conn.execute("DELETE FROM chat_documents WHERE chat_id = ?", (chat_id,))
+            # INSERT ... SELECT so an id that's since been deleted is skipped rather
+            # than failing the foreign key and with it the whole save.
+            conn.executemany(
+                "INSERT OR IGNORE INTO chat_documents(chat_id, doc_id) "
+                "SELECT ?, id FROM documents WHERE id = ?",
+                [(chat_id, d) for d in doc_ids],
+            )
 
 
 def append_message(
@@ -336,6 +385,7 @@ def append_message(
     model: str | None,
     image_hashes: list[str],
     context_hashes: list[str] | None = None,
+    sources: list[dict] | None = None,
 ) -> str:
     """Append a message to a chat. Returns the new message id.
 
@@ -352,9 +402,10 @@ def append_message(
         ).fetchone()
         ordinal = row["nxt"]
         conn.execute(
-            "INSERT INTO messages(id, chat_id, ordinal, role, content, model, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (msg_id, chat_id, ordinal, role, content, model, now),
+            "INSERT INTO messages(id, chat_id, ordinal, role, content, model, "
+            "created_at, sources_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (msg_id, chat_id, ordinal, role, content, model, now,
+             json.dumps(sources) if sources else None),
         )
         conn.executemany(
             "INSERT INTO message_images(message_id, image_hash, ordinal) VALUES (?, ?, ?)",
@@ -412,3 +463,80 @@ def gc_orphan_images() -> None:
     """
     with _connect() as conn:
         _gc_orphan_images(conn)
+
+
+# --------------------------------------------------------------------------- #
+# Documents (RAG). Files and indexes live in rag.DOCS_DIR; these are the rows.
+# --------------------------------------------------------------------------- #
+def _chat_doc_ids(conn: sqlite3.Connection, chat_id: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT doc_id FROM chat_documents WHERE chat_id = ?", (chat_id,)
+    )
+    return [r["doc_id"] for r in rows]
+
+
+def list_documents() -> list[dict]:
+    with _connect() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM documents ORDER BY created_at DESC"
+        )]
+
+
+def get_document(doc_id: str) -> dict | None:
+    with _connect() as conn:
+        r = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def get_documents(doc_ids: list[str]) -> list[dict]:
+    """Rows for these ids that exist and are searchable, in the order asked for."""
+    if not doc_ids:
+        return []
+    with _connect() as conn:
+        rows = {r["id"]: dict(r) for r in conn.execute(
+            f"SELECT * FROM documents WHERE status = 'ready' AND id IN "
+            f"({','.join('?' * len(doc_ids))})", list(doc_ids),
+        )}
+    return [rows[d] for d in doc_ids if d in rows]
+
+
+def document_by_hash(sha: str) -> dict | None:
+    with _connect() as conn:
+        r = conn.execute("SELECT * FROM documents WHERE sha256 = ?", (sha,)).fetchone()
+    return dict(r) if r else None
+
+
+def create_document(name: str, sha: str, kind: str, size_bytes: int) -> str:
+    doc_id = uuid.uuid4().hex
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO documents(id, name, sha256, kind, size_bytes, status, "
+            "created_at) VALUES (?, ?, ?, ?, ?, 'indexing', ?)",
+            (doc_id, name, sha, kind, size_bytes, _now()),
+        )
+    return doc_id
+
+
+_DOC_FIELDS = {"name", "pages", "n_chunks", "embed_model", "dim", "status", "error"}
+
+
+def update_document(doc_id: str, **fields) -> None:
+    fields = {k: v for k, v in fields.items() if k in _DOC_FIELDS}
+    if not fields:
+        return
+    with _connect() as conn:
+        conn.execute(
+            f"UPDATE documents SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
+            [*fields.values(), doc_id],
+        )
+
+
+def delete_document(doc_id: str) -> None:
+    """Drop the row; chat selections go with it (ON DELETE CASCADE)."""
+    with _connect() as conn:
+        conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+
+
+def document_ids() -> set[str]:
+    with _connect() as conn:
+        return {r["id"] for r in conn.execute("SELECT id FROM documents")}

@@ -243,3 +243,17 @@ def set_loras(model: str, picks: list[dict]) -> None:
         _write(data)
 
 
+def embed_model(default: str) -> str:
+    """The Ollama model new documents are embedded with. Each document records its
+    own, so changing this only affects what's indexed (or re-indexed) next."""
+    return _read().get("embed_model") or default
+
+
+def set_embed_model(name: str) -> None:
+    with _LOCK:
+        data = _read()
+        if name.strip():
+            data["embed_model"] = name.strip()
+        else:
+            data.pop("embed_model", None)
+        _write(data)

@@ -12,7 +12,7 @@ import random
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -24,6 +24,7 @@ from . import db
 from . import flux_catalog as cat
 from . import flux_client as fx
 from . import ollama_client as oc
+from . import rag
 from . import settings
 
 app = FastAPI(title="Vision Model Chat")
@@ -40,6 +41,12 @@ app.add_middleware(
 # the catch-all frontend mount so `/api/*` always wins.
 app.mount("/api/images", StaticFiles(directory=str(db.IMAGES_DIR)), name="images")
 app.mount("/api/thumbs", StaticFiles(directory=str(db.THUMBS_DIR)), name="thumbs")
+# Document files are deliberately *not* mounted: nothing needs to serve them back,
+# and the data directory beside them holds credentials.
+
+# Clear out whatever a crash left behind: document folders with no row, half-built
+# indexes. Safe at startup only — nothing can be mid-index yet.
+rag.gc(db.document_ids())
 
 
 # --------------------------------------------------------------------------- #
@@ -56,6 +63,10 @@ class ChatRequest(BaseModel):
     messages: list[Message]
     ollama_url: str = oc.DEFAULT_URL
     think: bool = False  # the composer's 💭 toggle
+    # Documents to answer from (see `_with_documents`), and the text to search them
+    # with — what the user typed, without the image manifest the last message has.
+    doc_ids: list[str] = []
+    doc_query: str = ""
 
 
 class PullRequest(BaseModel):
@@ -77,6 +88,7 @@ class ChatUpsert(BaseModel):
     system_prompt: str = ""
     pinned_hashes: list[str] = []
     system_image_hash: str | None = None
+    doc_ids: list[str] | None = None  # None = leave the chat's selection alone
 
 
 class MessageAppend(BaseModel):
@@ -85,6 +97,7 @@ class MessageAppend(BaseModel):
     model: str | None = None
     image_hashes: list[str] = []
     context_hashes: list[str] = []
+    sources: list[dict] = []  # the document excerpts an answer drew on
 
 
 class TitleRequest(BaseModel):
@@ -109,6 +122,7 @@ class EnhanceRequest(BaseModel):
     subjects: int = 1
     contact: bool = False
     think: bool = False  # the composer's 💭 toggle, shared with chat
+    doc_ids: list[str] = []  # documents whose details may inform the rewrite
 
 
 class GenerateRequest(BaseModel):
@@ -194,6 +208,7 @@ class AgentRequest(BaseModel):
     ollama_url: str = oc.DEFAULT_URL
     chat_id: str | None = None
     think: bool = False  # the sidebar's 💭 toggle, shared with chat and enhance
+    doc_ids: list[str] = []  # documents to plan and answer from
 
 
 # --------------------------------------------------------------------------- #
@@ -216,12 +231,46 @@ def get_models(ollama_url: str = oc.DEFAULT_URL):
     }
 
 
+def _with_documents(messages: list[dict], doc_ids: list[str], query: str,
+                    ollama_url: str, purpose: str = "answer") -> list[dict]:
+    """Search the chat's documents and prepend what's found to the last user turn.
+
+    Mutates `messages` in place and returns the sources for the UI ([] when there's
+    nothing to add). Prepended to the user turn rather than sent as a system message:
+    the turn already carries this request's images, every model template handles a
+    long user turn the same way, and agent mode's brief has to stay the one system
+    message. Raises if the search itself fails (no embedding model, say) — callers
+    report that rather than answering as if no documents had been picked.
+    """
+    docs = db.get_documents(doc_ids)
+    if not docs:
+        return []
+    last = next((m for m in reversed(messages) if m.get("role") == "user"), None)
+    if last is None:
+        return []
+    hits = rag.search(ollama_url, docs, query or last.get("content") or "")
+    if not hits:
+        return []
+    last["content"] = f"{rag.format_context(hits, purpose)}\n\n{last.get('content') or ''}"
+    return rag.sources(hits)
+
+
 @app.post("/api/chat")
 def chat(req: ChatRequest):
     messages = [m.model_dump(exclude_none=True) for m in req.messages]
 
     def gen():
         try:
+            if req.doc_ids:
+                try:
+                    found = _with_documents(messages, req.doc_ids, req.doc_query,
+                                            req.ollama_url)
+                    yield json.dumps({"type": "sources", "sources": found}) + "\n"
+                except Exception as exc:
+                    # Said, then answered anyway: the question still deserves an
+                    # answer, but not one that looks like it read the documents.
+                    yield json.dumps({"type": "docs_error", "message":
+                                      f"Documents weren't searched: {exc}"}) + "\n"
             think = req.think and oc.supports_thinking(req.ollama_url, req.model)
             for event in oc.stream_chat(req.ollama_url, req.model, messages, think):
                 yield json.dumps(event) + "\n"
@@ -335,9 +384,20 @@ def flux_enhance(req: EnhanceRequest):
                 # model rewrite from whatever else it was given.
                 pass
         think = req.think and oc.supports_thinking(req.ollama_url, req.model)
+        reference = ""
+        if req.doc_ids:
+            # Fails soft like the rest of this endpoint: a rewrite without the
+            # documents beats no rewrite.
+            try:
+                docs = db.get_documents(req.doc_ids)
+                hits = rag.search(req.ollama_url, docs, req.prompt) if docs else []
+                reference = rag.format_context(hits, "reference")
+            except Exception:
+                logging.exception("document search for the enhancer failed")
         text, thinking = oc.enhance_prompt(
             req.ollama_url, req.model, req.prompt, req.mode, imgs,
             subjects=req.subjects, contact=req.contact, think=think,
+            reference=reference,
         )
         if text:
             return {"prompt": text, "source": "vlm", "thinking": thinking}
@@ -820,12 +880,13 @@ def _recorder(chat_id: str | None):
     over the stream regardless.
     """
     def record(turn: str, content: str, model_label: str, hashes: list[str],
-               context_hashes: list[str] | None = None) -> None:
+               context_hashes: list[str] | None = None,
+               sources: list[dict] | None = None) -> None:
         if not chat_id:
             return
         try:
             db.append_message(chat_id, turn, content, model_label, hashes,
-                              context_hashes)
+                              context_hashes, sources)
         except Exception:
             logging.exception("recording %s turn in chat %s failed", turn, chat_id)
 
@@ -1053,6 +1114,20 @@ def agent_turn(req: AgentRequest):
                 record("user", req.prompt, req.model, list(req.attachment_hashes),
                        list(req.context_hashes))
 
+                # Documents first, so the planner reads them whichever way the turn
+                # goes: answered in words, or a prompt written from a character
+                # sheet. `history` is what `brief` sends, so this lands in both.
+                found = []
+                if req.doc_ids:
+                    emit({"type": "status", "message": "Searching your documents…"})
+                    try:
+                        found = _with_documents(history, req.doc_ids, req.prompt,
+                                                req.ollama_url)
+                        emit({"type": "sources", "sources": found})
+                    except Exception as exc:
+                        emit({"type": "docs_error", "message":
+                              f"Documents weren't searched: {exc}"})
+
                 emit({"type": "status", "message": f"Thinking with {req.model}…"})
                 think = req.think and oc.supports_thinking(req.ollama_url, req.model)
                 text = ""
@@ -1108,7 +1183,7 @@ def agent_turn(req: AgentRequest):
                 # asked a question, or wants to know which image is meant. Its
                 # answer is the whole turn.
                 if text.strip():
-                    record("assistant", text.strip(), req.model, [])
+                    record("assistant", text.strip(), req.model, [], sources=found)
                 if not specs:
                     emit({"type": "done"})
                     return
@@ -1176,6 +1251,126 @@ def agent_turn(req: AgentRequest):
 
 
 # --------------------------------------------------------------------------- #
+# Documents (RAG): a library of text files and PDFs that chats can answer from
+# --------------------------------------------------------------------------- #
+class ReindexRequest(BaseModel):
+    ollama_url: str = oc.DEFAULT_URL
+    ocr_model: str = ""  # vision model for pages with no text layer; "" = skip them
+
+
+class EmbedModelRequest(BaseModel):
+    name: str
+
+
+def _embed_model() -> str:
+    return settings.embed_model(rag.DEFAULT_EMBED_MODEL)
+
+
+def _doc_out(d: dict) -> dict:
+    return {**d, "disk_bytes": rag.disk_bytes(d["id"])}
+
+
+def _index_stream(doc_id: str, kind: str, ollama_url: str, ocr_model: str):
+    """Build (or rebuild) one document's index, streaming progress as NDJSON."""
+    def work(emit):
+        db.update_document(doc_id, status="indexing", error=None)
+        try:
+            facts = rag.build_index(doc_id, kind, ollama_url, _embed_model(),
+                                    ocr_model or None, emit)
+        except Exception as exc:
+            db.update_document(doc_id, status="error", error=str(exc))
+            raise
+        db.update_document(doc_id, status="ready", error=None, **facts)
+        emit({"type": "doc", "doc": _doc_out(db.get_document(doc_id))})
+
+    return _ndjson(work)
+
+
+def _known_doc(doc_id: str) -> dict:
+    d = db.get_document(doc_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return d
+
+
+@app.get("/api/docs")
+def list_docs(ollama_url: str = oc.DEFAULT_URL):
+    docs = [_doc_out(d) for d in db.list_documents()]
+    model = _embed_model()
+    return {
+        "documents": docs,
+        "embed_model": model,
+        "embed_installed": rag.model_installed(ollama_url, model),
+        "disk_bytes": sum(d["disk_bytes"] for d in docs),
+    }
+
+
+@app.post("/api/docs")
+def upload_doc(
+    file: UploadFile = File(...),
+    ollama_url: str = Form(oc.DEFAULT_URL),
+    ocr_model: str = Form(""),
+):
+    """Add a text file or PDF to the library and index it, streaming progress.
+
+    Deduplicated by content: the same file uploaded twice is one document. A
+    duplicate of one that never finished indexing is indexed again rather than
+    handed back broken.
+    """
+    name = Path(file.filename or "document.txt").name
+    kind = rag.kind_of(name, file.content_type)
+    if kind is None:
+        raise HTTPException(
+            status_code=415,
+            detail=f"{name}: only PDFs and text files can be added as documents.")
+    data = file.file.read(rag.MAX_UPLOAD_BYTES + 1)
+    if len(data) > rag.MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"{name} is over {rag.MAX_UPLOAD_BYTES // 2**20} MB.")
+    if not data:
+        raise HTTPException(status_code=400, detail=f"{name} is empty.")
+
+    sha = rag.sha256(data)
+    existing = db.document_by_hash(sha)
+    if existing and existing["status"] == "ready":
+        return _ndjson(lambda emit: emit(
+            {"type": "doc", "doc": _doc_out(existing), "duplicate": True}))
+    if existing:
+        doc_id = existing["id"]
+        db.update_document(doc_id, name=name)
+    else:
+        doc_id = db.create_document(name, sha, kind, len(data))
+    rag.store_source(doc_id, name, data)
+    return _index_stream(doc_id, kind, ollama_url, ocr_model)
+
+
+@app.post("/api/docs/{doc_id}/reindex")
+def reindex_doc(doc_id: str, req: ReindexRequest):
+    """Rebuild a document's index — after changing the embedding model, or to retry
+    one that failed (with a vision model picked this time, for a scanned PDF)."""
+    d = _known_doc(doc_id)
+    return _index_stream(doc_id, d["kind"], req.ollama_url, req.ocr_model)
+
+
+@app.delete("/api/docs/{doc_id}")
+def delete_doc(doc_id: str):
+    """Remove a document completely: its row, every chat's selection of it (by
+    cascade), and its folder on disk — the original file and its index."""
+    _known_doc(doc_id)
+    db.delete_document(doc_id)
+    rag.delete(doc_id)
+    return {"ok": True}
+
+
+@app.put("/api/settings/embed-model")
+def embed_model_put(req: EmbedModelRequest, ollama_url: str = oc.DEFAULT_URL):
+    settings.set_embed_model(req.name)
+    model = _embed_model()
+    return {"embed_model": model, "embed_installed": rag.model_installed(ollama_url, model)}
+
+
+# --------------------------------------------------------------------------- #
 # Ollama version / upgrade
 # --------------------------------------------------------------------------- #
 @app.get("/api/ollama/version")
@@ -1223,6 +1418,7 @@ def put_chat(chat_id: str, req: ChatUpsert):
         req.system_prompt,
         req.pinned_hashes,
         req.system_image_hash,
+        req.doc_ids,
     )
     return {"ok": True}
 
@@ -1230,7 +1426,8 @@ def put_chat(chat_id: str, req: ChatUpsert):
 @app.post("/api/chats/{chat_id}/messages")
 def add_message(chat_id: str, req: MessageAppend):
     msg_id = db.append_message(
-        chat_id, req.role, req.content, req.model, req.image_hashes, req.context_hashes
+        chat_id, req.role, req.content, req.model, req.image_hashes, req.context_hashes,
+        req.sources,
     )
     return {"id": msg_id}
 

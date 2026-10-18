@@ -125,6 +125,41 @@ It plans once per turn, then runs everything it decided on. The GPU can't hold O
 the same time, so a reason-act loop would pay a full model swap per step — minutes, for a second
 opinion the model can't form anyway, since it never sees the finished image.
 
+## Documents (RAG)
+
+Drop PDFs or text files (Markdown, CSV, JSON, HTML, code…) onto the chat, the composer, or the
+**📚 Documents** panel in the sidebar. Each one is indexed locally — split into chunks and embedded
+with an Ollama embedding model (`nomic-embed-text` by default, pulled once from the panel) — and
+ticked for the chat you dropped it into. Each chat keeps its own selection.
+
+With documents ticked, the chat answers from them:
+
+- **Analyze** and **Agent** search the selected documents for each message and give the model the
+  best-matching excerpts, which it cites as `[1]`, `[2]`. A collapsible **📄 Sources** footer under
+  the answer shows which document and page each one came from. Documents small enough to fit are
+  sent whole, so *"summarise this"* works.
+- **Agent** reads them before it plans, so *"draw the captain from my character sheet"* writes its
+  image prompt from the sheet.
+- **The prompt enhancer** (Generate mode, enhancer on) uses them as reference notes — a style
+  guide, a character or a setting — without citing them in the prompt.
+- **Image and video generation themselves** can't read documents: FLUX and Wan only take a prompt
+  and images. Documents reach them through the enhancer or the agent.
+
+**Scanned PDFs.** Pages with no text layer are rendered and transcribed by your vision model
+(the chat model), so scans index too, only slower. With no vision model available those pages
+are skipped; re-index (↻) once one is.
+
+**Storage and deleting.** Every document is its own folder under `backend/data/rag/<id>/`: the
+original file plus its index (`chunks.jsonl` and `vectors.npy`). There is no shared vector
+database, so deleting a document (🗑) removes that one folder. Its disk space comes back at once,
+it leaves every chat that used it, and no other document is affected. The search is an exact
+dot product over just the selected documents. An index is built beside the old one and renamed
+into place, so an interrupted upload never leaves a half-written index. Leftovers are cleared at
+the next start.
+
+Changing the embedding model applies to documents added or re-indexed after the change. Older
+ones keep working with the model they were built with, marked with a badge until re-indexed.
+
 ## Development
 
 Run the backend and the Vite dev server separately for hot-reload:
@@ -146,6 +181,7 @@ vision-model-ui/
 ├── backend/
 │   ├── main.py            # FastAPI routes + serves built frontend
 │   ├── ollama_client.py   # all Ollama HTTP calls (chat, models, version, upgrade)
+│   ├── rag.py             # documents: extract, chunk, embed, per-document index, search
 │   └── requirements.txt
 ├── frontend/
 │   └── src/
@@ -172,6 +208,11 @@ vision-model-ui/
 | GET    | `/api/ps`                | Running models                       |
 | GET    | `/api/ollama/version`    | Installed vs latest + update flag    |
 | POST   | `/api/ollama/upgrade`    | Run the Ollama installer (streams)   |
+| GET    | `/api/docs`              | Document library + embedding model   |
+| POST   | `/api/docs`              | Upload + index a document (streams)  |
+| POST   | `/api/docs/{id}/reindex` | Rebuild a document's index (streams) |
+| DELETE | `/api/docs/{id}`         | Delete a document and its files      |
+| PUT    | `/api/settings/embed-model` | Set the embedding model           |
 
 ## Troubleshooting
 

@@ -5,7 +5,9 @@ import type {
   ChatMessage,
   ChatSummary,
   ControlKind,
+  DocInfo,
   RunningModel,
+  Source,
   VersionInfo,
 } from "./types";
 
@@ -125,16 +127,22 @@ interface ChatHandlers {
   onThinking?: (token: string) => void;
   onUsage?: (usage: Usage) => void;
   onError?: (message: string) => void;
+  /** The document excerpts the answer was given, before its first token. */
+  onSources?: (sources: Source[]) => void;
+  /** Documents were picked but couldn't be searched; the answer goes ahead without. */
+  onDocsError?: (message: string) => void;
 }
 
-/** Stream a chat response (NDJSON events: thinking / token / usage / error). */
+/** Stream a chat response (NDJSON events: sources / thinking / token / usage / error).
+ *  `docs` are the chat's documents and the text to search them with. */
 export async function streamChat(
   ollamaUrl: string,
   model: string,
   messages: ChatMessage[],
   handlers: ChatHandlers,
   signal?: AbortSignal,
-  think = false
+  think = false,
+  docs: { ids: string[]; query: string } = { ids: [], query: "" }
 ): Promise<void> {
   const res = await fetch("/api/chat", {
     method: "POST",
@@ -144,6 +152,8 @@ export async function streamChat(
       ollama_url: ollamaUrl,
       messages: messages.map(withImages),
       think,
+      doc_ids: docs.ids,
+      doc_query: docs.query,
     }),
     signal,
   });
@@ -158,6 +168,8 @@ export async function streamChat(
     if (ev.type === "token") handlers.onToken(ev.text as string);
     else if (ev.type === "thinking") handlers.onThinking?.(ev.text as string);
     else if (ev.type === "usage") handlers.onUsage?.(ev as unknown as Usage);
+    else if (ev.type === "sources") handlers.onSources?.(ev.sources as Source[]);
+    else if (ev.type === "docs_error") handlers.onDocsError?.(ev.message as string);
     else if (ev.type === "error") handlers.onError?.(ev.message as string);
   });
 }
@@ -654,6 +666,8 @@ export async function enhancePrompt(params: {
   contact?: boolean;
   /** Let a thinking-capable model reason first; ignored by models that can't. */
   think?: boolean;
+  /** Documents whose details (a character sheet, a style guide) may inform it. */
+  doc_ids?: string[];
 }): Promise<{ prompt: string; source: "vlm" | "template"; thinking: string }> {
   const res = await fetch("/api/flux/enhance", {
     method: "POST",
@@ -815,6 +829,8 @@ export interface AgentParams {
   chat_id?: string | null;
   /** Let a thinking-capable model reason before planning; ignored otherwise. */
   think?: boolean;
+  /** Documents to plan and answer from. */
+  doc_ids?: string[];
 }
 
 /** One tool the agent decided to call. `index` orders the steps within the turn
@@ -849,6 +865,8 @@ interface AgentHandlers {
   onDone?: () => void;
   /** The turn failed outright (as opposed to one tool failing). */
   onError?: (message: string) => void;
+  onSources?: (sources: Source[]) => void;
+  onDocsError?: (message: string) => void;
 }
 
 /** Stream one agent turn: the model plans, then every tool it called runs.
@@ -901,6 +919,8 @@ export async function agentRun(
     else if (ev.type === "image")
       handlers.onImage?.(ev as unknown as GeneratedImage, toolIndex);
     else if (ev.type === "done") handlers.onDone?.();
+    else if (ev.type === "sources") handlers.onSources?.(ev.sources as Source[]);
+    else if (ev.type === "docs_error") handlers.onDocsError?.(ev.message as string);
     else if (ev.type === "error") handlers.onError?.(ev.message as string);
   });
 }
@@ -927,6 +947,7 @@ export async function putChat(
     system_prompt: string;
     pinned_hashes: string[];
     system_image_hash: string | null;
+    doc_ids?: string[];
   }
 ): Promise<void> {
   const res = await fetch(`/api/chats/${id}`, {
@@ -945,6 +966,7 @@ export async function appendMessage(
     model: string | null;
     image_hashes: string[];
     context_hashes?: string[];
+    sources?: Source[];
   }
 ): Promise<void> {
   const res = await fetch(`/api/chats/${id}/messages`, {
@@ -1018,3 +1040,130 @@ export async function upgradeOllama(
   }
   await readLines(res, onLine);
 }
+
+// --------------------------------------------------------------------------- #
+// Documents (RAG)
+// --------------------------------------------------------------------------- #
+export interface DocLibrary {
+  documents: DocInfo[];
+  /** What new documents are embedded with. */
+  embed_model: string;
+  embed_installed: boolean;
+  disk_bytes: number;
+}
+
+export async function listDocs(ollamaUrl: string): Promise<DocLibrary> {
+  const res = await fetch(`/api/docs?ollama_url=${encodeURIComponent(ollamaUrl)}`);
+  if (!res.ok) throw new Error(`docs: ${res.status}`);
+  return res.json();
+}
+
+/** Indexing progress: reading (and, for scanned pages, OCR), then embedding. */
+export interface DocProgress {
+  message: string;
+  /** 0–1 when the backend can say, else null. */
+  frac: number | null;
+}
+
+/** Read an indexing stream to the end. Resolves with the finished document;
+ *  rejects with the backend's reason if indexing failed. */
+async function readIndexStream(
+  res: Response,
+  onProgress: (p: DocProgress) => void
+): Promise<{ doc: DocInfo; duplicate: boolean }> {
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `upload: ${res.status}`);
+  }
+  let out: { doc: DocInfo; duplicate: boolean } | null = null;
+  let error: string | null = null;
+  await readLines(res, (line) => {
+    let ev: { type: string; [k: string]: unknown };
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (ev.type === "status" || ev.type === "progress") {
+      const total = (ev.total as number) || 0;
+      onProgress({
+        message: (ev.message as string) ?? "",
+        frac: total ? ((ev.done as number) ?? 0) / total : null,
+      });
+    } else if (ev.type === "doc") {
+      out = { doc: ev.doc as DocInfo, duplicate: !!ev.duplicate };
+    } else if (ev.type === "error") {
+      error = ev.message as string;
+    }
+  });
+  if (error) throw new Error(error);
+  if (!out) throw new Error("Indexing ended without a result.");
+  return out;
+}
+
+/** Add a PDF or text file to the library and index it. `ocrModel` is the vision
+ *  model that reads scanned pages ("" skips them). */
+export async function uploadDoc(
+  file: File,
+  ollamaUrl: string,
+  ocrModel: string,
+  onProgress: (p: DocProgress) => void
+): Promise<{ doc: DocInfo; duplicate: boolean }> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("ollama_url", ollamaUrl);
+  form.append("ocr_model", ocrModel);
+  const res = await fetch("/api/docs", { method: "POST", body: form });
+  return readIndexStream(res, onProgress);
+}
+
+export async function reindexDoc(
+  id: string,
+  ollamaUrl: string,
+  ocrModel: string,
+  onProgress: (p: DocProgress) => void
+): Promise<DocInfo> {
+  const res = await fetch(`/api/docs/${id}/reindex`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ollama_url: ollamaUrl, ocr_model: ocrModel }),
+  });
+  return (await readIndexStream(res, onProgress)).doc;
+}
+
+export async function deleteDoc(id: string): Promise<void> {
+  const res = await fetch(`/api/docs/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`deleteDoc: ${res.status}`);
+}
+
+export async function setEmbedModel(
+  name: string,
+  ollamaUrl: string
+): Promise<{ embed_model: string; embed_installed: boolean }> {
+  const res = await fetch(
+    `/api/settings/embed-model?ollama_url=${encodeURIComponent(ollamaUrl)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }
+  );
+  if (!res.ok) throw new Error(`embed model: ${res.status}`);
+  return res.json();
+}
+
+/** Whether a dropped file is a document for the library rather than an image to
+ *  attach. Mirrors `rag.kind_of` on the backend. */
+const DOC_EXTS = new Set(
+  (
+    "pdf txt md markdown rst csv tsv json jsonl log xml html htm yaml yml ini toml " +
+    "cfg conf tex srt vtt py js ts tsx jsx java c h cpp hpp cs go rs rb php sh bash " +
+    "sql css scss swift kt lua r"
+  ).split(" ")
+);
+export function isDocFile(f: File): boolean {
+  if (f.type.startsWith("image/") || f.type.startsWith("video/")) return false;
+  const ext = f.name.split(".").pop()?.toLowerCase() ?? "";
+  return f.type === "application/pdf" || f.type.startsWith("text/") || DOC_EXTS.has(ext);
+}
+export const DOC_ACCEPT = ".pdf,.txt,.md,.markdown,.csv,.json,.html,.htm,.xml,.yaml,.yml,.log,.rst,.tex,text/*,application/pdf";
