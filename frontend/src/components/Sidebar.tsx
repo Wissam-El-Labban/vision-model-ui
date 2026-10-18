@@ -22,6 +22,7 @@ interface Props {
   onDeleteChat: (id: string) => void;
   enhancerModel: string;
   setEnhancerModel: (v: string) => void;
+  effectiveEnhanceModel: string;
   enhancerMode: EnhancerMode;
   setEnhancerMode: (v: EnhancerMode) => void;
   enhanceTemplate: boolean;
@@ -47,6 +48,7 @@ export default function Sidebar(props: Props) {
     onDeleteChat,
     enhancerModel,
     setEnhancerModel,
+    effectiveEnhanceModel,
     enhancerMode,
     setEnhancerMode,
     enhanceTemplate,
@@ -95,6 +97,7 @@ export default function Sidebar(props: Props) {
         visionModels={models.vision}
         enhancerModel={enhancerModel}
         setEnhancerModel={setEnhancerModel}
+        effectiveModel={effectiveEnhanceModel}
         enhancerMode={enhancerMode}
         setEnhancerMode={setEnhancerMode}
         enhanceTemplate={enhanceTemplate}

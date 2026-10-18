@@ -5,6 +5,9 @@ interface Props {
   visionModels: string[];
   enhancerModel: string;
   setEnhancerModel: (v: string) => void;
+  /** The model that will actually do the rewriting — the pick, or what Auto
+   *  resolves to. "" when there's none to use. */
+  effectiveModel: string;
   enhancerMode: EnhancerMode;
   setEnhancerMode: (v: EnhancerMode) => void;
   /** Independent of the model/mode above: a simpler server-side template wrap
@@ -28,6 +31,7 @@ export default function PromptEnhancer({
   visionModels,
   enhancerModel,
   setEnhancerModel,
+  effectiveModel,
   enhancerMode,
   setEnhancerMode,
   enhanceTemplate,
@@ -38,7 +42,16 @@ export default function PromptEnhancer({
   return (
     <div className="section">
       <button className="section-head" onClick={() => setOpen(!open)}>
-        ✨ Prompt Enhancer
+        <span className="section-head-left">
+          ✨ Prompt Enhancer
+          {/* The full name, readable with the section collapsed — Auto included,
+              since "Auto" alone doesn't say which model you're getting. */}
+          <span className="section-sub" title={effectiveModel}>
+            {effectiveModel
+              ? `${effectiveModel}${enhancerModel ? "" : " (auto)"}`
+              : "No vision model installed"}
+          </span>
+        </span>
         <span className="section-head-right">
           <span className={`section-status ${enhancerMode !== "off" ? "on" : ""}`}>
             {STATUS[enhancerMode]}
@@ -53,7 +66,10 @@ export default function PromptEnhancer({
             value={enhancerModel}
             onChange={(e) => setEnhancerModel(e.target.value)}
           >
-            <option value="">Auto (chat model, else first vision model)</option>
+            <option value="">
+              Auto (chat model, else first vision model)
+              {!enhancerModel && effectiveModel ? ` → ${effectiveModel}` : ""}
+            </option>
             {visionModels.map((m) => (
               <option key={m} value={m}>
                 {m}

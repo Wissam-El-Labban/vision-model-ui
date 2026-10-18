@@ -1459,6 +1459,7 @@ export default function App() {
         onDeleteChat={removeChat}
         enhancerModel={enhancerModel}
         setEnhancerModel={setEnhancerModel}
+        effectiveEnhanceModel={effectiveEnhanceModel}
         enhancerMode={enhancerMode}
         setEnhancerMode={setEnhancerMode}
         enhanceTemplate={enhanceTemplate}
