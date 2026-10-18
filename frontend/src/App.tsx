@@ -5,6 +5,7 @@ import Composer from "./components/Composer";
 import ImageBar from "./components/ImageBar";
 import ContextMeter from "./components/ContextMeter";
 import GenModelPill from "./components/GenModelPill";
+import DocPills from "./components/DocPills";
 // Lazily loaded: the studio pulls in three.js, which is bigger than the rest of
 // the app put together. Nobody who isn't posing a figure should pay for it.
 const PoseStudio = lazy(() => import("./components/PoseStudio"));
@@ -1582,17 +1583,11 @@ export default function App() {
                 only through the enhancer — so the pill shows exactly when they
                 will be read. */}
             {readyDocIds.length > 0 && (!genMode || enhancerMode !== "off") && (
-              <button
-                type="button"
-                className="docs-pill"
-                title={docs.library.documents
-                  .filter((d) => readyDocIds.includes(d.id))
-                  .map((d) => d.name)
-                  .join("\n")}
-                onClick={() => setDocsOpen(true)}
-              >
-                📄 {readyDocIds.length} doc{readyDocIds.length === 1 ? "" : "s"}
-              </button>
+              <DocPills
+                docs={docs.library.documents.filter((d) => readyDocIds.includes(d.id))}
+                onOpen={() => setDocsOpen(true)}
+                onRemove={(id) => setActiveDocIds((prev) => prev.filter((x) => x !== id))}
+              />
             )}
             {model && <span className="model-pill">{model}</span>}
             {messages.length > 0 && (

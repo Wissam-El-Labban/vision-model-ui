@@ -129,8 +129,10 @@ opinion the model can't form anyway, since it never sees the finished image.
 
 Drop PDFs or text files (Markdown, CSV, JSON, HTML, code…) onto the chat, the composer, or the
 **📚 Documents** panel in the sidebar. Each one is indexed locally — split into chunks and embedded
-with an Ollama embedding model (`nomic-embed-text` by default, pulled once from the panel) — and
-ticked for the chat you dropped it into. Each chat keeps its own selection.
+with an Ollama embedding model (`nomic-embed-text` by default; `./run.sh` pulls it if it's missing,
+`SKIP_EMBED=1` skips that) — and
+ticked for the chat you dropped it into. Each chat keeps its own selection, and the documents in
+use show as named pills in the top bar (✕ on a pill stops using it in this chat).
 
 With documents ticked, the chat answers from them:
 

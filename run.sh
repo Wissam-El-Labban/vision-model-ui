@@ -297,6 +297,46 @@ else
     echo -e "${YELLOW}⚠️  Could not reach Ollama. Start it with: ollama serve${NC}"
 fi
 
+# --- Documents (RAG): the embedding model ----------------------------------- #
+# Documents are indexed and searched with an Ollama embedding model — whichever the
+# Documents panel is set to, nomic-embed-text (~270 MB) unless changed. Pulled once
+# here so the first dropped PDF just works. Checked locally first (`/api/show` never
+# leaves the machine), so an offline start with the model already present is
+# unaffected, and a missing one offline is a warning, not a failed start: chat and
+# image generation don't need it. Skip entirely with SKIP_EMBED=1.
+EMBED_MODEL="$(python - <<'EOF' 2>/dev/null || true
+import json
+try:
+    print(json.load(open("backend/data/settings.json")).get("embed_model") or "")
+except Exception:
+    print("")
+EOF
+)"
+EMBED_MODEL="${EMBED_MODEL:-nomic-embed-text}"
+
+embed_model_present() {
+    curl -sf http://localhost:11434/api/show -d "{\"name\": \"$EMBED_MODEL\"}" > /dev/null 2>&1
+}
+
+if [ "${SKIP_EMBED:-0}" = "1" ]; then
+    echo -e "${YELLOW}SKIP_EMBED=1 — not checking the document embedding model.${NC}"
+elif ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+    : # Ollama isn't reachable; already warned above.
+elif embed_model_present; then
+    echo -e "${GREEN}✓ Document embedding model ($EMBED_MODEL) installed${NC}"
+elif check_internet; then
+    echo -e "${BLUE}Pulling the document embedding model ($EMBED_MODEL)...${NC}"
+    if ollama pull "$EMBED_MODEL"; then
+        echo -e "${GREEN}✓ Document embedding model ready${NC}"
+    else
+        echo -e "${YELLOW}⚠️  Couldn't pull $EMBED_MODEL — documents can't be indexed until it's${NC}"
+        echo -e "${YELLOW}   installed (the Documents panel has a Pull button).${NC}"
+    fi
+else
+    echo -e "${YELLOW}⚠️  Offline and $EMBED_MODEL isn't installed — documents can't be indexed${NC}"
+    echo -e "${YELLOW}   until it is. Connect once and re-run, or pull it from the Documents panel.${NC}"
+fi
+
 # --- Serve ------------------------------------------------------------------ #
 echo ""
 echo -e "${BLUE}========================================${NC}"

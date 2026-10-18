@@ -2586,19 +2586,59 @@ textarea {
 
 /* Which documents this chat answers from. Amber, to read as a third axis beside
    the blue-grey vision pill and the green image-model pill. */
+.doc-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-shrink: 1;
+}
+
 .docs-pill {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
   background: rgba(210, 153, 34, 0.1);
   border: 1px solid rgba(210, 153, 34, 0.4);
   border-radius: 999px;
-  padding: 4px 12px;
   font-size: 12px;
   color: var(--text);
-  cursor: pointer;
   white-space: nowrap;
 }
 
 .docs-pill:hover {
   border-color: var(--amber);
+}
+
+.docs-pill button {
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.docs-pill-name {
+  padding: 4px 4px 4px 12px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.docs-pill-x {
+  padding: 4px 10px 4px 4px;
+  color: var(--muted) !important;
+  font-size: 10px !important;
+}
+
+.docs-pill-x:hover {
+  color: var(--text) !important;
+}
+
+/* The overflow pill is a plain button, not a name + ✕ pair. */
+button.docs-pill.docs-pill-more {
+  padding: 4px 12px;
+  cursor: pointer;
 }
 
 .sources {
