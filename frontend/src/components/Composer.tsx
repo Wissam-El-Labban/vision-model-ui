@@ -75,10 +75,9 @@ interface Props {
    *  Verbose mode's rewrite itself isn't shown here: it's attached to the chat
    *  message it produced and rendered underneath it, not in the composer. */
   enhancing: boolean;
-  /** Whether the model reasons before answering — one switch shared by Analyze
-   *  chats and the prompt enhancer. Agent mode ignores it, so the button hides. */
+  /** Whether thinking is on (set in the sidebar) — only changes what the send
+   *  button says while the enhancer runs. */
   thinking: boolean;
-  setThinking: (v: boolean) => void;
   /** How many images are pinned in the panel (compose reference count). */
   pinnedCount: number;
   /** First pinned-panel image, used as the img2img source when nothing is
@@ -130,7 +129,6 @@ export default function Composer({
   setGen,
   enhancing,
   thinking,
-  setThinking,
   pinnedCount,
   pinnedInit,
   preprocessors,
@@ -1023,24 +1021,6 @@ export default function Composer({
           rows={1}
           disabled={genMode || agentMode ? false : disabled}
         />
-
-        {!agentMode && (
-          <button
-            type="button"
-            className={`btn think ${thinking ? "active" : ""}`}
-            aria-pressed={thinking}
-            onClick={() => setThinking(!thinking)}
-            title={
-              thinking
-                ? "Thinking on — the model reasons before answering chats and before " +
-                  "rewriting prompts (slower). Click to turn off."
-                : "Thinking off. Click to let the model reason before answering chats " +
-                  "and rewriting prompts (slower; models without thinking ignore it)."
-            }
-          >
-            💭
-          </button>
-        )}
 
         {streaming ? (
           <button className="btn stop" onClick={onStop}>

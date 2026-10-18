@@ -813,6 +813,8 @@ export interface AgentParams {
   seed?: number | null;
   ollama_url: string;
   chat_id?: string | null;
+  /** Let a thinking-capable model reason before planning; ignored otherwise. */
+  think?: boolean;
 }
 
 /** One tool the agent decided to call. `index` orders the steps within the turn
@@ -834,6 +836,8 @@ export interface AgentToolError {
 interface AgentHandlers {
   /** The agent's own prose, streamed. Empty for a plain "make me X". */
   onToken?: (text: string) => void;
+  /** Reasoning tokens, only sent when `think` is on and the model can think. */
+  onThinking?: (text: string) => void;
   onUsage?: (u: Usage) => void;
   onStatus?: (message: string, toolIndex?: number) => void;
   onProgress?: (p: GenProgressEvent, toolIndex?: number) => void;
@@ -875,6 +879,7 @@ export async function agentRun(
     }
     const toolIndex = ev.tool_index as number | undefined;
     if (ev.type === "token") handlers.onToken?.(ev.text as string);
+    else if (ev.type === "thinking") handlers.onThinking?.(ev.text as string);
     else if (ev.type === "usage") handlers.onUsage?.(ev as unknown as Usage);
     else if (ev.type === "status")
       handlers.onStatus?.(ev.message as string, toolIndex);

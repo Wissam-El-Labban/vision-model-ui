@@ -197,6 +197,27 @@ textarea {
   color: var(--muted);
 }
 
+/* A section's current state, readable with the section collapsed. */
+.section-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-status {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.section-status.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* ---------- Update card ---------- */
 .update-card {
   background: linear-gradient(135deg, #132a47, #102035);
@@ -1646,18 +1667,6 @@ textarea {
 .btn.stop {
   border-color: var(--red);
   color: var(--red);
-}
-
-/* Composer's 💭 thinking toggle: dimmed when off, accent-lit when on. */
-.btn.think {
-  font-size: 16px;
-  opacity: 0.55;
-}
-
-.btn.think.active {
-  opacity: 1;
-  border-color: var(--accent);
-  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 /* A thinking model's reasoning, above its answer (or under a prompt it rewrote). */

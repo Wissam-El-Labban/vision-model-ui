@@ -78,9 +78,9 @@ export default function App() {
     () => (localStorage.getItem("enhancerMode") as EnhancerMode) || "off"
   );
 
-  // Thinking. One switch (the composer's 💭 button) for both Analyze chats and the
-  // prompt enhancer; off unless the user turns it on. `thinkingDisplay` (sidebar)
-  // decides whether the reasoning itself is shown or just "Thinking…".
+  // Thinking. One switch (sidebar) for Analyze chats, the prompt enhancer and agent
+  // mode; off unless the user turns it on. `thinkingDisplay` decides whether the
+  // reasoning itself is shown or just "Thinking…".
   const [thinking, setThinking] = useState(
     () => localStorage.getItem("thinking") === "true"
   );
@@ -1141,11 +1141,29 @@ export default function App() {
             seed: gen.seed ? parseInt(gen.seed, 10) : null,
             ollama_url: ollamaUrl,
             chat_id: chatId,
+            think: thinking,
           },
           {
             onToken: (token) => {
               assistantText += token;
               setAssistant({ content: assistantText });
+            },
+            onThinking: (token) => {
+              if (thinkingDisplay === "verbose") {
+                setMessages((prev) => {
+                  const next = [...prev];
+                  const last = next[next.length - 1];
+                  next[next.length - 1] = {
+                    ...last,
+                    thinking: (last.thinking ?? "") + token,
+                  };
+                  return next;
+                });
+              } else {
+                setProgress((p) =>
+                  p && { ...p, phase: "💭 Thinking…", updatedAt: Date.now() }
+                );
+              }
             },
             onUsage: (u) => setUsage(u),
             onStatus: (m) =>
@@ -1229,6 +1247,8 @@ export default function App() {
       gen,
       model,
       ollamaUrl,
+      thinking,
+      thinkingDisplay,
       systemPrompt,
       systemImage,
       pinnedImages,
@@ -1443,6 +1463,8 @@ export default function App() {
         setEnhancerMode={setEnhancerMode}
         enhanceTemplate={enhanceTemplate}
         setEnhanceTemplate={setEnhanceTemplate}
+        thinking={thinking}
+        setThinking={setThinking}
         thinkingDisplay={thinkingDisplay}
         setThinkingDisplay={setThinkingDisplay}
       />
@@ -1513,7 +1535,6 @@ export default function App() {
             setGen={setGen}
             enhancing={enhancing}
             thinking={thinking}
-            setThinking={setThinking}
             pinnedCount={pinnedImages.length}
             pinnedInit={pinnedImages[0] ?? null}
             preprocessors={preprocessors}

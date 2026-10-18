@@ -193,6 +193,7 @@ class AgentRequest(BaseModel):
     seed: int | None = None
     ollama_url: str = oc.DEFAULT_URL
     chat_id: str | None = None
+    think: bool = False  # the sidebar's 💭 toggle, shared with chat and enhance
 
 
 # --------------------------------------------------------------------------- #
@@ -1053,6 +1054,7 @@ def agent_turn(req: AgentRequest):
                        list(req.context_hashes))
 
                 emit({"type": "status", "message": f"Thinking with {req.model}…"})
+                think = req.think and oc.supports_thinking(req.ollama_url, req.model)
                 text = ""
                 calls = []
 
@@ -1067,7 +1069,7 @@ def agent_turn(req: AgentRequest):
                 if tools:
                     messages = brief(agent.system_prompt(enabled, n_images))
                     for event in oc.stream_chat_tools(
-                        req.ollama_url, req.model, messages, tools
+                        req.ollama_url, req.model, messages, tools, think
                     ):
                         if event["type"] == "token":
                             text += event["text"]
@@ -1084,7 +1086,7 @@ def agent_turn(req: AgentRequest):
                 # costs a round trip and no model swap.
                 if not calls and not text.strip():
                     for event in oc.stream_chat(
-                        req.ollama_url, req.model, brief(agent.answer_system())
+                        req.ollama_url, req.model, brief(agent.answer_system()), think
                     ):
                         if event["type"] == "token":
                             text += event["text"]

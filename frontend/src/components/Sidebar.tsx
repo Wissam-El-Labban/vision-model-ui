@@ -26,6 +26,8 @@ interface Props {
   setEnhancerMode: (v: EnhancerMode) => void;
   enhanceTemplate: boolean;
   setEnhanceTemplate: (v: boolean) => void;
+  thinking: boolean;
+  setThinking: (v: boolean) => void;
   thinkingDisplay: ThinkingDisplay;
   setThinkingDisplay: (v: ThinkingDisplay) => void;
 }
@@ -49,6 +51,8 @@ export default function Sidebar(props: Props) {
     setEnhancerMode,
     enhanceTemplate,
     setEnhanceTemplate,
+    thinking,
+    setThinking,
     thinkingDisplay,
     setThinkingDisplay,
   } = props;
@@ -97,7 +101,12 @@ export default function Sidebar(props: Props) {
         setEnhanceTemplate={setEnhanceTemplate}
       />
 
-      <ThinkingSettings display={thinkingDisplay} setDisplay={setThinkingDisplay} />
+      <ThinkingSettings
+        thinking={thinking}
+        setThinking={setThinking}
+        display={thinkingDisplay}
+        setDisplay={setThinkingDisplay}
+      />
 
       <ImageModels models={fluxModels} onChanged={refreshFlux} />
 

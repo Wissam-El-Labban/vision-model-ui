@@ -15,6 +15,8 @@ interface Props {
   setEnhanceTemplate: (v: boolean) => void;
 }
 
+const STATUS: Record<EnhancerMode, string> = { off: "Off", on: "On", verbose: "Verbose" };
+
 const HINTS: Record<EnhancerMode, string> = {
   off: "Off: the prompt is only rewritten when you click ✨ Improve prompt in the composer.",
   on: "On: the picked model silently rewrites your prompt before every generation.",
@@ -36,7 +38,13 @@ export default function PromptEnhancer({
   return (
     <div className="section">
       <button className="section-head" onClick={() => setOpen(!open)}>
-        ✨ Prompt Enhancer <span className="chev">{open ? "▾" : "▸"}</span>
+        ✨ Prompt Enhancer
+        <span className="section-head-right">
+          <span className={`section-status ${enhancerMode !== "off" ? "on" : ""}`}>
+            {STATUS[enhancerMode]}
+          </span>
+          <span className="chev">{open ? "▾" : "▸"}</span>
+        </span>
       </button>
       {open && (
         <div className="section-body">

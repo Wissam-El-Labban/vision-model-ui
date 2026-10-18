@@ -128,7 +128,7 @@ def stream_chat(url, model, messages, think=False):
             }
 
 
-def stream_chat_tools(url, model, messages, tools):
+def stream_chat_tools(url, model, messages, tools, think=False):
     """Like `stream_chat`, but offers the model tools and reports what it called.
 
     Yields the same {"type": "token"} and {"type": "usage"} events, plus one
@@ -139,7 +139,7 @@ def stream_chat_tools(url, model, messages, tools):
     wants the whole plan before it starts unloading GPUs on the strength of it.
 
     Ollama returns `arguments` already parsed as an object; older builds send it
-    as a JSON string, so both are accepted.
+    as a JSON string, so both are accepted. `think` works as in `stream_chat`.
     """
     num_ctx = context_size_for(messages)
     payload = {
@@ -147,7 +147,7 @@ def stream_chat_tools(url, model, messages, tools):
         "messages": messages,
         "tools": tools,
         "stream": True,
-        "think": False,
+        "think": bool(think),
         "keep_alive": KEEP_ALIVE,
         "options": {"num_ctx": num_ctx},
     }
@@ -166,6 +166,9 @@ def stream_chat_tools(url, model, messages, tools):
         except json.JSONDecodeError:
             continue
         message = chunk.get("message") or {}
+        thinking = message.get("thinking")
+        if thinking:
+            yield {"type": "thinking", "text": thinking}
         content = message.get("content")
         if content:
             yield {"type": "token", "text": content}
