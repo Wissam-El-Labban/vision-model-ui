@@ -265,6 +265,17 @@ export default function Chat({
                       ))}
                     </div>
                   )}
+                  {/* Open while the model is still reasoning, folded away once the
+                      answer starts so the answer is what's on screen. */}
+                  {m.thinking && (
+                    <details
+                      className="thinking"
+                      open={streaming && i === messages.length - 1 && !m.content}
+                    >
+                      <summary>💭 Thinking</summary>
+                      <div className="thinking-body">{m.thinking}</div>
+                    </details>
+                  )}
                   {m.content ? (
                     m.role === "assistant" ? (
                       <div className="content markdown">
@@ -308,6 +319,12 @@ export default function Chat({
                     <div className="content enhanced-prompt muted small">
                       ✨ Sent as: {m.enhancedPrompt}
                     </div>
+                  )}
+                  {m.role === "user" && m.enhancerThinking && (
+                    <details className="thinking">
+                      <summary>💭 Enhancer reasoning</summary>
+                      <div className="thinking-body">{m.enhancerThinking}</div>
+                    </details>
                   )}
                 </div>
               </div>

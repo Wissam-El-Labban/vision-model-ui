@@ -20,6 +20,13 @@ export interface ChatMessage {
    *  actually generated the image, shown underneath the user's own typed
    *  prompt. Live-session only: not persisted, so it's gone on reload. */
   enhancedPrompt?: string;
+  /** The model's reasoning before it answered (assistant turns), shown when
+   *  thinking is on and set to verbose. Live-session only like `enhancedPrompt`,
+   *  and never sent back to the model as history. */
+  thinking?: string;
+  /** The prompt enhancer's reasoning behind `enhancedPrompt` (user turns), on the
+   *  same terms as `thinking`. */
+  enhancerThinking?: string;
   /** The control maps a control generation derived and conditioned on. Shown as
    *  small chips beside the result: when a pose comes out wrong, a bad map and an
    *  ignored map look identical from the image alone, and this is what tells them
@@ -94,6 +101,11 @@ export type ControlKind = "depth" | "canny" | "pose";
  *  "verbose": rewrites automatically and shows the result in the composer
  *  first, same as the manual button, so it's visible/editable and Undo works. */
 export type EnhancerMode = "off" | "on" | "verbose";
+
+/** How a thinking model's reasoning is shown while thinking is switched on.
+ *  "quiet": just "Thinking…" until the answer starts.
+ *  "verbose": the reasoning itself, in a collapsible block above the answer. */
+export type ThinkingDisplay = "quiet" | "verbose";
 
 /** Progress of the in-flight turn, for the bar under the chat.
  *

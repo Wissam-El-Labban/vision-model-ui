@@ -55,6 +55,7 @@ class ChatRequest(BaseModel):
     model: str
     messages: list[Message]
     ollama_url: str = oc.DEFAULT_URL
+    think: bool = False  # the composer's 💭 toggle
 
 
 class PullRequest(BaseModel):
@@ -107,6 +108,7 @@ class EnhanceRequest(BaseModel):
     # the only way the rewrite can know it is briefing a two-person scene.
     subjects: int = 1
     contact: bool = False
+    think: bool = False  # the composer's 💭 toggle, shared with chat
 
 
 class GenerateRequest(BaseModel):
@@ -219,7 +221,8 @@ def chat(req: ChatRequest):
 
     def gen():
         try:
-            for event in oc.stream_chat(req.ollama_url, req.model, messages):
+            think = req.think and oc.supports_thinking(req.ollama_url, req.model)
+            for event in oc.stream_chat(req.ollama_url, req.model, messages, think):
                 yield json.dumps(event) + "\n"
         except Exception as exc:  # surfaced inline so the client can show it
             yield json.dumps({"type": "error", "message": str(exc)}) + "\n"
@@ -330,14 +333,16 @@ def flux_enhance(req: EnhanceRequest):
                 # endpoint's contract is that it never fails, so drop it and let the
                 # model rewrite from whatever else it was given.
                 pass
-        text = oc.enhance_prompt(
+        think = req.think and oc.supports_thinking(req.ollama_url, req.model)
+        text, thinking = oc.enhance_prompt(
             req.ollama_url, req.model, req.prompt, req.mode, imgs,
-            subjects=req.subjects, contact=req.contact,
+            subjects=req.subjects, contact=req.contact, think=think,
         )
         if text:
-            return {"prompt": text, "source": "vlm"}
+            return {"prompt": text, "source": "vlm", "thinking": thinking}
     # No vision model installed, or Ollama couldn't answer.
-    return {"prompt": fx.static_enhance(req.prompt, req.mode), "source": "template"}
+    return {"prompt": fx.static_enhance(req.prompt, req.mode), "source": "template",
+            "thinking": ""}
 
 
 @app.get("/api/flux/catalog")

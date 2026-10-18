@@ -44,6 +44,7 @@ import type {
   GenSettings,
   GenOp,
   EnhancerMode,
+  ThinkingDisplay,
 } from "./types";
 
 const DEFAULT_URL = "http://localhost:11434";
@@ -75,6 +76,16 @@ export default function App() {
   );
   const [enhancerMode, setEnhancerMode] = useState<EnhancerMode>(
     () => (localStorage.getItem("enhancerMode") as EnhancerMode) || "off"
+  );
+
+  // Thinking. One switch (the composer's 💭 button) for both Analyze chats and the
+  // prompt enhancer; off unless the user turns it on. `thinkingDisplay` (sidebar)
+  // decides whether the reasoning itself is shown or just "Thinking…".
+  const [thinking, setThinking] = useState(
+    () => localStorage.getItem("thinking") === "true"
+  );
+  const [thinkingDisplay, setThinkingDisplay] = useState<ThinkingDisplay>(
+    () => (localStorage.getItem("thinkingDisplay") as ThinkingDisplay) || "quiet"
   );
 
   // Image generation. `composerMode` picks analyze / generate / agent;
@@ -300,6 +311,11 @@ export default function App() {
   useEffect(() => localStorage.setItem("model", model), [model]);
   useEffect(() => localStorage.setItem("enhancerModel", enhancerModel), [enhancerModel]);
   useEffect(() => localStorage.setItem("enhancerMode", enhancerMode), [enhancerMode]);
+  useEffect(() => localStorage.setItem("thinking", String(thinking)), [thinking]);
+  useEffect(
+    () => localStorage.setItem("thinkingDisplay", thinkingDisplay),
+    [thinkingDisplay]
+  );
   useEffect(
     () => localStorage.setItem("enhanceTemplate", String(enhanceTemplate)),
     [enhanceTemplate]
@@ -568,6 +584,25 @@ export default function App() {
           model,
           payload,
           {
+            onThinking: (token) => {
+              if (thinkingDisplay === "verbose") {
+                // The reasoning is its own liveness signal, like the answer.
+                setProgress(null);
+                setMessages((prev) => {
+                  const next = [...prev];
+                  const last = next[next.length - 1];
+                  next[next.length - 1] = {
+                    ...last,
+                    thinking: (last.thinking ?? "") + token,
+                  };
+                  return next;
+                });
+              } else {
+                setProgress((p) =>
+                  p && { ...p, phase: "💭 Thinking…", updatedAt: Date.now() }
+                );
+              }
+            },
             onToken: (token) => {
               assistantText += token;
               setProgress(null);
@@ -592,7 +627,8 @@ export default function App() {
                 return next;
               }),
           },
-          controller.signal
+          controller.signal,
+          thinking
         );
       } catch (e) {
         if ((e as Error).name !== "AbortError") {
@@ -645,6 +681,8 @@ export default function App() {
       messages,
       model,
       ollamaUrl,
+      thinking,
+      thinkingDisplay,
       systemPrompt,
       systemImage,
       pinnedImages,
@@ -663,12 +701,14 @@ export default function App() {
     // still shows the original while the rewrite does the generating.
     // `displayEnhanced` (Verbose mode only) is that same rewrite, attached to
     // the chat message so it renders underneath the user's prompt.
+    // `displayThinking` is the enhancer's reasoning, when thinking is shown.
     async (
       prompt: string,
       op: GenOp,
       images: string[],
       sendPrompt = prompt,
-      displayEnhanced: string | null = null
+      displayEnhanced: string | null = null,
+      displayThinking: string | null = null
     ) => {
       // Which transformer this run will use. Resolved once, here: it names the
       // placeholder turn, and it's what goes on the wire — so what the composer
@@ -744,6 +784,7 @@ export default function App() {
         images: shownImages,
         model: modelId,
         enhancedPrompt: displayEnhanced ?? undefined,
+        enhancerThinking: displayThinking ?? undefined,
       };
       setMessages((prev) => [
         ...prev,
@@ -1251,6 +1292,8 @@ export default function App() {
    *  same rewrite, but only in Verbose mode: the caller attaches it to the chat
    *  message so it renders underneath the user's own typed prompt, right in the
    *  chat window. On keeps the rewrite invisible — `displayEnhanced` is null.
+   *  `displayThinking` is the model's reasoning, when thinking is on and set to
+   *  verbose — independent of the enhancer's own On/Verbose choice.
    *  Fails soft: an unreachable Ollama, or no vision model picked/installed,
    *  just means the typed prompt goes out as-is (`/api/flux/enhance` has the
    *  same fallback contract). */
@@ -1258,19 +1301,23 @@ export default function App() {
     prompt: string,
     op: GenOp,
     images: string[]
-  ): Promise<{ sendPrompt: string; displayEnhanced: string | null }> {
-    if (enhancerMode === "off" || !effectiveEnhanceModel) {
-      return { sendPrompt: prompt, displayEnhanced: null };
-    }
+  ): Promise<{
+    sendPrompt: string;
+    displayEnhanced: string | null;
+    displayThinking: string | null;
+  }> {
+    const unchanged = { sendPrompt: prompt, displayEnhanced: null, displayThinking: null };
+    if (enhancerMode === "off" || !effectiveEnhanceModel) return unchanged;
     const seen = imagesFor(op, images);
     const mode = modeFor(op, seen);
     try {
-      const { prompt: rewritten } = await enhancePrompt({
+      const { prompt: rewritten, thinking: reasoning } = await enhancePrompt({
         prompt,
         mode,
         model: effectiveEnhanceModel,
         image_hashes: await ensureHashes(seen),
         ollama_url: ollamaUrl,
+        think: thinking,
         // Only meaningful for a studio pose; the backend ignores it elsewhere.
         ...(op === "control" && studioMaps.length > 0 && studioMeta ? studioMeta : {}),
       });
@@ -1278,12 +1325,13 @@ export default function App() {
         return {
           sendPrompt: rewritten,
           displayEnhanced: enhancerMode === "verbose" ? rewritten : null,
+          displayThinking: thinkingDisplay === "verbose" && reasoning ? reasoning : null,
         };
       }
     } catch {
       // Swallow — the typed prompt goes out unchanged below.
     }
-    return { sendPrompt: prompt, displayEnhanced: null };
+    return unchanged;
   }
 
   async function submitComposer() {
@@ -1360,9 +1408,13 @@ export default function App() {
       // below. Verbose's rewrite rides along to `generateImage`, which attaches
       // it to the chat message it's about to create.
       setEnhancing(true);
-      const { sendPrompt, displayEnhanced } = await maybeAutoEnhance(trimmed, op, imgs);
+      const { sendPrompt, displayEnhanced, displayThinking } = await maybeAutoEnhance(
+        trimmed,
+        op,
+        imgs
+      );
       setEnhancing(false);
-      generateImage(trimmed, op, imgs, sendPrompt, displayEnhanced);
+      generateImage(trimmed, op, imgs, sendPrompt, displayEnhanced, displayThinking);
     } else {
       if (!trimmed && composerImages.length === 0) return;
       send(trimmed, composerImages);
@@ -1391,6 +1443,8 @@ export default function App() {
         setEnhancerMode={setEnhancerMode}
         enhanceTemplate={enhanceTemplate}
         setEnhanceTemplate={setEnhanceTemplate}
+        thinkingDisplay={thinkingDisplay}
+        setThinkingDisplay={setThinkingDisplay}
       />
       <main className="main">
         <header className="topbar">
@@ -1458,6 +1512,8 @@ export default function App() {
             gen={gen}
             setGen={setGen}
             enhancing={enhancing}
+            thinking={thinking}
+            setThinking={setThinking}
             pinnedCount={pinnedImages.length}
             pinnedInit={pinnedImages[0] ?? null}
             preprocessors={preprocessors}

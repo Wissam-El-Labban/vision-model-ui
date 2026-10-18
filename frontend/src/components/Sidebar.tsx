@@ -2,9 +2,10 @@ import { useState } from "react";
 import ImageModels from "./ImageModels";
 import ModelManager from "./ModelManager";
 import PromptEnhancer from "./PromptEnhancer";
+import ThinkingSettings from "./ThinkingSettings";
 import UpdateBanner from "./UpdateBanner";
 import ChatList from "./ChatList";
-import type { ChatSummary, EnhancerMode } from "../types";
+import type { ChatSummary, EnhancerMode, ThinkingDisplay } from "../types";
 import type { FluxModel } from "../api";
 
 interface Props {
@@ -25,6 +26,8 @@ interface Props {
   setEnhancerMode: (v: EnhancerMode) => void;
   enhanceTemplate: boolean;
   setEnhanceTemplate: (v: boolean) => void;
+  thinkingDisplay: ThinkingDisplay;
+  setThinkingDisplay: (v: ThinkingDisplay) => void;
 }
 
 export default function Sidebar(props: Props) {
@@ -46,6 +49,8 @@ export default function Sidebar(props: Props) {
     setEnhancerMode,
     enhanceTemplate,
     setEnhanceTemplate,
+    thinkingDisplay,
+    setThinkingDisplay,
   } = props;
   const [urlDraft, setUrlDraft] = useState(ollamaUrl);
 
@@ -91,6 +96,8 @@ export default function Sidebar(props: Props) {
         enhanceTemplate={enhanceTemplate}
         setEnhanceTemplate={setEnhanceTemplate}
       />
+
+      <ThinkingSettings display={thinkingDisplay} setDisplay={setThinkingDisplay} />
 
       <ImageModels models={fluxModels} onChanged={refreshFlux} />
 

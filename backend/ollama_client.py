@@ -3,7 +3,9 @@
 The browser never talks to Ollama directly; the FastAPI backend owns every
 Ollama call. Logic here is ported from the previous Streamlit app
 (utils.py / app.py) and keeps the two load-bearing fixes from this branch:
-`"think": False` and a (connect, read) timeout split.
+`"think": False` and a (connect, read) timeout split. Thinking is opt-in: chat and
+prompt enhancement take a `think` flag the user switches on in the UI, and every
+other call keeps it off.
 """
 import json
 import re
@@ -44,23 +46,50 @@ def context_size_for(messages):
     return min(32768, max(MIN_CTX, 4096 + 2048 * n_images))
 
 
-def stream_chat(url, model, messages):
+def supports_thinking(url, model):
+    """Whether a model can reason before answering (Ollama's `thinking` capability).
+
+    Asked before sending `think: True`, because Ollama rejects the whole request
+    with a 400 for a model that can't think — and the toggle is global, so it is
+    routinely on while a model without the capability is picked. Only a definite
+    answer is cached; a failed lookup says False this time and asks again next.
+    """
+    key = (url, model)
+    if key in _THINKING_CACHE:
+        return _THINKING_CACHE[key]
+    try:
+        response = requests.post(f"{url}/api/show", json={"name": model}, timeout=10)
+        if response.status_code != 200:
+            return False
+        caps = response.json().get("capabilities") or []
+    except (requests.RequestException, ValueError):
+        return False
+    _THINKING_CACHE[key] = "thinking" in caps
+    return _THINKING_CACHE[key]
+
+
+_THINKING_CACHE = {}
+
+
+def stream_chat(url, model, messages, think=False):
     """POST to Ollama's /api/chat and yield streaming events.
 
-    Yields dicts: {"type": "token", "text": ...} for content, and a final
-    {"type": "usage", ...} carrying the exact token counts Ollama reports
+    Yields dicts: {"type": "token", "text": ...} for content,
+    {"type": "thinking", "text": ...} for reasoning when `think` is on, and a
+    final {"type": "usage", ...} carrying the exact token counts Ollama reports
     (prompt_eval_count + eval_count) plus the num_ctx we used — the ground
     truth for the context-usage meter.
 
-    Sends `think: False` so reasoning-capable models answer directly, and a
-    `num_ctx` sized to fit the request's images (see context_size_for).
+    `think` is off unless the user asked for it, so reasoning-capable models
+    answer directly by default; the caller checks `supports_thinking` first. The
+    `num_ctx` is sized to fit the request's images (see context_size_for).
     """
     num_ctx = context_size_for(messages)
     payload = {
         "model": model,
         "messages": messages,
         "stream": True,
-        "think": False,
+        "think": bool(think),
         "keep_alive": KEEP_ALIVE,
         "options": {"num_ctx": num_ctx},
     }
@@ -80,7 +109,11 @@ def stream_chat(url, model, messages):
             chunk = json.loads(line)
         except json.JSONDecodeError:
             continue
-        content = (chunk.get("message") or {}).get("content")
+        message = chunk.get("message") or {}
+        thinking = message.get("thinking")
+        if thinking:
+            yield {"type": "thinking", "text": thinking}
+        content = message.get("content")
         if content:
             yield {"type": "token", "text": content}
         if chunk.get("done"):
@@ -379,7 +412,8 @@ def _clean_prompt(text: str) -> str:
     return t
 
 
-def enhance_prompt(url, model, prompt, mode, images_b64=(), subjects=1, contact=False):
+def enhance_prompt(url, model, prompt, mode, images_b64=(), subjects=1, contact=False,
+                   think=False):
     """Rewrite a FLUX prompt with a vision model that can see the references.
 
     The identity-preserving work is done by the reference latents, not by this text
@@ -391,8 +425,11 @@ def enhance_prompt(url, model, prompt, mode, images_b64=(), subjects=1, contact=
     the control brief and nowhere else: no other mode conditions on a pose, so a
     figure count would be noise in them.
 
-    Fails soft (returns "") exactly like `generate_title`; the caller falls back to
-    the static template.
+    Returns `(prompt, thinking)`. Ollama keeps the reasoning out of `content`, so
+    `thinking` is "" unless `think` is on, and the prompt is clean either way.
+
+    Fails soft (returns ("", "")) exactly like `generate_title`; the caller falls
+    back to the static template.
     """
     template = _ENHANCE_MODE.get(mode, "create")
     system = _ENHANCE_SYSTEM[template]
@@ -406,18 +443,18 @@ def enhance_prompt(url, model, prompt, mode, images_b64=(), subjects=1, contact=
         "model": model,
         "messages": messages,
         "stream": False,
-        "think": False,
+        "think": bool(think),
         "keep_alive": KEEP_ALIVE,
         "options": {"num_ctx": context_size_for(messages)},
     }
     try:
         response = requests.post(f"{url}/api/chat", json=payload, timeout=CHAT_TIMEOUT)
         if response.status_code != 200:
-            return ""
-        text = (response.json().get("message") or {}).get("content", "")
+            return "", ""
+        message = response.json().get("message") or {}
     except (requests.RequestException, ValueError):
-        return ""
-    return _clean_prompt(text)
+        return "", ""
+    return _clean_prompt(message.get("content") or ""), (message.get("thinking") or "").strip()
 
 
 # --------------------------------------------------------------------------- #

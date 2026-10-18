@@ -121,17 +121,20 @@ export interface Usage {
 
 interface ChatHandlers {
   onToken: (token: string) => void;
+  /** Reasoning tokens, only sent when `think` is on and the model can think. */
+  onThinking?: (token: string) => void;
   onUsage?: (usage: Usage) => void;
   onError?: (message: string) => void;
 }
 
-/** Stream a chat response (NDJSON events: token / usage / error). */
+/** Stream a chat response (NDJSON events: thinking / token / usage / error). */
 export async function streamChat(
   ollamaUrl: string,
   model: string,
   messages: ChatMessage[],
   handlers: ChatHandlers,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  think = false
 ): Promise<void> {
   const res = await fetch("/api/chat", {
     method: "POST",
@@ -140,6 +143,7 @@ export async function streamChat(
       model,
       ollama_url: ollamaUrl,
       messages: messages.map(withImages),
+      think,
     }),
     signal,
   });
@@ -152,6 +156,7 @@ export async function streamChat(
       return;
     }
     if (ev.type === "token") handlers.onToken(ev.text as string);
+    else if (ev.type === "thinking") handlers.onThinking?.(ev.text as string);
     else if (ev.type === "usage") handlers.onUsage?.(ev as unknown as Usage);
     else if (ev.type === "error") handlers.onError?.(ev.message as string);
   });
@@ -647,7 +652,9 @@ export async function enhancePrompt(params: {
    *  two-person pose is briefed as a one-person scene. */
   subjects?: number;
   contact?: boolean;
-}): Promise<{ prompt: string; source: "vlm" | "template" }> {
+  /** Let a thinking-capable model reason first; ignored by models that can't. */
+  think?: boolean;
+}): Promise<{ prompt: string; source: "vlm" | "template"; thinking: string }> {
   const res = await fetch("/api/flux/enhance", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
