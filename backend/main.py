@@ -835,9 +835,19 @@ def _recorder(chat_id: str | None):
 # Headroom kept free beside both tenants: CUDA contexts, VAE decode spikes.
 _VRAM_MARGIN_GB = 2.0
 
+# uvicorn's logger is the one that reaches the terminal at INFO.
+_log = logging.getLogger("uvicorn.error")
+
 
 def _flux_vram_gb(unets) -> float | None:
-    """VRAM the largest of these UNets needs, or None if any is unknown (user-added)."""
+    """VRAM FLUX needs for these UNets, or None if any is unknown (user-added).
+
+    What ComfyUI actually holds when they are already resident, else the largest
+    catalog estimate.
+    """
+    measured = fx.vram_in_use_gb(unets) if unets else None
+    if measured:
+        return measured
     needs = [(cat.bundle_of_unet(u) or {}).get("vram_gb") for u in unets]
     return None if not needs or None in needs else float(max(needs))
 
@@ -853,14 +863,27 @@ def _free_gpu_for_flux(ollama_url, unets, emit) -> None:
     try:
         need = _flux_vram_gb(unets)
         total = oc.gpu_total_gb()
+        held = oc.loaded_vram_gb(ollama_url)
         if need is not None and total is not None:
-            held = oc.loaded_vram_gb(ollama_url)
-            if held + need + _VRAM_MARGIN_GB <= total:
+            fits = held + need + _VRAM_MARGIN_GB <= total
+            _log.info("VRAM fit: ollama %.1f GB + flux %.1f GB + margin %.1f GB "
+                      "vs %.1f GB -> %s", held, need, _VRAM_MARGIN_GB, total,
+                      "keep" if fits else "unload")
+            if fits:
                 if held:
                     emit({"type": "status", "message": "Keeping vision model loaded…"})
                 return
-        emit({"type": "status", "message": "Freeing VRAM (unloading vision model)…"})
-        oc.unload_all(ollama_url)
+            if held:
+                emit({"type": "status", "message":
+                      f"Vision model + FLUX need {held + need:.0f} GB of {total:.0f} GB "
+                      f"VRAM — unloading vision model…"})
+        else:
+            _log.info("VRAM fit unknown (flux %s, gpu %s) -> unload", need, total)
+            if held:
+                emit({"type": "status",
+                      "message": "Freeing VRAM (unloading vision model)…"})
+        if held:
+            oc.unload_all(ollama_url)
     except Exception:
         pass  # best-effort; Ollama may be remote or already free
 

@@ -483,10 +483,11 @@ def ensure_server(on_status=None) -> None:
     global _residency_known
     _resident.clear()
     _residency_known = True
-    # Default (normalvram) memory management: ComfyUI keeps the model resident and
-    # offloads only as needed — the right balance on this 15 GB GPU. (--lowvram
-    # would over-offload and slow things down for no quality gain.) Loopback-only
-    # for privacy; logs kept for troubleshooting.
+    # Estimate-based memory management: ComfyUI loads the model onto the GPU once and
+    # keeps it resident until `free()`. ComfyUI's default since 0.41, dynamic VRAM,
+    # instead pages weights out whenever another process (Ollama) takes VRAM and
+    # streams them back from disk on the next run — a cold start on every image.
+    # Loopback-only for privacy; logs kept for troubleshooting.
     log = open(_RUNTIME / "comfyui.log", "w")  # noqa: SIM115
     # Once installed the sidecar must never reach out: the GGUF loaders read local
     # weight files, and these flags stop transformers / HF-hub from making metadata
@@ -495,7 +496,8 @@ def ensure_server(on_status=None) -> None:
     env = {**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
            "HF_HUB_DISABLE_TELEMETRY": "1"}
     _proc = subprocess.Popen(
-        [str(CVENV_PY), "main.py", "--listen", "127.0.0.1", "--port", "8188"],
+        [str(CVENV_PY), "main.py", "--listen", "127.0.0.1", "--port", "8188",
+         "--disable-dynamic-vram"],
         cwd=str(COMFY_DIR),
         stdout=log,
         stderr=subprocess.STDOUT,
@@ -513,6 +515,23 @@ def ensure_server(on_status=None) -> None:
         time.sleep(0.5)
     raise RuntimeError("FLUX engine failed to start in time "
                        f"(see {_RUNTIME / 'comfyui.log'}).")
+
+
+def vram_in_use_gb(unets) -> float | None:
+    """VRAM ComfyUI holds right now, in GB — if it already holds all of `unets`.
+
+    None when that isn't known: the sidecar is down, or one of them isn't resident
+    (a cold load can need more than what is reserved now). Measured beats the
+    catalog's `vram_gb`, which is a sizing guide, not what this GPU ends up holding.
+    """
+    if not _residency_known or not all(u in _resident for u in unets):
+        return None
+    try:
+        with urllib.request.urlopen(COMFY_URL + "/system_stats", timeout=2) as r:
+            device = json.load(r)["devices"][0]
+        return device["torch_vram_total"] / 1e9
+    except Exception:
+        return None
 
 
 def _boot_error() -> str:

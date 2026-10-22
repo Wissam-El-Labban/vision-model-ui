@@ -8,6 +8,7 @@ prompt enhancement take a `think` flag the user switches on in the UI, and every
 other call keeps it off.
 """
 import json
+import logging
 import re
 import subprocess
 from urllib.parse import urlparse
@@ -691,7 +692,11 @@ def warm(url, model, reserved_gb):
         if size is None or total is None:
             return False
         held = sum(m.get("size_vram") or 0 for m in loaded) / 1e9
-        if held + size * 1.2 + reserved_gb > total:
+        fits = held + size * 1.2 + reserved_gb <= total
+        logging.getLogger("uvicorn.error").info(
+            "warm %s: ollama %.1f GB + model %.1f GB + flux %.1f GB vs %.1f GB -> %s",
+            model, held, size * 1.2, reserved_gb, total, "warm" if fits else "skip")
+        if not fits:
             return False
         requests.post(
             f"{url}/api/chat",
