@@ -36,6 +36,37 @@ export interface ChatMessage {
    *  prompts it wrote. Live-session only, like `enhancedPrompt` — the images and
    *  the text survive a reload, the reasoning behind them doesn't. */
   agentSteps?: AgentStep[];
+  /** The document excerpts this answer was given (assistant turns), numbered the
+   *  way the model was asked to cite them — "[2]" in the text is `sources[1]`. */
+  sources?: Source[];
+}
+
+/** One document in the library, as `/api/docs` lists it. */
+export interface DocInfo {
+  id: string;
+  name: string;
+  kind: "pdf" | "text";
+  size_bytes: number;
+  /** Original file plus its index — what deleting it gives back. */
+  disk_bytes: number;
+  pages: number | null;
+  n_chunks: number;
+  /** The embedding model its index was built with. */
+  embed_model: string | null;
+  status: "indexing" | "ready" | "error";
+  error: string | null;
+  created_at: number;
+}
+
+/** A document excerpt an answer was given, for the "Sources" footer. */
+export interface Source {
+  n: number;
+  doc_id: string;
+  name: string;
+  page: number | null;
+  snippet: string;
+  /** Cosine similarity, or null when the whole document fit and was sent as-is. */
+  score: number | null;
 }
 
 /** Which composer mode is active.
@@ -195,6 +226,7 @@ export interface StoredMessage {
   images: string[];
   /** URLs of the images that were in the model's context for this turn. */
   context_images: string[];
+  sources?: Source[];
 }
 
 /** Full chat detail from GET /api/chats/{id}. */
@@ -205,5 +237,9 @@ export interface ChatDetail {
   system_prompt: string;
   system_image: string | null;
   pinned: string[];
+  /** Ids of the documents this chat answers from. */
+  documents?: string[];
+  /** Whether those documents may shape image/video prompts (off by default). */
+  doc_prompts?: boolean;
   messages: StoredMessage[];
 }

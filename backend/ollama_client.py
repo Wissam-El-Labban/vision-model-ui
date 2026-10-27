@@ -31,6 +31,13 @@ KEEP_ALIVE = "30m"
 # because Ollama reloads the model whenever `num_ctx` changes between requests.
 MIN_CTX = 8192
 
+# Extra window for a request carrying retrieved document text (see rag.py), which
+# marks its block with this tag. One fixed step rather than a size measured per
+# message, so a chat that keeps using its documents keeps one `num_ctx` — and one
+# loaded runner — from turn to turn.
+DOCS_TAG = "<documents>"
+DOCS_EXTRA_CTX = 4096
+
 GITHUB_LATEST = "https://api.github.com/repos/ollama/ollama/releases/latest"
 
 
@@ -46,7 +53,8 @@ def context_size_for(messages):
     of images and cap it.
     """
     n_images = sum(len(m.get("images") or []) for m in messages)
-    return min(32768, max(MIN_CTX, 4096 + 2048 * n_images))
+    docs = any(DOCS_TAG in (m.get("content") or "") for m in messages)
+    return min(32768, max(MIN_CTX, 4096 + 2048 * n_images) + (DOCS_EXTRA_CTX if docs else 0))
 
 
 def supports_thinking(url, model):
@@ -421,7 +429,7 @@ def _clean_prompt(text: str) -> str:
 
 
 def enhance_prompt(url, model, prompt, mode, images_b64=(), subjects=1, contact=False,
-                   think=False):
+                   think=False, reference=""):
     """Rewrite a FLUX prompt with a vision model that can see the references.
 
     The identity-preserving work is done by the reference latents, not by this text
@@ -436,6 +444,11 @@ def enhance_prompt(url, model, prompt, mode, images_b64=(), subjects=1, contact=
     Returns `(prompt, thinking)`. Ollama keeps the reasoning out of `content`, so
     `thinking` is "" unless `think` is on, and the prompt is clean either way.
 
+    `reference` is retrieved document text (`rag.format_context(..., "reference")`)
+    put ahead of the prompt, for a character sheet or style guide to inform the
+    rewrite. The brief's output rules are untouched, so the result is still a prompt
+    the image model's text encoder can take.
+
     Fails soft (returns ("", "")) exactly like `generate_title`; the caller falls
     back to the static template.
     """
@@ -443,7 +456,8 @@ def enhance_prompt(url, model, prompt, mode, images_b64=(), subjects=1, contact=
     system = _ENHANCE_SYSTEM[template]
     if template == "control":
         system += _subject_note(subjects, contact)
-    user = {"role": "user", "content": prompt}
+    content = f"{reference}\n\nPrompt to rewrite:\n{prompt}" if reference else prompt
+    user = {"role": "user", "content": content}
     if images_b64:
         user["images"] = list(images_b64)
     messages = [{"role": "system", "content": system}, user]

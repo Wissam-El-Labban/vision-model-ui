@@ -5,6 +5,7 @@ import Composer from "./components/Composer";
 import ImageBar from "./components/ImageBar";
 import ContextMeter from "./components/ContextMeter";
 import GenModelPill from "./components/GenModelPill";
+import DocPills from "./components/DocPills";
 import ResourceMeter from "./components/ResourceMeter";
 // Lazily loaded: the studio pulls in three.js, which is bigger than the rest of
 // the app put together. Nobody who isn't posing a figure should pay for it.
@@ -17,6 +18,7 @@ import {
   generate,
   generateTitle,
   getAgentTools,
+  isDocFile,
   getChat,
   getFit,
   getFluxModels,
@@ -44,6 +46,7 @@ import {
   stepsFor,
 } from "./flux";
 import { buildOllamaContext } from "./chatContext";
+import { useDocuments } from "./useDocuments";
 import type {
   AgentStep,
   AgentTool,
@@ -52,10 +55,12 @@ import type {
   ChatSummary,
   ComposerMode,
   ControlMap,
+  DocInfo,
   GenProgress,
   GenSettings,
   GenOp,
   EnhancerMode,
+  Source,
   ThinkingDisplay,
 } from "./types";
 
@@ -272,6 +277,14 @@ export default function App() {
     crypto.randomUUID()
   );
   const [chatExists, setChatExists] = useState(false);
+  // Which library documents this chat answers from. Saved with the chat (like its
+  // pinned images), so each chat keeps its own selection.
+  const [activeDocIds, setActiveDocIds] = useState<string[]>([]);
+  // Whether those documents may also shape image/video prompts — the enhancer's
+  // rewrite and the agent's tool prompts. Opt-in per chat: a manual or a paper
+  // has nothing to add to a picture, and would only leak into it.
+  const [docPrompts, setDocPrompts] = useState(false);
+  const [docsOpen, setDocsOpen] = useState(false);
   // data-URL -> content hash, so re-sent pinned images aren't re-uploaded.
   const hashCache = useRef<Map<string, string>>(new Map());
   // True while the pinned Images panel is "focused" (clicked). Pasted images are
@@ -313,6 +326,26 @@ export default function App() {
     );
   }, []);
 
+  // Scanned PDF pages are read by a vision model: the chat model when it can see,
+  // since it's the one most likely to be loaded already.
+  const ocrModel = models.vision.includes(model) ? model : models.vision[0] ?? "";
+  const docs = useDocuments(
+    ollamaUrl,
+    ocrModel,
+    // A file dropped into a chat is meant for that chat.
+    useCallback(
+      (doc: DocInfo) =>
+        setActiveDocIds((prev) => (prev.includes(doc.id) ? prev : [...prev, doc.id])),
+      []
+    ),
+    useCallback((id: string) => setActiveDocIds((prev) => prev.filter((x) => x !== id)), [])
+  );
+  // Only ready documents go on the wire. The backend filters too; this keeps the
+  // pill and the request agreeing about what "N docs" means.
+  const readyDocIds = activeDocIds.filter((id) =>
+    docs.library.documents.some((d) => d.id === id && d.status === "ready")
+  );
+
   const refreshChats = useCallback(async () => {
     try {
       setChats(await listChats());
@@ -322,6 +355,8 @@ export default function App() {
   }, []);
 
   async function addPinned(files: FileList | File[]) {
+    const docFiles = Array.from(files).filter(isDocFile);
+    if (docFiles.length) docs.add(docFiles);
     const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
     // Keep the original bytes. The backend caps and resamples once, with a better
     // filter, and hands each consumer the size it wants (`forOllama` below for the
@@ -446,6 +481,8 @@ export default function App() {
           system_prompt: systemPrompt,
           pinned_hashes,
           system_image_hash,
+          doc_ids: activeDocIds,
+          doc_prompts: docPrompts,
         });
       } catch {
         /* non-fatal */
@@ -459,6 +496,8 @@ export default function App() {
     systemPrompt,
     pinnedImages,
     systemImage,
+    activeDocIds,
+    docPrompts,
     ensureHashes,
   ]);
 
@@ -468,6 +507,8 @@ export default function App() {
     setChatExists(false);
     setMessages([]);
     setPinnedImages([]);
+    setActiveDocIds([]);
+    setDocPrompts(false);
     setSystemPrompt("");
     setSystemImage(null);
     setUsage(null);
@@ -525,6 +566,7 @@ export default function App() {
             images: images.length ? images : undefined,
             videos: videos.length ? videos : undefined,
             contextImages: contextImages.length ? contextImages : undefined,
+            sources: m.sources?.length ? m.sources : undefined,
           };
         })
       );
@@ -532,6 +574,8 @@ export default function App() {
       setCurrentChatId(d.id);
       setChatExists(true);
       setPinnedImages(pinned);
+      setActiveDocIds(d.documents ?? []);
+      setDocPrompts(!!d.doc_prompts);
       setSystemImage(sysImg);
       setSystemPrompt(d.system_prompt || "");
       if (d.model) setModel(d.model);
@@ -619,6 +663,7 @@ export default function App() {
       payload.push(...merged);
 
       let assistantText = "";
+      let sources: Source[] = [];
       const controller = new AbortController();
       abortRef.current = controller;
       try {
@@ -659,6 +704,15 @@ export default function App() {
               });
             },
             onUsage: (u) => setUsage(u),
+            onSources: (found) => {
+              sources = found;
+              setMessages((prev) => {
+                const next = [...prev];
+                next[next.length - 1] = { ...next[next.length - 1], sources: found };
+                return next;
+              });
+            },
+            onDocsError: (msg) => setError(msg),
             onError: (msg) =>
               setMessages((prev) => {
                 const next = [...prev];
@@ -671,7 +725,8 @@ export default function App() {
               }),
           },
           controller.signal,
-          thinking
+          thinking,
+          { ids: readyDocIds, query: text }
         );
       } catch (e) {
         if ((e as Error).name !== "AbortError") {
@@ -693,6 +748,8 @@ export default function App() {
             system_prompt: systemPrompt,
             pinned_hashes,
             system_image_hash,
+            doc_ids: activeDocIds,
+            doc_prompts: docPrompts,
           });
           setChatExists(true);
 
@@ -709,6 +766,7 @@ export default function App() {
             model,
             image_hashes: [],
             context_hashes: await ensureHashes(outImages),
+            sources,
           });
 
           if (isFirstExchange) {
@@ -731,6 +789,9 @@ export default function App() {
       pinnedImages,
       usage,
       currentChatId,
+      activeDocIds,
+      docPrompts,
+      readyDocIds,
       ensureHashes,
       forOllama,
       refreshChats,
@@ -880,6 +941,8 @@ export default function App() {
             system_image_hash: systemImage
               ? (await ensureHashes([systemImage]))[0]
               : null,
+            doc_ids: activeDocIds,
+            doc_prompts: docPrompts,
           });
           setChatExists(true);
         } catch (err) {
@@ -1055,6 +1118,8 @@ export default function App() {
       pinnedImages,
       messages,
       currentChatId,
+      activeDocIds,
+      docPrompts,
       ensureHashes,
       refreshChats,
     ]
@@ -1164,6 +1229,8 @@ export default function App() {
             system_image_hash: systemImage
               ? (await ensureHashes([systemImage]))[0]
               : null,
+            doc_ids: activeDocIds,
+            doc_prompts: docPrompts,
           });
           setChatExists(true);
         } catch (err) {
@@ -1191,6 +1258,8 @@ export default function App() {
             ollama_url: ollamaUrl,
             chat_id: chatId,
             think: thinking,
+            doc_ids: readyDocIds,
+            doc_prompts: docPrompts,
             unload_ollama: unloadOllama,
           },
           {
@@ -1198,6 +1267,8 @@ export default function App() {
               assistantText += token;
               setAssistant({ content: assistantText });
             },
+            onSources: (sources) => setAssistant({ sources }),
+            onDocsError: (msg) => setError(msg),
             onThinking: (token) => {
               if (thinkingDisplay === "verbose") {
                 setMessages((prev) => {
@@ -1308,6 +1379,9 @@ export default function App() {
       messages,
       usage,
       currentChatId,
+      activeDocIds,
+      docPrompts,
+      readyDocIds,
       ensureHashes,
       forOllama,
       refreshChats,
@@ -1321,6 +1395,13 @@ export default function App() {
   const [composerText, setComposerText] = useState("");
   const [composerImages, setComposerImages] = useState<string[]>([]);
   async function addComposerFiles(files: FileList | File[]) {
+    // PDFs and text files go to the document library (and are ticked for this
+    // chat once indexed); images attach to the message as before.
+    const docFiles = Array.from(files).filter(isDocFile);
+    if (docFiles.length) {
+      setDocsOpen(true);
+      docs.add(docFiles);
+    }
     const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
     if (list.length === 0) return;
     // Original bytes — these are FLUX's reference images. See `addPinned`.
@@ -1457,6 +1538,8 @@ export default function App() {
         image_hashes: await ensureHashes(seen),
         ollama_url: ollamaUrl,
         think: thinking,
+        doc_ids: docPrompts ? readyDocIds : [],
+        doc_prompts: docPrompts,
         // Only meaningful for a studio pose; the backend ignores it elsewhere.
         ...(op === "control" && studioMaps.length > 0 && studioMeta ? studioMeta : {}),
       });
@@ -1580,6 +1663,14 @@ export default function App() {
         setThinking={setThinking}
         thinkingDisplay={thinkingDisplay}
         setThinkingDisplay={setThinkingDisplay}
+        docs={docs}
+        activeDocIds={activeDocIds}
+        setActiveDocIds={setActiveDocIds}
+        docPrompts={docPrompts}
+        setDocPrompts={setDocPrompts}
+        docsOpen={docsOpen}
+        setDocsOpen={setDocsOpen}
+        ocrModel={ocrModel}
       />
       <main className="main">
         <header className="topbar">
@@ -1619,6 +1710,19 @@ export default function App() {
                   warn={fitWarn}
                 />
               ))}
+            {/* Documents reach the model in Analyze and Agent, and in Generate
+                only through the enhancer — and there only with the chat's
+                "Prompts" tag on, which the pills lead with so it's always visible
+                whether they will be read. */}
+            {readyDocIds.length > 0 && (!genMode || enhancerMode !== "off") && (
+              <DocPills
+                docs={docs.library.documents.filter((d) => readyDocIds.includes(d.id))}
+                onOpen={() => setDocsOpen(true)}
+                onRemove={(id) => setActiveDocIds((prev) => prev.filter((x) => x !== id))}
+                prompts={docPrompts}
+                onTogglePrompts={() => setDocPrompts((v) => !v)}
+              />
+            )}
             {model && (
               <span
                 className={`model-pill ${composerMode === "analyze" && fitWarn ? "warn" : ""}`}

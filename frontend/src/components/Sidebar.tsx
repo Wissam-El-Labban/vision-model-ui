@@ -4,6 +4,8 @@ import ModelManager from "./ModelManager";
 import ThinkingSettings from "./ThinkingSettings";
 import UpdateBanner from "./UpdateBanner";
 import ChatList from "./ChatList";
+import Documents from "./Documents";
+import type { DocumentsApi } from "../useDocuments";
 import type { ChatSummary, ThinkingDisplay } from "../types";
 import type { FluxModel } from "../api";
 
@@ -23,6 +25,14 @@ interface Props {
   setThinking: (v: boolean) => void;
   thinkingDisplay: ThinkingDisplay;
   setThinkingDisplay: (v: ThinkingDisplay) => void;
+  docs: DocumentsApi;
+  activeDocIds: string[];
+  setActiveDocIds: (ids: string[]) => void;
+  docPrompts: boolean;
+  setDocPrompts: (v: boolean) => void;
+  docsOpen: boolean;
+  setDocsOpen: (v: boolean) => void;
+  ocrModel: string;
 }
 
 export default function Sidebar(props: Props) {
@@ -42,6 +52,14 @@ export default function Sidebar(props: Props) {
     setThinking,
     thinkingDisplay,
     setThinkingDisplay,
+    docs,
+    activeDocIds,
+    setActiveDocIds,
+    docPrompts,
+    setDocPrompts,
+    docsOpen,
+    setDocsOpen,
+    ocrModel,
   } = props;
   const [urlDraft, setUrlDraft] = useState(ollamaUrl);
 
@@ -70,6 +88,18 @@ export default function Sidebar(props: Props) {
         onNewChat={onNewChat}
         onOpenChat={onOpenChat}
         onDeleteChat={onDeleteChat}
+      />
+
+      <Documents
+        docs={docs}
+        activeIds={activeDocIds}
+        setActiveIds={setActiveDocIds}
+        docPrompts={docPrompts}
+        setDocPrompts={setDocPrompts}
+        ollamaUrl={ollamaUrl}
+        ocrModel={ocrModel}
+        open={docsOpen}
+        setOpen={setDocsOpen}
       />
 
       <ModelManager

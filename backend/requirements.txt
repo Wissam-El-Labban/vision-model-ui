@@ -8,6 +8,15 @@ pydantic>=2.0.0
 # own torch (see run.sh). The backend deliberately holds no torch/diffusers: it
 # only reads and encodes image bytes, and drives ComfyUI over HTTP + websocket.
 pillow>=10.0.0
+
+# --- Documents (RAG) ---
+# Vectors are scored with numpy (exact search, one small index per document — see
+# rag.py). PDFium reads PDFs and renders scanned pages for the vision model to read;
+# it's BSD/Apache, unlike PyMuPDF's AGPL. python-multipart is what FastAPI needs to
+# accept a file upload.
+numpy>=1.26
+pypdfium2>=4.30
+python-multipart>=0.0.9
 websocket-client==1.8.0
 # Used only by the model-download subprocess, to list a HF repo's files and pull
 # its weights. Must be >=0.32 with hf_xet installed: Black Forest Labs' repos (klein,

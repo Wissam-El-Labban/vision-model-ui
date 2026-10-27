@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { AgentStep, ChatMessage, GenProgress } from "../types";
+import type { AgentStep, ChatMessage, GenProgress, Source } from "../types";
 import GenProgressBar from "./GenProgressBar";
 
 /** Stable color per model name, for the per-chunk indicator. */
@@ -52,6 +52,37 @@ function annotateImageRefs(content: string, count: number): string {
       (m, ord) => inject(m, ORDINALS[ord.toLowerCase()])
     )
     .replace(/\bpinned reference images?\b/gi, (m) => inject(m, 1));
+}
+
+/** The document excerpts an answer was given, numbered as the model cites them.
+ *  Folded by default: the answer is the point, and these are there to check it. */
+function Sources({ sources }: { sources: Source[] }) {
+  const names = [...new Set(sources.map((s) => s.name))];
+  return (
+    <details className="sources">
+      <summary>
+        📄 {sources.length} source{sources.length === 1 ? "" : "s"} ·{" "}
+        {names.length <= 2 ? names.join(", ") : `${names.length} documents`}
+      </summary>
+      <ol className="sources-list">
+        {sources.map((s) => (
+          <li key={s.n} value={s.n}>
+            <div className="source-head">
+              <b>{s.name}</b>
+              {s.page ? ` · page ${s.page}` : ""}
+              {s.score !== null && (
+                <span className="muted"> · {Math.round(s.score * 100)}% match</span>
+              )}
+            </div>
+            <div className="source-snippet muted">
+              {s.snippet}
+              {s.snippet.length >= 280 ? "…" : ""}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
 }
 
 /** How the chip labels one tool call, image numbers included.
@@ -174,7 +205,9 @@ export default function Chat({
         }}
       >
         {dragOver && (
-          <div className="drop-overlay">📎 Drop to attach to your next message</div>
+          <div className="drop-overlay">
+            📎 Drop images to attach · PDFs and text files go to Documents
+          </div>
         )}
         {messages.length === 0 && (
           <div className="empty">
@@ -183,6 +216,10 @@ export default function Chat({
             <p className="muted">
               Need more context mid-chat? Drop images here (or use 📎) — they'll
               appear inline below.
+            </p>
+            <p className="muted">
+              Drop PDFs or text files to add them to 📚 Documents, and the chat
+              will answer from them.
             </p>
           </div>
         )}
@@ -314,6 +351,9 @@ export default function Chat({
                   ) : (
                     streaming &&
                     i === messages.length - 1 && <span className="cursor">▋</span>
+                  )}
+                  {m.role === "assistant" && m.sources && m.sources.length > 0 && (
+                    <Sources sources={m.sources} />
                   )}
                   {m.role === "user" && m.enhancedPrompt && (
                     <div className="content enhanced-prompt muted small">
