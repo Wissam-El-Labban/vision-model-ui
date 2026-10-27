@@ -24,6 +24,8 @@ been given one more way to pick wrong.
 """
 from __future__ import annotations
 
+import re
+
 from . import ollama_client as oc
 
 # Aspect ratios, not raw pixels. FLUX is trained at ~1 megapixel and drifts badly
@@ -126,6 +128,15 @@ TOOLS: dict[str, dict] = {
                         "description": (
                             "Other image numbers the instruction draws from, e.g. the "
                             "photo of the person being added. Usually empty."
+                        ),
+                    },
+                    "people": {
+                        "type": "boolean",
+                        "description": (
+                            "true if the image being changed shows one or more "
+                            "people. false if it shows none, or if the instruction "
+                            "is meant to change a person's face itself (age, "
+                            "expression, a different person)."
                         ),
                     },
                 },
@@ -435,13 +446,70 @@ def system_prompt(enabled, n_images: int) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Edits of people
+# --------------------------------------------------------------------------- #
+# FLUX leans toward smooth, glossy, retouched skin, and an edit of an edit inherits
+# the last pass's version of the face and adds its own. Five edits in, the person is
+# waxy and uncanny. Two counters, both added by code rather than left to the agent —
+# a 9B model told to include a sentence will eventually leave it out.
+#
+# The text guard slows the drift. The anchor resets it: once the image being edited
+# is itself generated, the original photo goes in as the final reference, so the
+# face is copied from the real person rather than from the previous edit.
+PEOPLE_GUARD = (
+    "Keep every person's face and identity exactly as they are, unless the "
+    "instruction changes them. Natural, matte skin with visible pores and fine "
+    "texture; do not smooth, airbrush, gloss, retouch or beautify skin, and no "
+    "plastic or waxy look."
+)
+ANCHOR_GUARD = (
+    "The final reference image is the original photograph of this person: match "
+    "their face, facial proportions and skin texture to it. Use it only for the "
+    "face and skin, not for pose, clothing, lighting or background."
+)
+
+
+def guard_edit(prompt: str, people: bool, lineage: dict | None,
+               root_ok: bool) -> tuple[str, str | None]:
+    """An edit prompt with the people guards appended, and the hash to anchor to.
+
+    `lineage` is the source image's row (None for an original); `root_ok` says its
+    root is still in the store. Returns the root hash only when it should be added
+    as the last reference image.
+    """
+    people = people or bool(lineage and lineage["people"])
+    if not people:
+        return prompt, None
+    prompt = f"{prompt.rstrip()}\n\n{PEOPLE_GUARD}"
+    if lineage and root_ok:
+        return f"{prompt} {ANCHOR_GUARD}", lineage["root_hash"]
+    return prompt, None
+
+
+# --------------------------------------------------------------------------- #
 # Validation
 # --------------------------------------------------------------------------- #
 def _index(value, n_images: int, what: str) -> int:
-    """One image number -> a 0-based offset into the manifest."""
-    try:
+    """One image number -> a 0-based offset into the manifest.
+
+    Small models rarely pass a bare integer: "image 2", "#2" and 2.0 all turn up,
+    and so does leaving the argument out. Reading the number out of the text isn't
+    a repair — it's the number they wrote. A missing one is filled in only when
+    there's a single image, the one case where it can't mean anything else.
+    """
+    i = None
+    if isinstance(value, bool):
+        pass
+    elif isinstance(value, int):
+        i = value
+    elif isinstance(value, float) and value.is_integer():
         i = int(value)
-    except (TypeError, ValueError):
+    elif isinstance(value, str):
+        m = re.search(r"\d+", value)
+        i = int(m.group()) if m else None
+    if i is None:
+        if n_images == 1:
+            return 0
         raise ValueError(f"{what} isn't an image number.")
     if not 1 <= i <= n_images:
         raise ValueError(
@@ -514,6 +582,7 @@ def validate(name: str, args: dict, n_images: int) -> dict:
             "prompt": _text(args, "instruction", "edit_image"),
             "init": init,
             "refs": refs,
+            "people": args.get("people") is True,
         }
 
     if name == "combine_images":

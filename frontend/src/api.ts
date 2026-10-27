@@ -29,14 +29,15 @@ export interface ModelDetail {
   name: string;
   /** Ollama's own string, e.g. "9.7B" — shown to the user verbatim. */
   parameter_size: string;
-  /** That string as a number of billions, which is what the agent floor tests. */
+  /** That string as a number of billions — what the composer's small-agent-model
+   *  warning tests. 0 when Ollama didn't say. */
   params_b: number;
   /** e.g. ["vision", "completion", "tools", "thinking"]. */
   capabilities: string[];
 }
 
 /** Installed models grouped by what they can do. `agent` is the subset that can
- *  run agent mode (tools + vision + the size floor); `details` says why. */
+ *  run agent mode (tools + vision); `details` says why, and how big each is. */
 export async function getModels(
   ollamaUrl: string
 ): Promise<{
@@ -72,6 +73,47 @@ export async function getRunning(ollamaUrl: string): Promise<RunningModel[]> {
   const res = await fetch(`/api/ps?ollama_url=${encodeURIComponent(ollamaUrl)}`);
   if (!res.ok) throw new Error(`ps: ${res.status}`);
   return (await res.json()).models ?? [];
+}
+
+/** Live memory of this machine, in GiB. `gpu`/`ram` are null when unreadable;
+ *  `flux_gb` is null while the FLUX engine isn't running. */
+export interface SystemMemory {
+  gpu: { total_gb: number; used_gb: number } | null;
+  ram: { total_gb: number; available_gb: number; used_gb: number; swap_gb: number } | null;
+  flux_gb: number | null;
+  ollama_gb: number | null;
+}
+
+export async function getSystemMemory(ollamaUrl: string): Promise<SystemMemory> {
+  const res = await fetch(`/api/system/memory?ollama_url=${encodeURIComponent(ollamaUrl)}`);
+  if (!res.ok) throw new Error(`memory: ${res.status}`);
+  return res.json();
+}
+
+/** Whether a chat model plus FLUX models suit this machine. "amber" works but
+ *  slower; "red" is likely to crash or crawl; "unknown" means stay quiet. */
+export interface SystemFit {
+  level: "ok" | "amber" | "red" | "unknown";
+  messages: string[];
+  /** Whether "Unload vision model before generating" would actually help: the
+   *  two fit on the GPU together (so the vision model stays resident) but overrun
+   *  system RAM. When they don't fit on the GPU, the backend unloads on its own
+   *  and the toggle changes nothing. */
+  unload_helps?: boolean;
+  /** A rule about the two models *together* tripped (GPU or RAM). */
+  pair?: boolean;
+}
+
+export async function getFit(
+  ollamaUrl: string,
+  model: string,
+  flux: string[]
+): Promise<SystemFit> {
+  const q = new URLSearchParams({ ollama_url: ollamaUrl, model });
+  for (const f of flux) q.append("flux", f);
+  const res = await fetch(`/api/system/fit?${q}`);
+  if (!res.ok) throw new Error(`fit: ${res.status}`);
+  return res.json();
 }
 
 export async function unloadAll(ollamaUrl: string): Promise<string[]> {
@@ -716,6 +758,8 @@ export interface GenerateParams {
   ollama_url: string;
   /** Ollama model to reload in the background once the image is done. */
   warm_model?: string | null;
+  /** Always unload the Ollama model before FLUX runs (and don't reload it after). */
+  unload_ollama?: boolean;
 }
 
 /** A `control` event: one derived control map, emitted before the final image. */
@@ -821,7 +865,9 @@ export interface AgentParams {
   attachment_hashes: string[];
   model: string;
   enabled_tools: AgentToolId[];
+  /** Image tools' model; animate uses `video_model`. null = each role's default. */
   flux_model?: string | null;
+  video_model?: string | null;
   steps?: number | null;
   guidance?: number | null;
   width: number;
@@ -835,6 +881,8 @@ export interface AgentParams {
   doc_ids?: string[];
   /** Whether they may shape the prompts the agent writes; off, they only answer. */
   doc_prompts?: boolean;
+  /** Always unload the Ollama model before FLUX runs (and don't reload it after). */
+  unload_ollama?: boolean;
 }
 
 /** One tool the agent decided to call. `index` orders the steps within the turn

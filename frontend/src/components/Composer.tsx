@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { fileToDataUrl } from "../fileUtils";
+import PromptEnhancer from "./PromptEnhancer";
 import { guidanceFor, resolveFlux, roleFor, stepsFor } from "../flux";
 import type {
   AgentTool,
   AgentToolId,
   ComposerMode,
   ControlKind,
+  EnhancerMode,
   GenSettings,
   GenOp,
 } from "../types";
-import { DOC_ACCEPT, type FluxModel, type FluxPreprocessor } from "../api";
+import { DOC_ACCEPT, type FluxModel, type FluxPreprocessor, type ModelDetail } from "../api";
 
 /** The control maps the Control tab offers, in the order they're worth reaching for.
  *
@@ -18,6 +20,12 @@ import { DOC_ACCEPT, type FluxModel, type FluxPreprocessor } from "../api";
  * hand pressed into a mat — needs the *scene* in the control signal, and only depth
  * carries it. Pose is listed last not because it's weak but because alone it is
  * ambiguous exactly where hard poses break: it can't say which arm is in front. */
+const ENHANCER_STATUS: Record<EnhancerMode, string> = {
+  off: "Off",
+  on: "Normal",
+  verbose: "Verbose",
+};
+
 const CONTROL_KINDS: { kind: ControlKind; label: string; hint: string }[] = [
   { kind: "depth", label: "Depth",
     hint: "3-D shape of the whole scene — the chair, the floor, which limb is in front. Best for a pose that touches something." },
@@ -39,13 +47,19 @@ interface Props {
   streaming: boolean;
   disabled: boolean;
   // Moved here from the sidebar: system prompt (left) + model selector (right).
-  models: { vision: string[]; all: string[]; agent: string[] };
+  models: { vision: string[]; all: string[]; agent: string[]; details: ModelDetail[] };
   model: string;
   setModel: (v: string) => void;
   /** Agent mode's own model pick. Separate from `model` because the eligible sets
-   *  differ — agent mode needs tools + vision + 7B, which most chat models lack. */
+   *  differ — agent mode needs tools + vision, which many chat models lack. */
   agentModel: string;
   setAgentModel: (v: string) => void;
+  /** Agent mode's image and video model picks, from its own ⚙️ menu. "" = the
+   *  role's default. Separate from `gen.fluxModel`, which belongs to Generate. */
+  agentImageModel: string;
+  setAgentImageModel: (v: string) => void;
+  agentVideoModel: string;
+  setAgentVideoModel: (v: string) => void;
   /** Every tool the agent could be given, served by the backend so the menu can't
    *  offer one it won't run. Includes unavailable entries (control), shown greyed
    *  out rather than hidden. */
@@ -70,10 +84,25 @@ interface Props {
   fluxModels: FluxModel[];
   gen: GenSettings;
   setGen: (v: GenSettings) => void;
-  /** True while the settings-level auto-enhancer (sidebar) is rewriting the
+  /** The prompt enhancer's settings, for the ✨ menu (Generate only). */
+  enhancerModel: string;
+  setEnhancerModel: (v: string) => void;
+  effectiveEnhanceModel: string;
+  enhancerMode: EnhancerMode;
+  setEnhancerMode: (v: EnhancerMode) => void;
+  enhanceTemplate: boolean;
+  setEnhanceTemplate: (v: boolean) => void;
+  /** Unload the Ollama model before every image. In both ⚙️ menus, since
+   *  Generate and Agent both load FLUX beside an Ollama model. */
+  unloadOllama: boolean;
+  setUnloadOllama: (v: boolean) => void;
+  /** True while the settings-level auto-enhancer (✨ menu) is rewriting the
    *  prompt for this submit — guards against a double-send during that gap.
    *  Verbose mode's rewrite itself isn't shown here: it's attached to the chat
    *  message it produced and rendered underneath it, not in the composer. */
+  /** Why the models this mode loads are likely too much for this machine (red
+   *  verdicts only), to mark the picker that's responsible. */
+  fitWarn?: string;
   enhancing: boolean;
   /** Whether thinking is on (set in the sidebar) — only changes what the send
    *  button says while the enhancer runs. */
@@ -116,6 +145,10 @@ export default function Composer({
   setSystemImage,
   agentModel,
   setAgentModel,
+  agentImageModel,
+  setAgentImageModel,
+  agentVideoModel,
+  setAgentVideoModel,
   agentToolCatalog,
   agentTools,
   setAgentTools,
@@ -127,6 +160,16 @@ export default function Composer({
   fluxModels,
   gen,
   setGen,
+  enhancerModel,
+  setEnhancerModel,
+  effectiveEnhanceModel,
+  enhancerMode,
+  setEnhancerMode,
+  enhanceTemplate,
+  setEnhanceTemplate,
+  unloadOllama,
+  setUnloadOllama,
+  fitWarn,
   enhancing,
   thinking,
   pinnedCount,
@@ -141,9 +184,11 @@ export default function Composer({
   const sysRef = useRef<HTMLDivElement>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
   const toolsRef = useRef<HTMLDivElement>(null);
+  const enhancerRef = useRef<HTMLDivElement>(null);
   const [sysOpen, setSysOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [enhancerOpen, setEnhancerOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   // Everything below still asks `genMode`, so deriving it here keeps a third
   // composer mode from touching the twenty-odd guards that only ever meant
@@ -160,8 +205,22 @@ export default function Composer({
   // Said the same way here and in the backend's 503, so the reason reads
   // identically wherever the user meets it.
   const noAgentModel =
-    "Agent mode needs an Ollama model with tool support, vision, and at least 7B " +
-    "parameters. None is installed — pull one from the sidebar's Model Manager.";
+    "Agent mode needs an Ollama model with tool support and vision. None is " +
+    "installed — pull one from the sidebar's Model Manager.";
+  // Agent mode takes any size, but below ~7B a model picks the wrong tool, calls
+  // one with another's arguments, or describes the call instead of making it.
+  // Allowed (that's the user's call) but said out loud. 0 = Ollama didn't say.
+  const agentDetail = models.details.find((d) => d.name === agentModel);
+  const smallAgent =
+    agentMode && !!agentDetail && agentDetail.params_b > 0 && agentDetail.params_b < 7;
+  // Analyze loads only its vision model, so a red verdict there is about it alone.
+  const analyzeWarn = composerMode === "analyze" ? fitWarn : undefined;
+  // Generate's Ollama model is the enhancer's, loaded only while it's on.
+  const enhancerWarn = genMode && enhancerMode !== "off" ? fitWarn : undefined;
+  const smallAgentWarning = agentDetail
+    ? `${agentModel} is ${agentDetail.parameter_size} — models under 7B often pick ` +
+      "the wrong tool or skip calling one, so tool calling may be limited."
+    : "";
 
   const hasSystem = systemPrompt.trim().length > 0 || !!systemImage;
   const patchGen = (p: Partial<typeof gen>) => setGen({ ...gen, ...p });
@@ -208,6 +267,19 @@ export default function Composer({
   const composeCount = images.length > 0 ? images.length : pinnedCount;
   // edit: everything after the first source image is a subject reference.
   const editRefCount = Math.max((images.length > 0 ? images.length : pinnedCount) - 1, 0);
+
+  // Agent ⚙️: every image model (create or edit role), and every video model.
+  // The image pick is shown resolved for create, the role most agent turns run.
+  const agentImageChoices = fluxModels.filter(
+    (m) => m.roles.includes("create") || m.roles.includes("edit")
+  );
+  const agentVideoChoices = fluxModels.filter((m) => m.roles.includes("animate"));
+  const activeAgentImage =
+    agentImageChoices.find((m) => m.name === agentImageModel)?.name ??
+    resolveFlux("", fluxModels, "create");
+  const activeAgentVideo = resolveFlux(agentVideoModel, fluxModels, "animate");
+  const pickedAgentImage = fluxModels.find((m) => m.name === activeAgentImage);
+  const animateOn = agentTools.includes("animate_image");
 
   // control: the same first-is-the-source split edit uses.
   const controlRefCount = editRefCount;
@@ -282,6 +354,17 @@ export default function Composer({
   }, [settingsOpen]);
 
   useEffect(() => {
+    if (!enhancerOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (enhancerRef.current && !enhancerRef.current.contains(e.target as Node)) {
+        setEnhancerOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [enhancerOpen]);
+
+  useEffect(() => {
     if (!toolsOpen) return;
     const onDown = (e: MouseEvent) => {
       if (toolsRef.current && !toolsRef.current.contains(e.target as Node)) {
@@ -303,6 +386,27 @@ export default function Composer({
   const enabledCount = agentToolCatalog.filter(
     (t) => t.available && agentTools.includes(t.id)
   ).length;
+
+  // In both ⚙️ menus: it decides whether the Ollama model makes room for FLUX,
+  // which Generate and Agent both run.
+  const unloadToggle = (
+    <>
+      <label className="enhance-row">
+        <input
+          type="checkbox"
+          checked={unloadOllama}
+          onChange={(e) => setUnloadOllama(e.target.checked)}
+        />
+        Unload vision model before generating
+      </label>
+      <p className="hint muted">
+        On: the vision model is unloaded before every image, so FLUX always has
+        the GPU and memory to itself, and it reloads on your next prompt. Off:
+        it stays loaded when it fits beside FLUX, which skips that reload but
+        can push a large FLUX model out of memory.
+      </p>
+    </>
+  );
 
   function onKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -414,6 +518,7 @@ export default function Composer({
               can analyze, edit or combine them too.
             </>
           )}
+          {smallAgent && <span className="warn"> ⚠️ {smallAgentWarning}</span>}
           {enabledCount === 0 && (
             <span className="warn">
               {" "}
@@ -716,6 +821,52 @@ export default function Composer({
           )}
         </div>
 
+        {/* Next to 💬 and labeled like the old sidebar header — name plus an
+            Off/On/Verbose badge — since it's a setting you read at a glance, not
+            just a menu to open. */}
+        {genMode && (
+          <div className="sys-control" ref={enhancerRef}>
+            <button
+              className={`btn ghost enhancer-chip ${enhancerWarn ? "warn" : ""}`}
+              onClick={() => setEnhancerOpen((v) => !v)}
+              title={
+                (enhancerWarn ? `⚠ ${enhancerWarn}\n\n` : "") +
+                "Prompt enhancer — " +
+                (effectiveEnhanceModel
+                  ? `${effectiveEnhanceModel}${enhancerModel ? "" : " (auto)"}`
+                  : "no vision model installed")
+              }
+            >
+              {enhancerWarn ? "⚠️" : "✨"} Enhancer
+              {/* The model it rewrites with, namespace dropped to keep the row
+                  short ("huihui_ai/qwen3.5:9b" → "qwen3.5:9b"); full name in the
+                  tooltip. Shown even while Off, so the pick is never a surprise. */}
+              <span className="enhancer-model">
+                {effectiveEnhanceModel
+                  ? `${effectiveEnhanceModel.split("/").pop()}${enhancerModel ? "" : " (auto)"}`
+                  : "no model"}
+              </span>
+              <span className={`section-status ${enhancerMode !== "off" ? "on" : ""}`}>
+                {ENHANCER_STATUS[enhancerMode]}
+              </span>
+            </button>
+            {enhancerOpen && (
+              <div className="system-popover gen-popover">
+                <PromptEnhancer
+                  visionModels={models.vision}
+                  enhancerModel={enhancerModel}
+                  setEnhancerModel={setEnhancerModel}
+                  effectiveModel={effectiveEnhanceModel}
+                  enhancerMode={enhancerMode}
+                  setEnhancerMode={setEnhancerMode}
+                  enhanceTemplate={enhanceTemplate}
+                  setEnhanceTemplate={setEnhanceTemplate}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
         {agentMode && (
           <div className="sys-control" ref={toolsRef}>
             <button
@@ -784,7 +935,7 @@ export default function Composer({
                     <label className="lbl">
                       Model ({role === "edit" ? "edit / combine / control" : "create"})
                     </label>
-                    <ul className="flux-model-list">
+                    <ul className={`flux-model-list ${isAnimate ? "video" : ""}`}>
                       {roleModels.map((m) => (
                         <li key={m.name} className={activeFlux === m.name ? "active" : ""}>
                           <button
@@ -949,6 +1100,119 @@ export default function Composer({
                         ? "Image-to-image: strength controls how far from the attached image."
                         : "Text-to-image: guidance ~3.5. Attach an image above to switch to image-to-image."}
                 </p>
+                {unloadToggle}
+              </div>
+            )}
+          </div>
+        )}
+
+        {agentMode && (
+          <div className="sys-control" ref={settingsRef}>
+            <button
+              className="btn ghost icon"
+              onClick={() => setSettingsOpen((v) => !v)}
+              title="Generation settings for the agent's images and videos"
+            >
+              ⚙️
+            </button>
+            {settingsOpen && (
+              <div className="system-popover gen-popover">
+                <div className="popover-title">🤖 Generation settings</div>
+                {!fluxAvailable ? (
+                  <div className="dl-box">
+                    <p className="hint muted">
+                      ⚠️ No image model is installed, so the agent can only talk.
+                      Install one under <strong>🖼️ Image Models</strong> in the sidebar.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flux-models">
+                    {/* Two picks at once — one for the image tools, one for 🎬
+                        Animate — so each list has its own color, matching the
+                        side pickers beside the agent model. */}
+                    <label className="lbl"><span className="swatch image" />Image model</label>
+                    <ul className="flux-model-list">
+                      {agentImageChoices.map((m) => (
+                        <li key={m.name} className={activeAgentImage === m.name ? "active" : ""}>
+                          <button
+                            type="button"
+                            className="flux-model-pick"
+                            title="Use this model for the agent's images"
+                            onClick={() => setAgentImageModel(m.name)}
+                          >
+                            <span className="flux-radio">{activeAgentImage === m.name ? "●" : "○"}</span>
+                            {prettyFlux(m.label)}
+                          </button>
+                          <span className="flux-model-size">{m.size_gb} GB</span>
+                        </li>
+                      ))}
+                    </ul>
+                    {/* FLUX.1 splits create and edit across two models; the pick
+                        can only serve the role it has, and the other falls back. */}
+                    {pickedAgentImage &&
+                      !(pickedAgentImage.roles.includes("create") &&
+                        pickedAgentImage.roles.includes("edit")) && (
+                        <p className="hint muted">
+                          This model can only{" "}
+                          {pickedAgentImage.roles.includes("create") ? "create" : "edit"}, so
+                          the agent's{" "}
+                          {pickedAgentImage.roles.includes("create")
+                            ? "edit and combine"
+                            : "create"}{" "}
+                          tools use the default model for that job.
+                        </p>
+                      )}
+
+                    {agentVideoChoices.length > 0 && (
+                      <>
+                        <label className="lbl"><span className="swatch video" />Video model</label>
+                        <ul className="flux-model-list video">
+                          {agentVideoChoices.map((m) => (
+                            <li key={m.name} className={activeAgentVideo === m.name ? "active" : ""}>
+                              <button
+                                type="button"
+                                className="flux-model-pick"
+                                title="Use this model for the agent's videos"
+                                onClick={() => setAgentVideoModel(m.name)}
+                              >
+                                <span className="flux-radio">{activeAgentVideo === m.name ? "●" : "○"}</span>
+                                {prettyFlux(m.label)}
+                              </button>
+                              <span className="flux-model-size">{m.size_gb} GB</span>
+                            </li>
+                          ))}
+                        </ul>
+                        {!animateOn && (
+                          <p className="hint muted">
+                            🎬 Animate is off in 🧰 Tools, so the agent won't make videos
+                            until it's switched on.
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+                <div className="gen-grid">
+                  <label>Width
+                    <input type="number" min={256} max={1536} step={64} value={gen.width}
+                      onChange={(e) => patchGen({ width: +e.target.value })} />
+                  </label>
+                  <label>Height
+                    <input type="number" min={256} max={1536} step={64} value={gen.height}
+                      onChange={(e) => patchGen({ height: +e.target.value })} />
+                  </label>
+                  <label>Seed
+                    <input type="text" inputMode="numeric" value={gen.seed}
+                      placeholder="random"
+                      onChange={(e) => patchGen({ seed: e.target.value.replace(/[^0-9]/g, "") })} />
+                  </label>
+                </div>
+                <p className="hint muted">
+                  Width and height are the default shape — the agent can still ask
+                  for portrait or landscape. Steps and guidance follow each model's
+                  own defaults.
+                </p>
+                {unloadToggle}
               </div>
             )}
           </div>
@@ -1001,7 +1265,7 @@ export default function Composer({
             agentMode
               ? agentModel
                 ? "Ask or describe… e.g. “make his jacket red”, or “what’s different about these two?”"
-                : "No model can run agent mode — install a 7B+ model with tools and vision…"
+                : "No model can run agent mode — install a model with tools and vision…"
               : genMode
               ? isAnimate
                 ? "Describe the motion… e.g. “she turns to look at the camera, slow push in”"
@@ -1075,10 +1339,20 @@ export default function Composer({
           </div>
         ) : (
           <div
-            className="model-control"
-            title={agentMode ? "Agent model (tools + vision, 7B+)" : "Vision model"}
+            className={`model-control ${smallAgent || analyzeWarn ? "warn" : ""}`}
+            title={
+              smallAgent
+                ? smallAgentWarning
+                : analyzeWarn
+                  ? `⚠ ${analyzeWarn}`
+                  : agentMode
+                  ? "Agent model (tools + vision)"
+                  : "Vision model"
+            }
           >
-            <span aria-hidden>{agentMode ? "🧠" : "🤖"}</span>
+            <span aria-hidden>
+              {smallAgent || analyzeWarn ? "⚠️" : agentMode ? "🧠" : "🤖"}
+            </span>
             {modelChoices.length > 0 ? (
               <select
                 value={activeModel}
@@ -1105,6 +1379,46 @@ export default function Composer({
                 placeholder="No vision models — type one"
               />
             )}
+          </div>
+        )}
+
+        {/* The agent's image and video picks, beside the model that drives them.
+            Same state as its ⚙️ menu, and the same colors. */}
+        {agentMode && agentImageChoices.length > 0 && (
+          <div className="model-control side-pick image" title="Image model for the agent's image tools">
+            <span aria-hidden>🎨</span>
+            <select
+              value={activeAgentImage}
+              onChange={(e) => setAgentImageModel(e.target.value)}
+            >
+              {agentImageChoices.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {prettyFlux(m.label)}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {agentMode && agentVideoChoices.length > 0 && (
+          <div
+            className="model-control side-pick video"
+            title={
+              animateOn
+                ? "Video model for 🎬 Animate"
+                : "Video model for 🎬 Animate — switched off in 🧰 Tools"
+            }
+          >
+            <span aria-hidden>🎬</span>
+            <select
+              value={activeAgentVideo}
+              onChange={(e) => setAgentVideoModel(e.target.value)}
+            >
+              {agentVideoChoices.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {prettyFlux(m.label)}
+                </option>
+              ))}
+            </select>
           </div>
         )}
       </div>

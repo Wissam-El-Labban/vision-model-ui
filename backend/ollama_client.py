@@ -8,11 +8,14 @@ prompt enhancement take a `think` flag the user switches on in the UI, and every
 other call keeps it off.
 """
 import json
+import logging
 import re
 import subprocess
 from urllib.parse import urlparse
 
 import requests
+
+from . import system
 
 DEFAULT_URL = "http://localhost:11434"
 
@@ -305,6 +308,8 @@ _ENHANCE_SYSTEM = {
         "Use the attached image to name exactly what to change and where it is.\n"
         "State explicitly what must stay unchanged: background, other subjects, pose, "
         "lighting, framing.\n"
+        "If the image shows people, say that their face, identity and natural skin "
+        "texture must stay unchanged.\n"
         "Do not add camera, lens or style language unless the user asked to change "
         "those.\n"
         "Return the instruction only: no preamble, no quotes, no commentary."
@@ -513,13 +518,6 @@ def is_vision_model(url, model_name):
         return False
 
 
-# Agent mode drives tools instead of answering in prose, and below roughly this
-# size a model stops choosing tools reliably: it describes the tool it would call,
-# calls one with the arguments of another, or loops on the same call. Ollama draws
-# the same line for its own agent features. Sized in billions of parameters.
-AGENT_MIN_PARAMS = 7.0
-
-
 def _parse_params(text) -> float:
     """Ollama's `parameter_size` ("9.7B", "700M") as a number of billions."""
     match = re.search(r"([\d.]+)\s*([BbMm])", str(text or ""))
@@ -569,18 +567,17 @@ def model_details(url):
 def agent_eligible(detail) -> bool:
     """Whether a model can run agent mode.
 
-    Three requirements, all load-bearing. `tools` because function calling needs a
+    Two requirements, both load-bearing. `tools` because function calling needs a
     tool-aware chat template — without one the model answers in prose and never
     calls anything. `vision` because the agent is also the prompt enhancer, and it
     can't write "make his jacket red" into a specific instruction without seeing
-    the jacket. And the size floor above.
+    the jacket.
+
+    No size floor: small models pick tools less reliably, but whether that's good
+    enough is the user's call to make, not ours.
     """
     caps = set(detail.get("capabilities") or [])
-    return (
-        detail.get("params_b", 0.0) >= AGENT_MIN_PARAMS
-        and "tools" in caps
-        and "vision" in caps
-    )
+    return "tools" in caps and "vision" in caps
 
 
 def agent_shortfall(detail) -> str:
@@ -589,11 +586,6 @@ def agent_shortfall(detail) -> str:
     missing = [c for c in ("tools", "vision") if c not in caps]
     if missing:
         return f"{detail.get('name')} has no {' or '.join(missing)} support."
-    if detail.get("params_b", 0.0) < AGENT_MIN_PARAMS:
-        return (
-            f"{detail.get('name')} is {detail.get('parameter_size') or 'too small'}; "
-            f"agent mode needs at least {AGENT_MIN_PARAMS:g}B parameters."
-        )
     return ""
 
 
@@ -660,14 +652,8 @@ def gpu_total_gb():
     Only meaningful when Ollama runs on this machine; callers treat None as
     "unknown" and fall back to unloading.
     """
-    try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5, check=True,
-        ).stdout
-        return int(out.split()[0]) / 1024
-    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
-        return None
+    g = system.gpu()
+    return g and g["total_gb"]
 
 
 def loaded_vram_gb(url):
@@ -705,7 +691,11 @@ def warm(url, model, reserved_gb):
         if size is None or total is None:
             return False
         held = sum(m.get("size_vram") or 0 for m in loaded) / 1e9
-        if held + size * 1.2 + reserved_gb > total:
+        fits = held + size * 1.2 + reserved_gb <= total
+        logging.getLogger("uvicorn.error").info(
+            "warm %s: ollama %.1f GB + model %.1f GB + flux %.1f GB vs %.1f GB -> %s",
+            model, held, size * 1.2, reserved_gb, total, "warm" if fits else "skip")
+        if not fits:
             return False
         requests.post(
             f"{url}/api/chat",

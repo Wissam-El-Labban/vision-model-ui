@@ -10,6 +10,8 @@
   --green: #3fb950;
   --amber: #d29922;
   --red: #f85149;
+  /* Video models, wherever they sit beside image models (which use --accent). */
+  --video: #a371f7;
   --radius: 10px;
 }
 
@@ -319,6 +321,11 @@ textarea {
   padding: 4px 12px;
   font-size: 12px;
   color: var(--muted);
+}
+
+.model-pill.warn {
+  border-color: var(--red);
+  color: var(--red);
 }
 
 /* The image/video model a generate would run, with its text encoder. Tinted green
@@ -965,6 +972,88 @@ textarea {
   background: rgba(248, 81, 73, 0.12);
   color: var(--red);
   border-bottom: 1px solid rgba(248, 81, 73, 0.3);
+}
+
+.banner.warn {
+  background: rgba(210, 153, 34, 0.12);
+  color: var(--amber);
+  border-bottom: 1px solid rgba(210, 153, 34, 0.3);
+}
+
+.banner.fit {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.banner.fit ul {
+  flex: 1;
+  margin: 0;
+  padding-left: 18px;
+}
+
+/* The unload tip's inline action reads as text, not as the dismiss ×. */
+.banner.fit .link-btn {
+  font-size: 12px;
+  line-height: inherit;
+  opacity: 1;
+  color: inherit;
+}
+
+.banner.fit button {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0.8;
+}
+
+.gen-pill-warn {
+  color: var(--red);
+}
+
+/* ---------- VRAM / RAM meter ---------- */
+.res-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  cursor: default;
+  flex-shrink: 0;
+}
+
+.res-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.res-label {
+  width: 32px;
+}
+
+.res-track {
+  width: 56px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.res-fill {
+  display: block;
+  height: 100%;
+  transition: width 0.4s ease;
+}
+
+@media (max-width: 700px) {
+  .res-meter {
+    display: none;
+  }
 }
 
 /* ---------- Workspace: panel + chat in a row, full-width composer below ---- */
@@ -2354,6 +2443,12 @@ textarea {
   color: var(--red);
 }
 
+/* An agent model under 7B: allowed, but flagged on the picker too, so the
+   warning outlives the hint scrolling out of mind. */
+.model-control.warn select {
+  border-color: var(--red);
+}
+
 .btn.send.agent {
   background: var(--accent);
   border-color: var(--accent);
@@ -2727,4 +2822,62 @@ button.docs-pill.docs-pill-prompts.on {
   white-space: pre-wrap;
   max-height: 90px;
   overflow: hidden;
+}
+
+/* ---------- Composer: enhancer chip, agent side pickers ---------- */
+/* The prompt enhancer's button, labeled like its old sidebar header. Padded to
+   the same height as the icon buttons beside it. */
+.btn.enhancer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+}
+
+.enhancer-chip .enhancer-model {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.btn.enhancer-chip.warn {
+  border-color: var(--red);
+}
+
+/* Three pickers in one row on agent mode: keep the side ones narrow so the
+   textarea keeps its room. The full name is in the dropdown. */
+.model-control.side-pick select {
+  max-width: min(180px, 14vw);
+}
+
+.model-control.side-pick.image select {
+  border-left: 3px solid var(--accent);
+}
+
+.model-control.side-pick.video select {
+  border-left: 3px solid var(--video);
+}
+
+.flux-model-list.video li.active {
+  background: rgba(163, 113, 247, 0.14);
+}
+
+.flux-model-list.video .flux-radio {
+  color: var(--video);
+}
+
+.lbl .swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: var(--accent);
+}
+
+.lbl .swatch.video {
+  background: var(--video);
 }

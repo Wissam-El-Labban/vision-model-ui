@@ -1,13 +1,12 @@
 import { useState } from "react";
 import ImageModels from "./ImageModels";
 import ModelManager from "./ModelManager";
-import PromptEnhancer from "./PromptEnhancer";
 import ThinkingSettings from "./ThinkingSettings";
 import UpdateBanner from "./UpdateBanner";
 import ChatList from "./ChatList";
 import Documents from "./Documents";
 import type { DocumentsApi } from "../useDocuments";
-import type { ChatSummary, EnhancerMode, ThinkingDisplay } from "../types";
+import type { ChatSummary, ThinkingDisplay } from "../types";
 import type { FluxModel } from "../api";
 
 interface Props {
@@ -22,13 +21,6 @@ interface Props {
   onNewChat: () => void;
   onOpenChat: (id: string) => void;
   onDeleteChat: (id: string) => void;
-  enhancerModel: string;
-  setEnhancerModel: (v: string) => void;
-  effectiveEnhanceModel: string;
-  enhancerMode: EnhancerMode;
-  setEnhancerMode: (v: EnhancerMode) => void;
-  enhanceTemplate: boolean;
-  setEnhanceTemplate: (v: boolean) => void;
   thinking: boolean;
   setThinking: (v: boolean) => void;
   thinkingDisplay: ThinkingDisplay;
@@ -56,13 +48,6 @@ export default function Sidebar(props: Props) {
     onNewChat,
     onOpenChat,
     onDeleteChat,
-    enhancerModel,
-    setEnhancerModel,
-    effectiveEnhanceModel,
-    enhancerMode,
-    setEnhancerMode,
-    enhanceTemplate,
-    setEnhanceTemplate,
     thinking,
     setThinking,
     thinkingDisplay,
@@ -121,17 +106,6 @@ export default function Sidebar(props: Props) {
         ollamaUrl={ollamaUrl}
         allModels={models.all}
         onChanged={refreshModels}
-      />
-
-      <PromptEnhancer
-        visionModels={models.vision}
-        enhancerModel={enhancerModel}
-        setEnhancerModel={setEnhancerModel}
-        effectiveModel={effectiveEnhanceModel}
-        enhancerMode={enhancerMode}
-        setEnhancerMode={setEnhancerMode}
-        enhanceTemplate={enhanceTemplate}
-        setEnhanceTemplate={setEnhanceTemplate}
       />
 
       <ThinkingSettings

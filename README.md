@@ -110,11 +110,16 @@ The chosen model is also the prompt enhancer. It writes the final FLUX prompt it
 per-mode briefs the standalone enhancer uses, so there is no second rewriting pass — and it is
 shown, under the step in the chat, so you can see exactly what generated the image.
 
-**Requirements.** A model qualifies only if Ollama reports it with **tool support**, **vision**, and
-**at least 7B parameters**. All three matter: without tools it answers in prose and never calls
-anything, without vision it can't write *"make his jacket red"* into a specific instruction, and
-below ~7B it picks the wrong tool often enough to be worse than choosing by hand. With no eligible
-model installed the tab is disabled and says so.
+**Requirements.** A model qualifies if Ollama reports it with **tool support** and **vision**. Both
+matter: without tools it answers in prose and never calls anything, and without vision it can't
+write *"make his jacket red"* into a specific instruction. There is no size floor — small models
+(2–4B) are allowed, but they pick the wrong tool more often, so the composer warns that tool
+calling may be limited whenever the picked model is under 7B. With no eligible model installed the
+tab is disabled and says so.
+
+**Generation settings.** The agent's ⚙️ menu picks the image model its image tools run on, and the
+video model 🎬 Animate uses when one is installed — separate from Generate's pick. Width, height and
+seed are shared with Generate; steps and guidance follow each model's defaults.
 
 **Tools.** The 🧰 menu in the composer controls what the agent may reach for — Create, Edit and
 Combine on by default, Animate off (a video run is slow), Control listed but unavailable for now.

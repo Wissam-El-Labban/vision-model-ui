@@ -6,6 +6,7 @@ import ImageBar from "./components/ImageBar";
 import ContextMeter from "./components/ContextMeter";
 import GenModelPill from "./components/GenModelPill";
 import DocPills from "./components/DocPills";
+import ResourceMeter from "./components/ResourceMeter";
 // Lazily loaded: the studio pulls in three.js, which is bigger than the rest of
 // the app put together. Nobody who isn't posing a figure should pay for it.
 const PoseStudio = lazy(() => import("./components/PoseStudio"));
@@ -19,6 +20,7 @@ import {
   getAgentTools,
   isDocFile,
   getChat,
+  getFit,
   getFluxModels,
   getModels,
   getPreprocessors,
@@ -29,6 +31,8 @@ import {
   urlToDataUrl,
   type FluxModel,
   type FluxPreprocessor,
+  type ModelDetail,
+  type SystemFit,
   type Usage,
 } from "./api";
 import { fileToDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
@@ -76,12 +80,13 @@ export default function App() {
     vision: string[];
     all: string[];
     agent: string[];
-  }>({ vision: [], all: [], agent: [] });
+    details: ModelDetail[];
+  }>({ vision: [], all: [], agent: [], details: [] });
   const [model, setModel] = useState(() => localStorage.getItem("model") || "");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [systemImage, setSystemImage] = useState<string | null>(null);
 
-  // Prompt enhancer settings (sidebar). `enhancerModel` "" = auto-detect, same
+  // Prompt enhancer settings (the composer's ✨ menu, Generate only). `enhancerModel` "" = auto-detect, same
   // fallback the manual ✨ button always used. `enhancerMode` gates whether that
   // rewrite also runs automatically before a generation, and whether it's shown.
   const [enhancerModel, setEnhancerModel] = useState(
@@ -89,6 +94,14 @@ export default function App() {
   );
   const [enhancerMode, setEnhancerMode] = useState<EnhancerMode>(
     () => (localStorage.getItem("enhancerMode") as EnhancerMode) || "off"
+  );
+
+  // Unload the Ollama model before every image (the ⚙️ menu in Generate and
+  // Agent — both modes load FLUX beside an Ollama model). On by
+  // default: keeping it loaded beside FLUX saves its reload, but on a tight GPU or
+  // RAM budget the two evict each other and FLUX starts cold instead.
+  const [unloadOllama, setUnloadOllama] = useState(
+    () => localStorage.getItem("unloadOllama") !== "false"
   );
 
   // Thinking. One switch (sidebar) for Analyze chats, the prompt enhancer and agent
@@ -111,12 +124,22 @@ export default function App() {
   const agentMode = composerMode === "agent";
 
   // Agent mode. `agentModel` is its own pick rather than the chat model's,
-  // because the two lists differ: agent mode needs tools + vision + 7B, and the
+  // because the two lists differ: agent mode needs tools + vision, and the
   // model someone chats with is often smaller than that. `agentTools` is the
   // Tools menu; its catalog comes from the backend so the menu can't offer
   // something the backend won't run.
   const [agentModel, setAgentModel] = useState(
     () => localStorage.getItem("agentModel") || ""
+  );
+  // The agent's own image and video model picks ("" = each role's default),
+  // from its ⚙️ menu. Not Generate's `gen.fluxModel`: that follows whichever tab
+  // Generate was last on, so leaving it on 🎬 Animate sent the agent's image
+  // tools to their defaults without saying so.
+  const [agentImageModel, setAgentImageModel] = useState(
+    () => localStorage.getItem("agentImageModel") || ""
+  );
+  const [agentVideoModel, setAgentVideoModel] = useState(
+    () => localStorage.getItem("agentVideoModel") || ""
   );
   const [agentToolCatalog, setAgentToolCatalog] = useState<AgentTool[]>([]);
   const [agentTools, setAgentTools] = useState<AgentToolId[]>(() => {
@@ -133,7 +156,7 @@ export default function App() {
   const [genOp, setGenOp] = useState<GenOp>("create");
   const [fluxAvailable, setFluxAvailable] = useState(false);
   // Prompt enhancement. `enhanceTemplate` is the independent photoreal-template
-  // toggle (sidebar-level, see `PromptEnhancer`). `enhancing` guards the brief
+  // toggle (in the composer's ✨ menu, see `PromptEnhancer`). `enhancing` guards the brief
   // async gap while the settings-level auto-enhancer runs before a generation
   // goes out. Verbose mode's rewrite isn't held in state here — it's attached
   // directly to the chat message it produced (`ChatMessage.enhancedPrompt`) by
@@ -356,6 +379,10 @@ export default function App() {
   useEffect(() => localStorage.setItem("enhancerMode", enhancerMode), [enhancerMode]);
   useEffect(() => localStorage.setItem("thinking", String(thinking)), [thinking]);
   useEffect(
+    () => localStorage.setItem("unloadOllama", String(unloadOllama)),
+    [unloadOllama]
+  );
+  useEffect(
     () => localStorage.setItem("thinkingDisplay", thinkingDisplay),
     [thinkingDisplay]
   );
@@ -376,6 +403,14 @@ export default function App() {
     }
   }, [composerMode, fluxAvailable, models.agent]);
   useEffect(() => localStorage.setItem("agentModel", agentModel), [agentModel]);
+  useEffect(
+    () => localStorage.setItem("agentImageModel", agentImageModel),
+    [agentImageModel]
+  );
+  useEffect(
+    () => localStorage.setItem("agentVideoModel", agentVideoModel),
+    [agentVideoModel]
+  );
   useEffect(
     () => localStorage.setItem("agentTools", JSON.stringify(agentTools)),
     [agentTools]
@@ -413,7 +448,7 @@ export default function App() {
       setError(null);
     } catch {
       setError(`Could not reach Ollama at ${ollamaUrl}`);
-      setModels({ vision: [], all: [], agent: [] });
+      setModels({ vision: [], all: [], agent: [], details: [] });
     }
   }, [ollamaUrl]);
 
@@ -958,6 +993,7 @@ export default function App() {
             // it while this image is on screen rather than on the next send.
             warm_model:
               (enhancerMode !== "off" ? effectiveEnhanceModel : model) || null,
+            unload_ollama: unloadOllama,
           },
           {
             onStatus: (m) => {
@@ -1072,6 +1108,7 @@ export default function App() {
     [
       gen,
       enhanceTemplate,
+      unloadOllama,
       fluxAvailable,
       fluxModels,
       model,
@@ -1208,9 +1245,13 @@ export default function App() {
             attachment_hashes,
             model: agentModel,
             enabled_tools: agentTools,
-            flux_model: gen.fluxModel || null,
-            steps: gen.steps,
-            guidance: gen.guidance,
+            flux_model: agentImageModel || null,
+            video_model: agentVideoModel || null,
+            // Left to the backend: Generate's steps and guidance are tuned to
+            // Generate's model, and one agent turn can run an image model and
+            // a video model, which want different values.
+            steps: null,
+            guidance: null,
             width: gen.width,
             height: gen.height,
             seed: gen.seed ? parseInt(gen.seed, 10) : null,
@@ -1219,6 +1260,7 @@ export default function App() {
             think: thinking,
             doc_ids: readyDocIds,
             doc_prompts: docPrompts,
+            unload_ollama: unloadOllama,
           },
           {
             onToken: (token) => {
@@ -1323,10 +1365,13 @@ export default function App() {
     [
       agentModel,
       agentTools,
+      agentImageModel,
+      agentVideoModel,
       gen,
       model,
       ollamaUrl,
       thinking,
+      unloadOllama,
       thinkingDisplay,
       systemPrompt,
       systemImage,
@@ -1393,6 +1438,72 @@ export default function App() {
    *  means none is installed/picked — skip the call entirely. */
   const effectiveEnhanceModel =
     enhancerModel || (models.vision.includes(model) ? model : models.vision[0] || "");
+
+  // Whether the models this mode would load are too much for the machine. Names
+  // resolve the same way the header pills do, so the warning is about what will
+  // actually run. A dismissal holds for that exact pick and that exact verdict.
+  // Generate's Ollama model is the same one `generateImage` sends as
+  // `warm_model`: the enhancer's while it's on, else the Analyze pick, which is
+  // reloaded beside FLUX after each image. Leaving it out with the enhancer off
+  // checked FLUX alone and missed the pair entirely.
+  const fitChat = agentMode
+    ? agentModel
+    : genMode
+      ? enhancerMode !== "off"
+        ? effectiveEnhanceModel
+        : model
+      : model;
+  const fitFlux = !fluxAvailable
+    ? []
+    : agentMode
+      ? agentModels(
+          agentTools.filter((t) => agentToolCatalog.find((c) => c.id === t)?.available ?? true),
+          agentImageModel,
+          agentVideoModel,
+          fluxModels
+        ).map((m) => m.name)
+      : genMode
+        ? [resolveFlux(gen.fluxModel, fluxModels, roleFor(genOp))].filter(Boolean)
+        : [];
+  const fitKey = JSON.stringify([fitChat, fitFlux]);
+  const [fit, setFit] = useState<SystemFit | null>(null);
+  const [fitDismissed, setFitDismissed] = useState(() => {
+    try {
+      return localStorage.getItem("fitDismissed") || "";
+    } catch {
+      return "";
+    }
+  });
+  useEffect(() => {
+    const [chat, flux] = JSON.parse(fitKey) as [string, string[]];
+    if (!chat && !flux.length) {
+      setFit(null);
+      return;
+    }
+    let alive = true;
+    getFit(ollamaUrl, chat, flux)
+      .then((f) => alive && setFit(f))
+      .catch(() => alive && setFit(null));
+    return () => {
+      alive = false;
+    };
+  }, [fitKey, ollamaUrl]);
+  const fitShown =
+    fit && (fit.level === "red" || fit.level === "amber") ? fit : null;
+  // The unload setting is part of it: dismissing with it off shouldn't also hide
+  // the banner's note about it once it's on.
+  const fitId = fitShown
+    ? fitKey + fitShown.messages.join("|") + (fitShown.pair ? `|unload=${unloadOllama}` : "")
+    : "";
+  const fitWarn = fit?.level === "red" ? fit.messages[0] : undefined;
+  function dismissFit() {
+    setFitDismissed(fitId);
+    try {
+      localStorage.setItem("fitDismissed", fitId);
+    } catch {
+      // a reload just shows it again
+    }
+  }
 
   /** Settings-level auto-enhance, run right before a generation goes out.
    *  Off: no-op. On/Verbose: rewrites with the picked vision model, reading
@@ -1548,13 +1659,6 @@ export default function App() {
         onNewChat={newChat}
         onOpenChat={openChat}
         onDeleteChat={removeChat}
-        enhancerModel={enhancerModel}
-        setEnhancerModel={setEnhancerModel}
-        effectiveEnhanceModel={effectiveEnhanceModel}
-        enhancerMode={enhancerMode}
-        setEnhancerMode={setEnhancerMode}
-        enhanceTemplate={enhanceTemplate}
-        setEnhanceTemplate={setEnhanceTemplate}
         thinking={thinking}
         setThinking={setThinking}
         thinkingDisplay={thinkingDisplay}
@@ -1572,9 +1676,16 @@ export default function App() {
         <header className="topbar">
           <h1>👁️ Vision Model Chat</h1>
           <div className="topbar-actions">
+            <ResourceMeter ollamaUrl={ollamaUrl} />
             {usage && <ContextMeter used={usage.used} numCtx={usage.num_ctx} />}
             {fluxAvailable && !agentMode && (
-              <GenModelPill op={genOp} picked={gen.fluxModel} models={fluxModels} gen={gen} />
+              <GenModelPill
+                op={genOp}
+                picked={gen.fluxModel}
+                models={fluxModels}
+                gen={gen}
+                warn={genMode ? fitWarn : undefined}
+              />
             )}
             {/* Agent mode: every model its switched-on tools could load — image,
                 video, or both. Compact, since there can be several and the shared
@@ -1585,7 +1696,8 @@ export default function App() {
                 agentTools.filter(
                   (t) => agentToolCatalog.find((c) => c.id === t)?.available ?? true
                 ),
-                gen.fluxModel,
+                agentImageModel,
+                agentVideoModel,
                 fluxModels
               ).map(({ op, name }) => (
                 <GenModelPill
@@ -1595,6 +1707,7 @@ export default function App() {
                   models={fluxModels}
                   gen={gen}
                   compact
+                  warn={fitWarn}
                 />
               ))}
             {/* Documents reach the model in Analyze and Agent, and in Generate
@@ -1610,7 +1723,15 @@ export default function App() {
                 onTogglePrompts={() => setDocPrompts((v) => !v)}
               />
             )}
-            {model && <span className="model-pill">{model}</span>}
+            {model && (
+              <span
+                className={`model-pill ${composerMode === "analyze" && fitWarn ? "warn" : ""}`}
+                title={composerMode === "analyze" && fitWarn ? `⚠ ${fitWarn}` : undefined}
+              >
+                {composerMode === "analyze" && fitWarn && "⚠ "}
+                {model}
+              </span>
+            )}
             {messages.length > 0 && (
               <button className="btn ghost" onClick={newChat}>
                 ＋ New
@@ -1619,6 +1740,38 @@ export default function App() {
           </div>
         </header>
         {error && <div className="banner error">{error}</div>}
+        {fitShown && fitId !== fitDismissed && (
+          <div className={`banner fit ${fitShown.level === "red" ? "error" : "warn"}`}>
+            <span>⚠</span>
+            <ul>
+              {fitShown.messages.map((m) => (
+                <li key={m}>{m}</li>
+              ))}
+              {/* On every warning about the two models together, in the modes
+                  that load both (Generate and Agent), with the switch right here.
+                  Said honestly either way: where they can't share the GPU, the
+                  backend unloads the vision model for each image regardless, so
+                  there the line is the setting's state, not a fix. */}
+              {fitShown.pair && (genMode || agentMode) && (
+                <li>
+                  💡 <strong>Unload vision model before generating</strong> is{" "}
+                  {unloadOllama ? "on" : "off"}.{" "}
+                  {fitShown.unload_helps
+                    ? unloadOllama
+                      ? "The two never share memory, so the vision model reloads after each image, which takes a little while."
+                      : "Turning it on frees that memory for the image model — the vision model then reloads after each image, which takes a little while."
+                    : "With these two it makes no difference: they can't share the GPU, so the vision model is unloaded for every image either way and reloads on your next prompt. It matters for smaller pairs that fit together."}{" "}
+                  <button className="link-btn" onClick={() => setUnloadOllama(!unloadOllama)}>
+                    Turn it {unloadOllama ? "off" : "on"}
+                  </button>
+                </li>
+              )}
+            </ul>
+            <button onClick={dismissFit} title="Dismiss for this pick of models">
+              ×
+            </button>
+          </div>
+        )}
         <div className="workspace">
           <div className="work-row">
             <ImageBar
@@ -1652,6 +1805,10 @@ export default function App() {
             setModel={setModel}
             agentModel={agentModel}
             setAgentModel={setAgentModel}
+            agentImageModel={agentImageModel}
+            setAgentImageModel={setAgentImageModel}
+            agentVideoModel={agentVideoModel}
+            setAgentVideoModel={setAgentVideoModel}
             agentToolCatalog={agentToolCatalog}
             agentTools={agentTools}
             setAgentTools={setAgentTools}
@@ -1667,6 +1824,16 @@ export default function App() {
             fluxModels={fluxModels}
             gen={gen}
             setGen={setGen}
+            enhancerModel={enhancerModel}
+            setEnhancerModel={setEnhancerModel}
+            effectiveEnhanceModel={effectiveEnhanceModel}
+            enhancerMode={enhancerMode}
+            setEnhancerMode={setEnhancerMode}
+            enhanceTemplate={enhanceTemplate}
+            setEnhanceTemplate={setEnhanceTemplate}
+            unloadOllama={unloadOllama}
+            setUnloadOllama={setUnloadOllama}
+            fitWarn={fitWarn}
             enhancing={enhancing}
             thinking={thinking}
             pinnedCount={pinnedImages.length}

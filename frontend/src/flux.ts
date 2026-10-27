@@ -26,15 +26,18 @@ const AGENT_TOOL_OP: Record<AgentToolId, GenOp> = {
  *  tools: one entry per distinct model, each with an op that resolves to it.
  *  Image tools come first and video last; on FLUX.2 every image tool shares one
  *  model, so that's usually one image entry, and FLUX.1's dev + Kontext split
- *  shows as two. */
+ *  shows as two. `imagePick` and `videoPick` are the agent's ⚙️ picks, kept
+ *  apart for the same reason the backend's `_agent_pick` keeps them apart. */
 export function agentModels(
   tools: AgentToolId[],
-  picked: string,
+  imagePick: string,
+  videoPick: string,
   models: FluxModel[]
 ): { op: GenOp; name: string }[] {
   const out: { op: GenOp; name: string }[] = [];
   for (const op of ["create", "edit", "compose", "control", "animate"] as GenOp[]) {
     if (!tools.some((t) => AGENT_TOOL_OP[t] === op)) continue;
+    const picked = op === "animate" ? videoPick : imagePick;
     const name = resolveFlux(picked, models, roleFor(op));
     if (name && !out.some((m) => m.name === name)) out.push({ op, name });
   }
