@@ -16,6 +16,9 @@ interface Props {
    *  above. */
   enhanceTemplate: boolean;
   setEnhanceTemplate: (v: boolean) => void;
+  /** Unload the vision model before every image instead of keeping it beside FLUX. */
+  unloadOllama: boolean;
+  setUnloadOllama: (v: boolean) => void;
 }
 
 const STATUS: Record<EnhancerMode, string> = { off: "Off", on: "On", verbose: "Verbose" };
@@ -36,6 +39,8 @@ export default function PromptEnhancer({
   setEnhancerMode,
   enhanceTemplate,
   setEnhanceTemplate,
+  unloadOllama,
+  setUnloadOllama,
 }: Props) {
   const [open, setOpen] = useState(false);
 
@@ -101,6 +106,21 @@ export default function PromptEnhancer({
             A simpler, always-local template wrap for create/img2img prompts —
             independent of the vision model above. Skipped whenever that model
             already rewrote this prompt.
+          </p>
+
+          <label className="enhance-row">
+            <input
+              type="checkbox"
+              checked={unloadOllama}
+              onChange={(e) => setUnloadOllama(e.target.checked)}
+            />
+            Unload vision model before generating
+          </label>
+          <p className="hint muted small">
+            On: the vision model is unloaded before every image, so FLUX always has
+            the GPU and memory to itself, and it reloads on your next prompt. Off:
+            it stays loaded when it fits beside FLUX, which skips that reload but
+            can push a large FLUX model out of memory.
           </p>
         </div>
       )}

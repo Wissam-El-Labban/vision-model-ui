@@ -27,6 +27,8 @@ interface Props {
   setEnhancerMode: (v: EnhancerMode) => void;
   enhanceTemplate: boolean;
   setEnhanceTemplate: (v: boolean) => void;
+  unloadOllama: boolean;
+  setUnloadOllama: (v: boolean) => void;
   thinking: boolean;
   setThinking: (v: boolean) => void;
   thinkingDisplay: ThinkingDisplay;
@@ -53,6 +55,8 @@ export default function Sidebar(props: Props) {
     setEnhancerMode,
     enhanceTemplate,
     setEnhanceTemplate,
+    unloadOllama,
+    setUnloadOllama,
     thinking,
     setThinking,
     thinkingDisplay,
@@ -102,6 +106,8 @@ export default function Sidebar(props: Props) {
         setEnhancerMode={setEnhancerMode}
         enhanceTemplate={enhanceTemplate}
         setEnhanceTemplate={setEnhanceTemplate}
+        unloadOllama={unloadOllama}
+        setUnloadOllama={setUnloadOllama}
       />
 
       <ThinkingSettings

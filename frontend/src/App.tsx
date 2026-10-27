@@ -86,6 +86,13 @@ export default function App() {
     () => (localStorage.getItem("enhancerMode") as EnhancerMode) || "off"
   );
 
+  // Unload the Ollama model before every image (the prompt enhancer menu). On by
+  // default: keeping it loaded beside FLUX saves its reload, but on a tight GPU or
+  // RAM budget the two evict each other and FLUX starts cold instead.
+  const [unloadOllama, setUnloadOllama] = useState(
+    () => localStorage.getItem("unloadOllama") !== "false"
+  );
+
   // Thinking. One switch (sidebar) for Analyze chats, the prompt enhancer and agent
   // mode; off unless the user turns it on. `thinkingDisplay` decides whether the
   // reasoning itself is shown or just "Thinking…".
@@ -320,6 +327,10 @@ export default function App() {
   useEffect(() => localStorage.setItem("enhancerModel", enhancerModel), [enhancerModel]);
   useEffect(() => localStorage.setItem("enhancerMode", enhancerMode), [enhancerMode]);
   useEffect(() => localStorage.setItem("thinking", String(thinking)), [thinking]);
+  useEffect(
+    () => localStorage.setItem("unloadOllama", String(unloadOllama)),
+    [unloadOllama]
+  );
   useEffect(
     () => localStorage.setItem("thinkingDisplay", thinkingDisplay),
     [thinkingDisplay]
@@ -895,6 +906,7 @@ export default function App() {
             // it while this image is on screen rather than on the next send.
             warm_model:
               (enhancerMode !== "off" ? effectiveEnhanceModel : model) || null,
+            unload_ollama: unloadOllama,
           },
           {
             onStatus: (m) => {
@@ -1009,6 +1021,7 @@ export default function App() {
     [
       gen,
       enhanceTemplate,
+      unloadOllama,
       fluxAvailable,
       fluxModels,
       model,
@@ -1150,6 +1163,7 @@ export default function App() {
             ollama_url: ollamaUrl,
             chat_id: chatId,
             think: thinking,
+            unload_ollama: unloadOllama,
           },
           {
             onToken: (token) => {
@@ -1256,6 +1270,7 @@ export default function App() {
       model,
       ollamaUrl,
       thinking,
+      unloadOllama,
       thinkingDisplay,
       systemPrompt,
       systemImage,
@@ -1472,6 +1487,8 @@ export default function App() {
         setEnhancerMode={setEnhancerMode}
         enhanceTemplate={enhanceTemplate}
         setEnhanceTemplate={setEnhanceTemplate}
+        unloadOllama={unloadOllama}
+        setUnloadOllama={setUnloadOllama}
         thinking={thinking}
         setThinking={setThinking}
         thinkingDisplay={thinkingDisplay}

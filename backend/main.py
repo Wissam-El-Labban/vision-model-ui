@@ -154,6 +154,10 @@ class GenerateRequest(BaseModel):
     # The Ollama model the user will want next (enhancer or chat). Loaded in the
     # background once the image is done, if it fits beside FLUX. None = don't.
     warm_model: str | None = None
+    # The prompt enhancer menu's "Unload vision model before generating" toggle.
+    # On: always unload Ollama before FLUX and don't reload it afterwards, so the
+    # two never share the GPU or system RAM. Off: keep it loaded when it fits.
+    unload_ollama: bool = True
     # The chat to record this generation in. The worker that runs the job outlives
     # the request, so it — not the browser — is what writes the turns. None means
     # don't record. The chat row must already exist (PUT /api/chats/<id>).
@@ -194,6 +198,7 @@ class AgentRequest(BaseModel):
     ollama_url: str = oc.DEFAULT_URL
     chat_id: str | None = None
     think: bool = False  # the sidebar's 💭 toggle, shared with chat and enhance
+    unload_ollama: bool = True  # same toggle as GenerateRequest.unload_ollama
 
 
 # --------------------------------------------------------------------------- #
@@ -699,7 +704,8 @@ def _run_job(*, mode, prompt, init_image, ref_images, control_maps, unet, label,
              seed, emit, record, steps=None, guidance=None, strength=None,
              enhance=True, width=1024, height=1024, seconds=None,
              control_kinds=(), structure_lock=1.0, control_strength=None,
-             canny_low=None, canny_high=None) -> None:
+             canny_low=None, canny_high=None, parent_hash=None,
+             people=False) -> None:
     """Run one generation to completion: sample it, store it, record it, emit it.
 
     Shared by `/api/generate` (one job per request) and `/api/agent` (one per tool
@@ -792,6 +798,14 @@ def _run_job(*, mode, prompt, init_image, ref_images, control_maps, unet, label,
     full = images.pil_to_data_url(image)
     thumb = images.pil_to_data_url(image, max_size=64, fmt="JPEG")
     h = db.save_image(full, thumb)
+    # Lineage, so a later edit of this result can find the original it came from
+    # (see `agent.guard_edit`). Best-effort, like `_recorder`: missing lineage only
+    # costs the anchor, and is no reason to lose the image.
+    if mode in ("edit", "img2img") and parent_hash and parent_hash != h:
+        try:
+            db.record_lineage(h, parent_hash, people)
+        except Exception:
+            logging.exception("recording lineage of %s failed", h)
     record("assistant", "", label, [h])
     emit(
         {
@@ -852,15 +866,22 @@ def _flux_vram_gb(unets) -> float | None:
     return None if not needs or None in needs else float(max(needs))
 
 
-def _free_gpu_for_flux(ollama_url, unets, emit) -> None:
+def _free_gpu_for_flux(ollama_url, unets, emit, always=False) -> None:
     """Unload Ollama before FLUX runs — but only when the two can't share the GPU.
 
     Unloading isn't free: reloading the vision model reads its whole blob back from
     disk, ~45 s for a 9B model here, and every prompt enhancement paid it. So keep
     it resident whenever its VRAM plus the FLUX bundle's fits. Anything unknown
     (remote Ollama, no nvidia-smi, a user-added UNet) unloads as before.
+
+    `always` skips the check and unloads, for users who'd rather pay the reload
+    than share the GPU and system RAM with FLUX.
     """
     try:
+        if always:
+            emit({"type": "status", "message": "Freeing VRAM (unloading vision model)…"})
+            oc.unload_all(ollama_url)
+            return
         need = _flux_vram_gb(unets)
         total = oc.gpu_total_gb()
         held = oc.loaded_vram_gb(ollama_url)
@@ -942,7 +963,8 @@ def generate(req: GenerateRequest):
                           f"{os.path.basename(str(req.flux_model))} can't {req.mode} "
                           f"here — using {fx.label(unet)} instead"})
                 label = fx.label(unet)
-                _free_gpu_for_flux(req.ollama_url, [unet], emit)
+                _free_gpu_for_flux(req.ollama_url, [unet], emit,
+                                   always=req.unload_ollama)
 
                 # Record the prompt before sampling rather than after it. This thread
                 # outlives the request — a reload or a Stop drops the stream but not
@@ -970,12 +992,13 @@ def generate(req: GenerateRequest):
                     structure_lock=req.structure_lock,
                     control_strength=req.control_strength,
                     canny_low=req.canny_low, canny_high=req.canny_high,
+                    parent_hash=req.init_image_hash,
                 )
             except Exception as exc:
                 events.put({"type": "error", "message": str(exc)})
             finally:
                 events.put(None)  # sentinel: worker done
-                if unet:
+                if unet and not req.unload_ollama:
                     _warm_after(req.ollama_url, req.warm_model, [unet])
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1143,7 +1166,8 @@ def agent_turn(req: AgentRequest):
                             req.flux_model, fx.role_for_mode(spec["mode"])))
                     except Exception:
                         unets.append("")  # unknown: forces the safe unload
-                _free_gpu_for_flux(req.ollama_url, unets, emit)
+                _free_gpu_for_flux(req.ollama_url, unets, emit,
+                                   always=req.unload_ollama)
 
                 for index, call, spec in specs:
                     step = _emitter(events, tool_index=index)
@@ -1155,12 +1179,27 @@ def agent_turn(req: AgentRequest):
                         label = fx.label(unet)
                         seed = (req.seed if req.seed is not None
                                 else random.randint(0, 2**31 - 1))
+                        init_hash = (req.context_hashes[spec["init"]]
+                                     if spec["init"] is not None else None)
+                        ref_hashes = [req.context_hashes[i] for i in spec["refs"]]
+                        prompt = spec["prompt"]
+                        people = spec.get("people", False)
+                        if spec["mode"] == "edit":
+                            line = db.lineage(init_hash)
+                            people = people or bool(line and line["people"])
+                            root_ok = bool(line and db.image_path(line["root_hash"]))
+                            prompt, root = agent.guard_edit(
+                                prompt, people, line, root_ok)
+                            # Last, so the guard's "final reference image" is it.
+                            if root and root != init_hash and root not in ref_hashes:
+                                step({"type": "status", "message":
+                                      "Anchoring the face to the original photo…"})
+                                ref_hashes.append(root)
                         _run_job(
-                            mode=spec["mode"], prompt=spec["prompt"],
-                            init_image=(_resolve(req.context_hashes[spec["init"]])
-                                        if spec["init"] is not None else None),
-                            ref_images=[_resolve(req.context_hashes[i])
-                                        for i in spec["refs"]],
+                            mode=spec["mode"], prompt=prompt,
+                            init_image=(_resolve(init_hash)
+                                        if init_hash is not None else None),
+                            ref_images=[_resolve(h) for h in ref_hashes],
                             control_maps=[], unet=unet, label=label, seed=seed,
                             emit=step, record=record,
                             steps=req.steps, guidance=req.guidance,
@@ -1173,6 +1212,7 @@ def agent_turn(req: AgentRequest):
                             # enhancer uses, so wrapping it in the photoreal
                             # template on top would fight what it wrote.
                             enhance=False,
+                            parent_hash=init_hash, people=people,
                         )
                     except Exception as exc:
                         # One failed step doesn't sink the others. The user still
@@ -1182,7 +1222,8 @@ def agent_turn(req: AgentRequest):
                         step({"type": "tool_error", "index": index,
                               "name": call["name"], "message": str(exc)})
                 emit({"type": "done"})
-                _warm_after(req.ollama_url, req.model, unets)
+                if not req.unload_ollama:
+                    _warm_after(req.ollama_url, req.model, unets)
             except Exception as exc:
                 events.put({"type": "error", "message": str(exc)})
             finally:

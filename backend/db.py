@@ -84,6 +84,17 @@ CREATE TABLE IF NOT EXISTS chat_pinned_images (
     image_hash TEXT NOT NULL,
     ordinal    INTEGER NOT NULL
 );
+-- Where a generated image came from: the image it was edited from, the original
+-- (non-generated) photo at the start of that chain, and how many edits deep it is.
+-- An image with no row is an original. `people` is carried down the chain so a
+-- later edit knows it is working on a person even if nobody says so again.
+CREATE TABLE IF NOT EXISTS image_lineage (
+    hash        TEXT PRIMARY KEY,
+    parent_hash TEXT NOT NULL,
+    root_hash   TEXT NOT NULL,
+    depth       INTEGER NOT NULL,
+    people      INTEGER NOT NULL DEFAULT 0
+);
 CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_pinned_chat ON chat_pinned_images(chat_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_msgimg_msg ON message_images(message_id, ordinal);
@@ -180,6 +191,33 @@ def save_image(full_data_url: str, thumb_data_url: str | None = None) -> str:
             (h, mime, _now()),
         )
     return h
+
+
+def record_lineage(h: str, parent: str, people: bool) -> None:
+    """Note that `h` was generated from `parent` (see the `image_lineage` table)."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT root_hash, depth, people FROM image_lineage WHERE hash = ?",
+            (parent,),
+        ).fetchone()
+        root, depth = (row["root_hash"], row["depth"] + 1) if row else (parent, 1)
+        people = bool(people or (row and row["people"]))
+        conn.execute(
+            "INSERT OR REPLACE INTO image_lineage "
+            "(hash, parent_hash, root_hash, depth, people) VALUES (?, ?, ?, ?, ?)",
+            (h, parent, root, depth, int(people)),
+        )
+
+
+def lineage(h: str) -> dict | None:
+    """`h`'s lineage row, or None if it is an original rather than an edit."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT parent_hash, root_hash, depth, people FROM image_lineage "
+            "WHERE hash = ?",
+            (h,),
+        ).fetchone()
+    return dict(row, people=bool(row["people"])) if row else None
 
 
 def _gc_orphan_images(conn: sqlite3.Connection) -> None:

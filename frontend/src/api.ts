@@ -700,6 +700,8 @@ export interface GenerateParams {
   ollama_url: string;
   /** Ollama model to reload in the background once the image is done. */
   warm_model?: string | null;
+  /** Always unload the Ollama model before FLUX runs (and don't reload it after). */
+  unload_ollama?: boolean;
 }
 
 /** A `control` event: one derived control map, emitted before the final image. */
@@ -815,6 +817,8 @@ export interface AgentParams {
   chat_id?: string | null;
   /** Let a thinking-capable model reason before planning; ignored otherwise. */
   think?: boolean;
+  /** Always unload the Ollama model before FLUX runs (and don't reload it after). */
+  unload_ollama?: boolean;
 }
 
 /** One tool the agent decided to call. `index` orders the steps within the turn

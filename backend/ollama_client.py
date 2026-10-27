@@ -298,6 +298,8 @@ _ENHANCE_SYSTEM = {
         "Use the attached image to name exactly what to change and where it is.\n"
         "State explicitly what must stay unchanged: background, other subjects, pose, "
         "lighting, framing.\n"
+        "If the image shows people, say that their face, identity and natural skin "
+        "texture must stay unchanged.\n"
         "Do not add camera, lens or style language unless the user asked to change "
         "those.\n"
         "Return the instruction only: no preamble, no quotes, no commentary."
