@@ -93,6 +93,13 @@ export async function getSystemMemory(ollamaUrl: string): Promise<SystemMemory> 
 export interface SystemFit {
   level: "ok" | "amber" | "red" | "unknown";
   messages: string[];
+  /** Whether "Unload vision model before generating" would actually help: the
+   *  two fit on the GPU together (so the vision model stays resident) but overrun
+   *  system RAM. When they don't fit on the GPU, the backend unloads on its own
+   *  and the toggle changes nothing. */
+  unload_helps?: boolean;
+  /** A rule about the two models *together* tripped (GPU or RAM). */
+  pair?: boolean;
 }
 
 export async function getFit(

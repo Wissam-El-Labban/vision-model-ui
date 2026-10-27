@@ -66,19 +66,30 @@ def fit(flux_gb: float | None, ollama_gb: float | None) -> dict:
     `level` is "ok", "amber" (works, but slower or close to the edge), "red" (likely
     to crash or crawl), or "unknown" when the GPU or a size couldn't be read. Each
     rule that trips adds one sentence to `messages`, worst first.
+
+    `pair` says a rule about the two models *together* tripped. `unload_helps` is
+    narrower: whether the "Unload vision model before generating" toggle would
+    change anything. When the
+    pair can't share the GPU, the backend already unloads the vision model for
+    every image on its own (`_free_gpu_for_flux`), which frees its RAM too, so the
+    toggle adds nothing. It only matters when they *do* share the GPU — the vision
+    model stays resident — but together overrun system RAM.
     """
     g, r = gpu(), ram()
     have = {"vram_gb": g and g["total_gb"], "ram_gb": r and r["total_gb"],
             "swap_gb": r and r["swap_gb"]}
     sizes = [s for s in (flux_gb, ollama_gb) if s]
     if not g or not r or not sizes:
-        return {"level": "unknown", "messages": [], "need": {}, "have": have}
+        return {"level": "unknown", "messages": [], "pair": False, "unload_helps": False,
+                "need": {}, "have": have}
 
     ollama_need = (ollama_gb or 0) * OLLAMA_OVERHEAD
     flux_need = (flux_gb or 0) * 1.1
     memory = r["total_gb"] + r["swap_gb"]
     vram = g["total_gb"]
     red, amber = [], []
+    ram_pair = gpu_pair = False
+    shares_gpu = flux_need + ollama_need <= vram - VRAM_MARGIN_GB
 
     if flux_need > vram:
         red.append(f"The image model needs about {flux_need:.0f} GB of VRAM but this GPU "
@@ -96,12 +107,14 @@ def fit(flux_gb: float | None, ollama_gb: float | None) -> dict:
                    f"mid-load (it restarts, and chat shows connection errors). Add RAM "
                    f"or pick a smaller model.")
     elif flux_gb and ollama_gb and flux_gb + ollama_need + RAM_OVERHEAD_GB > memory:
+        ram_pair = True
         amber.append(f"Both models together need about "
                      f"{flux_gb + ollama_need + RAM_OVERHEAD_GB:.0f} GB of system RAM "
                      f"and this machine has {memory:.0f} GB — switching between chat and "
                      f"image generation may run out of memory.")
     if (flux_gb and ollama_gb and not red
-            and flux_need + ollama_need > vram - VRAM_MARGIN_GB):
+            and not shares_gpu):
+        gpu_pair = True
         amber.append(f"The chat model ({ollama_need:.0f} GB) and image model "
                      f"({flux_need:.0f} GB) can't both stay on the {vram:.0f} GB GPU, so "
                      f"the chat model is unloaded for each image and reloaded after. "
@@ -110,6 +123,8 @@ def fit(flux_gb: float | None, ollama_gb: float | None) -> dict:
     return {
         "level": "red" if red else "amber" if amber else "ok",
         "messages": red + amber,
+        "pair": ram_pair or gpu_pair,
+        "unload_helps": ram_pair and shares_gpu,
         "need": {"vram_gb": round(flux_need + ollama_need, 1),
                  "ram_gb": round(biggest + RAM_OVERHEAD_GB, 1)},
         "have": have,

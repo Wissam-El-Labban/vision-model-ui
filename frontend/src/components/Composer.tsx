@@ -20,6 +20,12 @@ import type { FluxModel, FluxPreprocessor, ModelDetail } from "../api";
  * hand pressed into a mat — needs the *scene* in the control signal, and only depth
  * carries it. Pose is listed last not because it's weak but because alone it is
  * ambiguous exactly where hard poses break: it can't say which arm is in front. */
+const ENHANCER_STATUS: Record<EnhancerMode, string> = {
+  off: "Off",
+  on: "Normal",
+  verbose: "Verbose",
+};
+
 const CONTROL_KINDS: { kind: ControlKind; label: string; hint: string }[] = [
   { kind: "depth", label: "Depth",
     hint: "3-D shape of the whole scene — the chair, the floor, which limb is in front. Best for a pose that touches something." },
@@ -94,6 +100,9 @@ interface Props {
    *  prompt for this submit — guards against a double-send during that gap.
    *  Verbose mode's rewrite itself isn't shown here: it's attached to the chat
    *  message it produced and rendered underneath it, not in the composer. */
+  /** Why the models this mode loads are likely too much for this machine (red
+   *  verdicts only), to mark the picker that's responsible. */
+  fitWarn?: string;
   enhancing: boolean;
   /** Whether thinking is on (set in the sidebar) — only changes what the send
    *  button says while the enhancer runs. */
@@ -160,6 +169,7 @@ export default function Composer({
   setEnhanceTemplate,
   unloadOllama,
   setUnloadOllama,
+  fitWarn,
   enhancing,
   thinking,
   pinnedCount,
@@ -203,6 +213,10 @@ export default function Composer({
   const agentDetail = models.details.find((d) => d.name === agentModel);
   const smallAgent =
     agentMode && !!agentDetail && agentDetail.params_b > 0 && agentDetail.params_b < 7;
+  // Analyze loads only its vision model, so a red verdict there is about it alone.
+  const analyzeWarn = composerMode === "analyze" ? fitWarn : undefined;
+  // Generate's Ollama model is the enhancer's, loaded only while it's on.
+  const enhancerWarn = genMode && enhancerMode !== "off" ? fitWarn : undefined;
   const smallAgentWarning = agentDetail
     ? `${agentModel} is ${agentDetail.parameter_size} — models under 7B often pick ` +
       "the wrong tool or skip calling one, so tool calling may be limited."
@@ -807,6 +821,52 @@ export default function Composer({
           )}
         </div>
 
+        {/* Next to 💬 and labeled like the old sidebar header — name plus an
+            Off/On/Verbose badge — since it's a setting you read at a glance, not
+            just a menu to open. */}
+        {genMode && (
+          <div className="sys-control" ref={enhancerRef}>
+            <button
+              className={`btn ghost enhancer-chip ${enhancerWarn ? "warn" : ""}`}
+              onClick={() => setEnhancerOpen((v) => !v)}
+              title={
+                (enhancerWarn ? `⚠ ${enhancerWarn}\n\n` : "") +
+                "Prompt enhancer — " +
+                (effectiveEnhanceModel
+                  ? `${effectiveEnhanceModel}${enhancerModel ? "" : " (auto)"}`
+                  : "no vision model installed")
+              }
+            >
+              {enhancerWarn ? "⚠️" : "✨"} Enhancer
+              {/* The model it rewrites with, namespace dropped to keep the row
+                  short ("huihui_ai/qwen3.5:9b" → "qwen3.5:9b"); full name in the
+                  tooltip. Shown even while Off, so the pick is never a surprise. */}
+              <span className="enhancer-model">
+                {effectiveEnhanceModel
+                  ? `${effectiveEnhanceModel.split("/").pop()}${enhancerModel ? "" : " (auto)"}`
+                  : "no model"}
+              </span>
+              <span className={`section-status ${enhancerMode !== "off" ? "on" : ""}`}>
+                {ENHANCER_STATUS[enhancerMode]}
+              </span>
+            </button>
+            {enhancerOpen && (
+              <div className="system-popover gen-popover">
+                <PromptEnhancer
+                  visionModels={models.vision}
+                  enhancerModel={enhancerModel}
+                  setEnhancerModel={setEnhancerModel}
+                  effectiveModel={effectiveEnhanceModel}
+                  enhancerMode={enhancerMode}
+                  setEnhancerMode={setEnhancerMode}
+                  enhanceTemplate={enhanceTemplate}
+                  setEnhanceTemplate={setEnhanceTemplate}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
         {agentMode && (
           <div className="sys-control" ref={toolsRef}>
             <button
@@ -875,7 +935,7 @@ export default function Composer({
                     <label className="lbl">
                       Model ({role === "edit" ? "edit / combine / control" : "create"})
                     </label>
-                    <ul className="flux-model-list">
+                    <ul className={`flux-model-list ${isAnimate ? "video" : ""}`}>
                       {roleModels.map((m) => (
                         <li key={m.name} className={activeFlux === m.name ? "active" : ""}>
                           <button
@@ -1046,35 +1106,6 @@ export default function Composer({
           </div>
         )}
 
-        {genMode && (
-          <div className="sys-control" ref={enhancerRef}>
-            <button
-              className={`btn ghost icon ${enhancerMode !== "off" ? "has-dot" : ""}`}
-              onClick={() => setEnhancerOpen((v) => !v)}
-              title={
-                `Prompt enhancer — ${enhancerMode}` +
-                (effectiveEnhanceModel ? ` (${effectiveEnhanceModel})` : "")
-              }
-            >
-              ✨{enhancerMode !== "off" && <span className="dot" />}
-            </button>
-            {enhancerOpen && (
-              <div className="system-popover gen-popover">
-                <PromptEnhancer
-                  visionModels={models.vision}
-                  enhancerModel={enhancerModel}
-                  setEnhancerModel={setEnhancerModel}
-                  effectiveModel={effectiveEnhanceModel}
-                  enhancerMode={enhancerMode}
-                  setEnhancerMode={setEnhancerMode}
-                  enhanceTemplate={enhanceTemplate}
-                  setEnhanceTemplate={setEnhanceTemplate}
-                />
-              </div>
-            )}
-          </div>
-        )}
-
         {agentMode && (
           <div className="sys-control" ref={settingsRef}>
             <button
@@ -1096,7 +1127,10 @@ export default function Composer({
                   </div>
                 ) : (
                   <div className="flux-models">
-                    <label className="lbl">Image model</label>
+                    {/* Two picks at once — one for the image tools, one for 🎬
+                        Animate — so each list has its own color, matching the
+                        side pickers beside the agent model. */}
+                    <label className="lbl"><span className="swatch image" />Image model</label>
                     <ul className="flux-model-list">
                       {agentImageChoices.map((m) => (
                         <li key={m.name} className={activeAgentImage === m.name ? "active" : ""}>
@@ -1131,8 +1165,8 @@ export default function Composer({
 
                     {agentVideoChoices.length > 0 && (
                       <>
-                        <label className="lbl">Video model</label>
-                        <ul className="flux-model-list">
+                        <label className="lbl"><span className="swatch video" />Video model</label>
+                        <ul className="flux-model-list video">
                           {agentVideoChoices.map((m) => (
                             <li key={m.name} className={activeAgentVideo === m.name ? "active" : ""}>
                               <button
@@ -1305,16 +1339,20 @@ export default function Composer({
           </div>
         ) : (
           <div
-            className={`model-control ${smallAgent ? "warn" : ""}`}
+            className={`model-control ${smallAgent || analyzeWarn ? "warn" : ""}`}
             title={
               smallAgent
                 ? smallAgentWarning
-                : agentMode
+                : analyzeWarn
+                  ? `⚠ ${analyzeWarn}`
+                  : agentMode
                   ? "Agent model (tools + vision)"
                   : "Vision model"
             }
           >
-            <span aria-hidden>{smallAgent ? "⚠️" : agentMode ? "🧠" : "🤖"}</span>
+            <span aria-hidden>
+              {smallAgent || analyzeWarn ? "⚠️" : agentMode ? "🧠" : "🤖"}
+            </span>
             {modelChoices.length > 0 ? (
               <select
                 value={activeModel}
@@ -1341,6 +1379,46 @@ export default function Composer({
                 placeholder="No vision models — type one"
               />
             )}
+          </div>
+        )}
+
+        {/* The agent's image and video picks, beside the model that drives them.
+            Same state as its ⚙️ menu, and the same colors. */}
+        {agentMode && agentImageChoices.length > 0 && (
+          <div className="model-control side-pick image" title="Image model for the agent's image tools">
+            <span aria-hidden>🎨</span>
+            <select
+              value={activeAgentImage}
+              onChange={(e) => setAgentImageModel(e.target.value)}
+            >
+              {agentImageChoices.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {prettyFlux(m.label)}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {agentMode && agentVideoChoices.length > 0 && (
+          <div
+            className="model-control side-pick video"
+            title={
+              animateOn
+                ? "Video model for 🎬 Animate"
+                : "Video model for 🎬 Animate — switched off in 🧰 Tools"
+            }
+          >
+            <span aria-hidden>🎬</span>
+            <select
+              value={activeAgentVideo}
+              onChange={(e) => setAgentVideoModel(e.target.value)}
+            >
+              {agentVideoChoices.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {prettyFlux(m.label)}
+                </option>
+              ))}
+            </select>
           </div>
         )}
       </div>

@@ -19,7 +19,7 @@ interface Props {
 
 const HINTS: Record<EnhancerMode, string> = {
   off: "Off: your prompt goes to the image model exactly as you wrote it.",
-  on: "On: the picked model silently rewrites your prompt before every generation.",
+  on: "Normal: the picked model silently rewrites your prompt before every generation.",
   verbose:
     "Verbose: rewrites automatically and shows the result under your message in the chat.",
 };
@@ -41,6 +41,13 @@ export default function PromptEnhancer({
   return (
     <>
       <div className="popover-title">✨ Prompt enhancer</div>
+      {/* The model line the sidebar header used to show — Auto included, since
+          "Auto" alone doesn't say which model you're getting. */}
+      <div className="section-sub" title={effectiveModel}>
+        {effectiveModel
+          ? `${effectiveModel}${enhancerModel ? "" : " (auto)"}`
+          : "No vision model installed"}
+      </div>
       <label className="lbl">Vision model (sees your reference images)</label>
       {visionModels.length > 0 ? (
         <select
@@ -69,7 +76,7 @@ export default function PromptEnhancer({
         onChange={(e) => setEnhancerMode(e.target.value as EnhancerMode)}
       >
         <option value="off">Off</option>
-        <option value="on">On</option>
+        <option value="on">Normal</option>
         <option value="verbose">Verbose</option>
       </select>
 

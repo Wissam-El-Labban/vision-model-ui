@@ -1361,7 +1361,17 @@ export default function App() {
   // Whether the models this mode would load are too much for the machine. Names
   // resolve the same way the header pills do, so the warning is about what will
   // actually run. A dismissal holds for that exact pick and that exact verdict.
-  const fitChat = agentMode ? agentModel : model;
+  // Generate's Ollama model is the same one `generateImage` sends as
+  // `warm_model`: the enhancer's while it's on, else the Analyze pick, which is
+  // reloaded beside FLUX after each image. Leaving it out with the enhancer off
+  // checked FLUX alone and missed the pair entirely.
+  const fitChat = agentMode
+    ? agentModel
+    : genMode
+      ? enhancerMode !== "off"
+        ? effectiveEnhanceModel
+        : model
+      : model;
   const fitFlux = !fluxAvailable
     ? []
     : agentMode
@@ -1399,7 +1409,11 @@ export default function App() {
   }, [fitKey, ollamaUrl]);
   const fitShown =
     fit && (fit.level === "red" || fit.level === "amber") ? fit : null;
-  const fitId = fitShown ? fitKey + fitShown.messages.join("|") : "";
+  // The unload setting is part of it: dismissing with it off shouldn't also hide
+  // the banner's note about it once it's on.
+  const fitId = fitShown
+    ? fitKey + fitShown.messages.join("|") + (fitShown.pair ? `|unload=${unloadOllama}` : "")
+    : "";
   const fitWarn = fit?.level === "red" ? fit.messages[0] : undefined;
   function dismissFit() {
     setFitDismissed(fitId);
@@ -1605,7 +1619,15 @@ export default function App() {
                   warn={fitWarn}
                 />
               ))}
-            {model && <span className="model-pill">{model}</span>}
+            {model && (
+              <span
+                className={`model-pill ${composerMode === "analyze" && fitWarn ? "warn" : ""}`}
+                title={composerMode === "analyze" && fitWarn ? `⚠ ${fitWarn}` : undefined}
+              >
+                {composerMode === "analyze" && fitWarn && "⚠ "}
+                {model}
+              </span>
+            )}
             {messages.length > 0 && (
               <button className="btn ghost" onClick={newChat}>
                 ＋ New
@@ -1621,6 +1643,25 @@ export default function App() {
               {fitShown.messages.map((m) => (
                 <li key={m}>{m}</li>
               ))}
+              {/* On every warning about the two models together, in the modes
+                  that load both (Generate and Agent), with the switch right here.
+                  Said honestly either way: where they can't share the GPU, the
+                  backend unloads the vision model for each image regardless, so
+                  there the line is the setting's state, not a fix. */}
+              {fitShown.pair && (genMode || agentMode) && (
+                <li>
+                  💡 <strong>Unload vision model before generating</strong> is{" "}
+                  {unloadOllama ? "on" : "off"}.{" "}
+                  {fitShown.unload_helps
+                    ? unloadOllama
+                      ? "The two never share memory, so the vision model reloads after each image, which takes a little while."
+                      : "Turning it on frees that memory for the image model — the vision model then reloads after each image, which takes a little while."
+                    : "With these two it makes no difference: they can't share the GPU, so the vision model is unloaded for every image either way and reloads on your next prompt. It matters for smaller pairs that fit together."}{" "}
+                  <button className="link-btn" onClick={() => setUnloadOllama(!unloadOllama)}>
+                    Turn it {unloadOllama ? "off" : "on"}
+                  </button>
+                </li>
+              )}
             </ul>
             <button onClick={dismissFit} title="Dismiss for this pick of models">
               ×
@@ -1688,6 +1729,7 @@ export default function App() {
             setEnhanceTemplate={setEnhanceTemplate}
             unloadOllama={unloadOllama}
             setUnloadOllama={setUnloadOllama}
+            fitWarn={fitWarn}
             enhancing={enhancing}
             thinking={thinking}
             pinnedCount={pinnedImages.length}
