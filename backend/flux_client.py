@@ -477,7 +477,11 @@ def ensure_server(on_status=None) -> None:
     if not cat.installed_bundles():
         raise RuntimeError("No image model is installed — install one in the Models panel.")
     if on_status:
-        on_status("starting FLUX engine…")
+        # A sidecar we started that has since been killed is the one restart worth
+        # explaining: otherwise "starting" on every image looks like a bug here.
+        killed = _proc is not None and _proc.poll() == -9
+        on_status("FLUX engine was killed for running out of RAM — restarting it…"
+                  if killed else "starting FLUX engine…")
     # A sidecar we are about to start holds nothing, whatever an earlier one held —
     # which also means residency is knowable again from here on.
     global _residency_known
@@ -534,6 +538,40 @@ def vram_in_use_gb(unets) -> float | None:
         return None
 
 
+def held_gb() -> float | None:
+    """VRAM the sidecar holds right now in GiB, or None when it isn't running."""
+    if not _server_up():
+        return None
+    try:
+        with urllib.request.urlopen(COMFY_URL + "/system_stats", timeout=2) as r:
+            return json.load(r)["devices"][0]["torch_vram_total"] / 2**30
+    except Exception:
+        return None
+
+
+def weights_gb(unet: str) -> float | None:
+    """GiB of weights a generation on `unet` puts on the GPU: transformer, encoder, VAE.
+
+    From the files on disk, so it's what this install actually loads rather than the
+    catalog's `vram_gb` sizing guide. A transformer cast to fp8 at load counts at half
+    its file. Only the primary transformer is counted: Wan's second expert swaps in
+    for the first rather than sitting beside it. None if the transformer isn't here.
+    """
+    p = UNET_DIR / os.path.basename(unet or "")
+    if not unet or not p.is_file():
+        return None
+    b = cat.bundle_of_unet(p.name)
+    total = p.stat().st_size * (0.5 if b and "fp8" in b.get("weight_dtype", "") else 1)
+    names = [n.strip() for n in encoder_for(p.name).split(" + ") if n.strip()]
+    names.append(b["vae"] if b else FLUX1_VAE)
+    for name in names:
+        for d in (cat.TE_DIR, cat.CLIP_DIR, cat.VAE_DIR):
+            if (d / name).is_file():
+                total += (d / name).stat().st_size
+                break
+    return total / 2**30
+
+
 def _boot_error() -> str:
     """The last meaningful line of the sidecar's log — the exception, for a crash."""
     try:
@@ -562,6 +600,40 @@ def free() -> None:
 # --------------------------------------------------------------------------- #
 # HTTP helpers
 # --------------------------------------------------------------------------- #
+def _death() -> str | None:
+    """Why the sidecar is gone, or None if it is still up.
+
+    A request that fails because ComfyUI died otherwise surfaces as urllib's
+    "<urlopen error [Errno 111] Connection refused>", which reads like a network
+    problem. On a box short of RAM it is almost always the OOM killer, so say so.
+    """
+    code = _proc.poll() if _proc is not None else None
+    if code is None and (_proc is not None or _server_up()):
+        return None
+    if code == -9:
+        how = "was killed by the system — it most likely ran out of RAM"
+    elif code is not None and code < 0:
+        how = f"was killed by signal {-code}"
+    elif code is not None:
+        how = f"exited unexpectedly (code {code}, see {_RUNTIME / 'comfyui.log'})"
+    else:
+        how = "stopped responding — it may have run out of memory"
+    return f"The FLUX engine {how}. It will restart on the next generation."
+
+
+def _urlopen(req):
+    """urlopen against the sidecar, turning "connection refused" into why it died."""
+    try:
+        return urllib.request.urlopen(req)
+    except urllib.error.HTTPError:
+        raise  # the sidecar answered; it isn't dead
+    except (urllib.error.URLError, ConnectionError) as exc:
+        why = _death()
+        if why:
+            raise RuntimeError(why) from exc
+        raise
+
+
 def _post(path: str, data: dict) -> dict:
     req = urllib.request.Request(
         COMFY_URL + path,
@@ -569,7 +641,7 @@ def _post(path: str, data: dict) -> dict:
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req) as r:
+        with _urlopen(req) as r:
             return json.load(r)
     except urllib.error.HTTPError as exc:
         # ComfyUI rejects a graph it can't run with a 400 whose *body* says why — which
@@ -598,7 +670,7 @@ def _comfy_error(exc) -> str:
 
 
 def _get(path: str) -> dict:
-    with urllib.request.urlopen(COMFY_URL + path) as r:
+    with _urlopen(COMFY_URL + path) as r:
         return json.load(r)
 
 
@@ -612,7 +684,7 @@ def _upload_image(pil, name: str) -> str:
         data=body,
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
     )
-    with urllib.request.urlopen(req) as r:
+    with _urlopen(req) as r:
         return json.load(r)["name"]
 
 
@@ -635,7 +707,7 @@ def _fetch_bytes(filename: str, subfolder: str) -> bytes:
     """An output file off the sidecar, as bytes. ComfyUI serves every output through
     /view regardless of what it is — a PNG and a WebM come back the same way."""
     q = urllib.parse.urlencode({"filename": filename, "subfolder": subfolder, "type": "output"})
-    with urllib.request.urlopen(COMFY_URL + "/view?" + q) as r:
+    with _urlopen(COMFY_URL + "/view?" + q) as r:
         return r.read()
 
 

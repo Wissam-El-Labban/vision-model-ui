@@ -72,6 +72,40 @@ export async function getRunning(ollamaUrl: string): Promise<RunningModel[]> {
   return (await res.json()).models ?? [];
 }
 
+/** Live memory of this machine, in GiB. `gpu`/`ram` are null when unreadable;
+ *  `flux_gb` is null while the FLUX engine isn't running. */
+export interface SystemMemory {
+  gpu: { total_gb: number; used_gb: number } | null;
+  ram: { total_gb: number; available_gb: number; used_gb: number; swap_gb: number } | null;
+  flux_gb: number | null;
+  ollama_gb: number | null;
+}
+
+export async function getSystemMemory(ollamaUrl: string): Promise<SystemMemory> {
+  const res = await fetch(`/api/system/memory?ollama_url=${encodeURIComponent(ollamaUrl)}`);
+  if (!res.ok) throw new Error(`memory: ${res.status}`);
+  return res.json();
+}
+
+/** Whether a chat model plus FLUX models suit this machine. "amber" works but
+ *  slower; "red" is likely to crash or crawl; "unknown" means stay quiet. */
+export interface SystemFit {
+  level: "ok" | "amber" | "red" | "unknown";
+  messages: string[];
+}
+
+export async function getFit(
+  ollamaUrl: string,
+  model: string,
+  flux: string[]
+): Promise<SystemFit> {
+  const q = new URLSearchParams({ ollama_url: ollamaUrl, model });
+  for (const f of flux) q.append("flux", f);
+  const res = await fetch(`/api/system/fit?${q}`);
+  if (!res.ok) throw new Error(`fit: ${res.status}`);
+  return res.json();
+}
+
 export async function unloadAll(ollamaUrl: string): Promise<string[]> {
   const res = await fetch(
     `/api/models/unload?ollama_url=${encodeURIComponent(ollamaUrl)}`,

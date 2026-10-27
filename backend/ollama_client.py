@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from . import system
+
 DEFAULT_URL = "http://localhost:11434"
 
 # Connect quickly (fail fast if Ollama is down) but allow a generous read
@@ -636,14 +638,8 @@ def gpu_total_gb():
     Only meaningful when Ollama runs on this machine; callers treat None as
     "unknown" and fall back to unloading.
     """
-    try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5, check=True,
-        ).stdout
-        return int(out.split()[0]) / 1024
-    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
-        return None
+    g = system.gpu()
+    return g and g["total_gb"]
 
 
 def loaded_vram_gb(url):

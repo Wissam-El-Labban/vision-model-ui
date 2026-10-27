@@ -19,6 +19,8 @@ interface Props {
   gen: GenSettings;
   /** Drop the steps/cfg/seed tail, for agent mode's row of several pills. */
   compact?: boolean;
+  /** Why this model is likely too much for this machine, if it is. */
+  warn?: string;
 }
 
 /** What a generate would actually run right now: the transformer the current op
@@ -28,7 +30,7 @@ interface Props {
  * agree on — so the header can't advertise a model the dispatch wouldn't pick. The
  * encoder comes from the backend's `encoder_for`, which mirrors the graph builder,
  * for the same reason. */
-export default function GenModelPill({ op, picked, models, gen, compact }: Props) {
+export default function GenModelPill({ op, picked, models, gen, compact, warn }: Props) {
   const name = resolveFlux(picked, models, roleFor(op));
   const model = models.find((m) => m.name === name);
   if (!model) return null;
@@ -45,6 +47,7 @@ export default function GenModelPill({ op, picked, models, gen, compact }: Props
     <span
       className="gen-pill"
       title={
+        (warn ? `⚠ ${warn}\n\n` : "") +
         `${video ? "Video" : "Image"} model: ${model.label}\n` +
         `Text encoder: ${model.encoder || "—"}\n` +
         `LoRA: ${
@@ -64,6 +67,7 @@ export default function GenModelPill({ op, picked, models, gen, compact }: Props
         `Seed: ${gen.seed || "random"}`
       }
     >
+      {warn && <span className="gen-pill-warn">⚠</span>}
       <span className="gen-pill-icon">{control ? "🕹️" : video ? "🎬" : "🎨"}</span>
       <span className="gen-pill-model">{model.label}</span>
       {model.encoder && (

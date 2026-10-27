@@ -24,6 +24,8 @@ been given one more way to pick wrong.
 """
 from __future__ import annotations
 
+import re
+
 from . import ollama_client as oc
 
 # Aspect ratios, not raw pixels. FLUX is trained at ~1 megapixel and drifts badly
@@ -488,10 +490,26 @@ def guard_edit(prompt: str, people: bool, lineage: dict | None,
 # Validation
 # --------------------------------------------------------------------------- #
 def _index(value, n_images: int, what: str) -> int:
-    """One image number -> a 0-based offset into the manifest."""
-    try:
+    """One image number -> a 0-based offset into the manifest.
+
+    Small models rarely pass a bare integer: "image 2", "#2" and 2.0 all turn up,
+    and so does leaving the argument out. Reading the number out of the text isn't
+    a repair — it's the number they wrote. A missing one is filled in only when
+    there's a single image, the one case where it can't mean anything else.
+    """
+    i = None
+    if isinstance(value, bool):
+        pass
+    elif isinstance(value, int):
+        i = value
+    elif isinstance(value, float) and value.is_integer():
         i = int(value)
-    except (TypeError, ValueError):
+    elif isinstance(value, str):
+        m = re.search(r"\d+", value)
+        i = int(m.group()) if m else None
+    if i is None:
+        if n_images == 1:
+            return 0
         raise ValueError(f"{what} isn't an image number.")
     if not 1 <= i <= n_images:
         raise ValueError(

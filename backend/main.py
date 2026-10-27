@@ -12,7 +12,7 @@ import random
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,6 +25,7 @@ from . import flux_catalog as cat
 from . import flux_client as fx
 from . import ollama_client as oc
 from . import settings
+from . import system
 
 app = FastAPI(title="Vision Model Chat")
 
@@ -266,6 +267,36 @@ def ps(ollama_url: str = oc.DEFAULT_URL):
         return {"models": oc.running(ollama_url)}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+# --------------------------------------------------------------------------- #
+# Machine memory
+# --------------------------------------------------------------------------- #
+_GIB = 1e9 / 2**30  # ollama_client reports GB; system.py speaks GiB
+
+
+@app.get("/api/system/memory")
+def system_memory(ollama_url: str = oc.DEFAULT_URL):
+    """Live VRAM and RAM use, with what FLUX and the vision model each hold."""
+    try:
+        ollama = oc.loaded_vram_gb(ollama_url) * _GIB
+    except Exception:
+        ollama = None
+    return {"gpu": system.gpu(), "ram": system.ram(), "flux_gb": fx.held_gb(),
+            "ollama_gb": ollama}
+
+
+@app.get("/api/system/fit")
+def system_fit(model: str = "", flux: list[str] = Query(default=[]),
+               ollama_url: str = oc.DEFAULT_URL):
+    """Whether this chat model and these FLUX models are too much for this machine.
+
+    Agent mode can name several FLUX models; they load one at a time, so the
+    biggest is the one that counts.
+    """
+    sizes = [s for s in (fx.weights_gb(f) for f in flux) if s]
+    size = oc._model_size_gb(ollama_url, model) if model else None
+    return system.fit(max(sizes) if sizes else None, size and size * _GIB)
 
 
 # --------------------------------------------------------------------------- #

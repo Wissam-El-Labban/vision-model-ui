@@ -5,6 +5,7 @@ import Composer from "./components/Composer";
 import ImageBar from "./components/ImageBar";
 import ContextMeter from "./components/ContextMeter";
 import GenModelPill from "./components/GenModelPill";
+import ResourceMeter from "./components/ResourceMeter";
 // Lazily loaded: the studio pulls in three.js, which is bigger than the rest of
 // the app put together. Nobody who isn't posing a figure should pay for it.
 const PoseStudio = lazy(() => import("./components/PoseStudio"));
@@ -17,6 +18,7 @@ import {
   generateTitle,
   getAgentTools,
   getChat,
+  getFit,
   getFluxModels,
   getModels,
   getPreprocessors,
@@ -27,6 +29,7 @@ import {
   urlToDataUrl,
   type FluxModel,
   type FluxPreprocessor,
+  type SystemFit,
   type Usage,
 } from "./api";
 import { fileToDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
@@ -1328,6 +1331,57 @@ export default function App() {
   const effectiveEnhanceModel =
     enhancerModel || (models.vision.includes(model) ? model : models.vision[0] || "");
 
+  // Whether the models this mode would load are too much for the machine. Names
+  // resolve the same way the header pills do, so the warning is about what will
+  // actually run. A dismissal holds for that exact pick and that exact verdict.
+  const fitChat = agentMode ? agentModel : model;
+  const fitFlux = !fluxAvailable
+    ? []
+    : agentMode
+      ? agentModels(
+          agentTools.filter((t) => agentToolCatalog.find((c) => c.id === t)?.available ?? true),
+          gen.fluxModel,
+          fluxModels
+        ).map((m) => m.name)
+      : genMode
+        ? [resolveFlux(gen.fluxModel, fluxModels, roleFor(genOp))].filter(Boolean)
+        : [];
+  const fitKey = JSON.stringify([fitChat, fitFlux]);
+  const [fit, setFit] = useState<SystemFit | null>(null);
+  const [fitDismissed, setFitDismissed] = useState(() => {
+    try {
+      return localStorage.getItem("fitDismissed") || "";
+    } catch {
+      return "";
+    }
+  });
+  useEffect(() => {
+    const [chat, flux] = JSON.parse(fitKey) as [string, string[]];
+    if (!chat && !flux.length) {
+      setFit(null);
+      return;
+    }
+    let alive = true;
+    getFit(ollamaUrl, chat, flux)
+      .then((f) => alive && setFit(f))
+      .catch(() => alive && setFit(null));
+    return () => {
+      alive = false;
+    };
+  }, [fitKey, ollamaUrl]);
+  const fitShown =
+    fit && (fit.level === "red" || fit.level === "amber") ? fit : null;
+  const fitId = fitShown ? fitKey + fitShown.messages.join("|") : "";
+  const fitWarn = fit?.level === "red" ? fit.messages[0] : undefined;
+  function dismissFit() {
+    setFitDismissed(fitId);
+    try {
+      localStorage.setItem("fitDismissed", fitId);
+    } catch {
+      // a reload just shows it again
+    }
+  }
+
   /** Settings-level auto-enhance, run right before a generation goes out.
    *  Off: no-op. On/Verbose: rewrites with the picked vision model, reading
    *  whatever images the generation itself will condition on — `sendPrompt` is
@@ -1498,9 +1552,16 @@ export default function App() {
         <header className="topbar">
           <h1>👁️ Vision Model Chat</h1>
           <div className="topbar-actions">
+            <ResourceMeter ollamaUrl={ollamaUrl} />
             {usage && <ContextMeter used={usage.used} numCtx={usage.num_ctx} />}
             {fluxAvailable && !agentMode && (
-              <GenModelPill op={genOp} picked={gen.fluxModel} models={fluxModels} gen={gen} />
+              <GenModelPill
+                op={genOp}
+                picked={gen.fluxModel}
+                models={fluxModels}
+                gen={gen}
+                warn={genMode ? fitWarn : undefined}
+              />
             )}
             {/* Agent mode: every model its switched-on tools could load — image,
                 video, or both. Compact, since there can be several and the shared
@@ -1521,6 +1582,7 @@ export default function App() {
                   models={fluxModels}
                   gen={gen}
                   compact
+                  warn={fitWarn}
                 />
               ))}
             {model && <span className="model-pill">{model}</span>}
@@ -1532,6 +1594,19 @@ export default function App() {
           </div>
         </header>
         {error && <div className="banner error">{error}</div>}
+        {fitShown && fitId !== fitDismissed && (
+          <div className={`banner fit ${fitShown.level === "red" ? "error" : "warn"}`}>
+            <span>⚠</span>
+            <ul>
+              {fitShown.messages.map((m) => (
+                <li key={m}>{m}</li>
+              ))}
+            </ul>
+            <button onClick={dismissFit} title="Dismiss for this pick of models">
+              ×
+            </button>
+          </div>
+        )}
         <div className="workspace">
           <div className="work-row">
             <ImageBar
