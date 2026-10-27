@@ -502,13 +502,6 @@ def is_vision_model(url, model_name):
         return False
 
 
-# Agent mode drives tools instead of answering in prose, and below roughly this
-# size a model stops choosing tools reliably: it describes the tool it would call,
-# calls one with the arguments of another, or loops on the same call. Ollama draws
-# the same line for its own agent features. Sized in billions of parameters.
-AGENT_MIN_PARAMS = 7.0
-
-
 def _parse_params(text) -> float:
     """Ollama's `parameter_size` ("9.7B", "700M") as a number of billions."""
     match = re.search(r"([\d.]+)\s*([BbMm])", str(text or ""))
@@ -558,18 +551,17 @@ def model_details(url):
 def agent_eligible(detail) -> bool:
     """Whether a model can run agent mode.
 
-    Three requirements, all load-bearing. `tools` because function calling needs a
+    Two requirements, both load-bearing. `tools` because function calling needs a
     tool-aware chat template — without one the model answers in prose and never
     calls anything. `vision` because the agent is also the prompt enhancer, and it
     can't write "make his jacket red" into a specific instruction without seeing
-    the jacket. And the size floor above.
+    the jacket.
+
+    No size floor: small models pick tools less reliably, but whether that's good
+    enough is the user's call to make, not ours.
     """
     caps = set(detail.get("capabilities") or [])
-    return (
-        detail.get("params_b", 0.0) >= AGENT_MIN_PARAMS
-        and "tools" in caps
-        and "vision" in caps
-    )
+    return "tools" in caps and "vision" in caps
 
 
 def agent_shortfall(detail) -> str:
@@ -578,11 +570,6 @@ def agent_shortfall(detail) -> str:
     missing = [c for c in ("tools", "vision") if c not in caps]
     if missing:
         return f"{detail.get('name')} has no {' or '.join(missing)} support."
-    if detail.get("params_b", 0.0) < AGENT_MIN_PARAMS:
-        return (
-            f"{detail.get('name')} is {detail.get('parameter_size') or 'too small'}; "
-            f"agent mode needs at least {AGENT_MIN_PARAMS:g}B parameters."
-        )
     return ""
 
 

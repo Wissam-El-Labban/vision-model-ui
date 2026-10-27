@@ -113,7 +113,7 @@ export default function App() {
   const agentMode = composerMode === "agent";
 
   // Agent mode. `agentModel` is its own pick rather than the chat model's,
-  // because the two lists differ: agent mode needs tools + vision + 7B, and the
+  // because the two lists differ: agent mode needs tools + vision, and the
   // model someone chats with is often smaller than that. `agentTools` is the
   // Tools menu; its catalog comes from the backend so the menu can't offer
   // something the backend won't run.

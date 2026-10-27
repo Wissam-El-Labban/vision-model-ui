@@ -43,7 +43,7 @@ interface Props {
   model: string;
   setModel: (v: string) => void;
   /** Agent mode's own model pick. Separate from `model` because the eligible sets
-   *  differ — agent mode needs tools + vision + 7B, which most chat models lack. */
+   *  differ — agent mode needs tools + vision, which many chat models lack. */
   agentModel: string;
   setAgentModel: (v: string) => void;
   /** Every tool the agent could be given, served by the backend so the menu can't
@@ -160,8 +160,8 @@ export default function Composer({
   // Said the same way here and in the backend's 503, so the reason reads
   // identically wherever the user meets it.
   const noAgentModel =
-    "Agent mode needs an Ollama model with tool support, vision, and at least 7B " +
-    "parameters. None is installed — pull one from the sidebar's Model Manager.";
+    "Agent mode needs an Ollama model with tool support and vision. None is " +
+    "installed — pull one from the sidebar's Model Manager.";
 
   const hasSystem = systemPrompt.trim().length > 0 || !!systemImage;
   const patchGen = (p: Partial<typeof gen>) => setGen({ ...gen, ...p });
@@ -1001,7 +1001,7 @@ export default function Composer({
             agentMode
               ? agentModel
                 ? "Ask or describe… e.g. “make his jacket red”, or “what’s different about these two?”"
-                : "No model can run agent mode — install a 7B+ model with tools and vision…"
+                : "No model can run agent mode — install a model with tools and vision…"
               : genMode
               ? isAnimate
                 ? "Describe the motion… e.g. “she turns to look at the camera, slow push in”"
@@ -1076,7 +1076,7 @@ export default function Composer({
         ) : (
           <div
             className="model-control"
-            title={agentMode ? "Agent model (tools + vision, 7B+)" : "Vision model"}
+            title={agentMode ? "Agent model (tools + vision)" : "Vision model"}
           >
             <span aria-hidden>{agentMode ? "🧠" : "🤖"}</span>
             {modelChoices.length > 0 ? (

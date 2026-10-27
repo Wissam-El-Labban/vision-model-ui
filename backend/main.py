@@ -1015,8 +1015,8 @@ def generate(req: GenerateRequest):
 # Agent mode: the model picks the workflow and writes the prompt
 # --------------------------------------------------------------------------- #
 AGENT_NO_MODEL = (
-    "Agent mode needs an Ollama model with tool support, vision, and at least "
-    f"{oc.AGENT_MIN_PARAMS:g}B parameters. None is installed — pull one from the "
+    "Agent mode needs an Ollama model with tool support and vision. None is "
+    "installed — pull one from the "
     "sidebar's Model Manager."
 )
 
