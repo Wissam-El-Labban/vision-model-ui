@@ -29,6 +29,7 @@ import {
   urlToDataUrl,
   type FluxModel,
   type FluxPreprocessor,
+  type ModelDetail,
   type SystemFit,
   type Usage,
 } from "./api";
@@ -74,12 +75,13 @@ export default function App() {
     vision: string[];
     all: string[];
     agent: string[];
-  }>({ vision: [], all: [], agent: [] });
+    details: ModelDetail[];
+  }>({ vision: [], all: [], agent: [], details: [] });
   const [model, setModel] = useState(() => localStorage.getItem("model") || "");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [systemImage, setSystemImage] = useState<string | null>(null);
 
-  // Prompt enhancer settings (sidebar). `enhancerModel` "" = auto-detect, same
+  // Prompt enhancer settings (the composer's ✨ menu, Generate only). `enhancerModel` "" = auto-detect, same
   // fallback the manual ✨ button always used. `enhancerMode` gates whether that
   // rewrite also runs automatically before a generation, and whether it's shown.
   const [enhancerModel, setEnhancerModel] = useState(
@@ -89,7 +91,8 @@ export default function App() {
     () => (localStorage.getItem("enhancerMode") as EnhancerMode) || "off"
   );
 
-  // Unload the Ollama model before every image (the prompt enhancer menu). On by
+  // Unload the Ollama model before every image (the ⚙️ menu in Generate and
+  // Agent — both modes load FLUX beside an Ollama model). On by
   // default: keeping it loaded beside FLUX saves its reload, but on a tight GPU or
   // RAM budget the two evict each other and FLUX starts cold instead.
   const [unloadOllama, setUnloadOllama] = useState(
@@ -123,6 +126,16 @@ export default function App() {
   const [agentModel, setAgentModel] = useState(
     () => localStorage.getItem("agentModel") || ""
   );
+  // The agent's own image and video model picks ("" = each role's default),
+  // from its ⚙️ menu. Not Generate's `gen.fluxModel`: that follows whichever tab
+  // Generate was last on, so leaving it on 🎬 Animate sent the agent's image
+  // tools to their defaults without saying so.
+  const [agentImageModel, setAgentImageModel] = useState(
+    () => localStorage.getItem("agentImageModel") || ""
+  );
+  const [agentVideoModel, setAgentVideoModel] = useState(
+    () => localStorage.getItem("agentVideoModel") || ""
+  );
   const [agentToolCatalog, setAgentToolCatalog] = useState<AgentTool[]>([]);
   const [agentTools, setAgentTools] = useState<AgentToolId[]>(() => {
     const saved = localStorage.getItem("agentTools");
@@ -138,7 +151,7 @@ export default function App() {
   const [genOp, setGenOp] = useState<GenOp>("create");
   const [fluxAvailable, setFluxAvailable] = useState(false);
   // Prompt enhancement. `enhanceTemplate` is the independent photoreal-template
-  // toggle (sidebar-level, see `PromptEnhancer`). `enhancing` guards the brief
+  // toggle (in the composer's ✨ menu, see `PromptEnhancer`). `enhancing` guards the brief
   // async gap while the settings-level auto-enhancer runs before a generation
   // goes out. Verbose mode's rewrite isn't held in state here — it's attached
   // directly to the chat message it produced (`ChatMessage.enhancedPrompt`) by
@@ -356,6 +369,14 @@ export default function App() {
   }, [composerMode, fluxAvailable, models.agent]);
   useEffect(() => localStorage.setItem("agentModel", agentModel), [agentModel]);
   useEffect(
+    () => localStorage.setItem("agentImageModel", agentImageModel),
+    [agentImageModel]
+  );
+  useEffect(
+    () => localStorage.setItem("agentVideoModel", agentVideoModel),
+    [agentVideoModel]
+  );
+  useEffect(
     () => localStorage.setItem("agentTools", JSON.stringify(agentTools)),
     [agentTools]
   );
@@ -392,7 +413,7 @@ export default function App() {
       setError(null);
     } catch {
       setError(`Could not reach Ollama at ${ollamaUrl}`);
-      setModels({ vision: [], all: [], agent: [] });
+      setModels({ vision: [], all: [], agent: [], details: [] });
     }
   }, [ollamaUrl]);
 
@@ -1157,9 +1178,13 @@ export default function App() {
             attachment_hashes,
             model: agentModel,
             enabled_tools: agentTools,
-            flux_model: gen.fluxModel || null,
-            steps: gen.steps,
-            guidance: gen.guidance,
+            flux_model: agentImageModel || null,
+            video_model: agentVideoModel || null,
+            // Left to the backend: Generate's steps and guidance are tuned to
+            // Generate's model, and one agent turn can run an image model and
+            // a video model, which want different values.
+            steps: null,
+            guidance: null,
             width: gen.width,
             height: gen.height,
             seed: gen.seed ? parseInt(gen.seed, 10) : null,
@@ -1269,6 +1294,8 @@ export default function App() {
     [
       agentModel,
       agentTools,
+      agentImageModel,
+      agentVideoModel,
       gen,
       model,
       ollamaUrl,
@@ -1340,7 +1367,8 @@ export default function App() {
     : agentMode
       ? agentModels(
           agentTools.filter((t) => agentToolCatalog.find((c) => c.id === t)?.available ?? true),
-          gen.fluxModel,
+          agentImageModel,
+          agentVideoModel,
           fluxModels
         ).map((m) => m.name)
       : genMode
@@ -1534,15 +1562,6 @@ export default function App() {
         onNewChat={newChat}
         onOpenChat={openChat}
         onDeleteChat={removeChat}
-        enhancerModel={enhancerModel}
-        setEnhancerModel={setEnhancerModel}
-        effectiveEnhanceModel={effectiveEnhanceModel}
-        enhancerMode={enhancerMode}
-        setEnhancerMode={setEnhancerMode}
-        enhanceTemplate={enhanceTemplate}
-        setEnhanceTemplate={setEnhanceTemplate}
-        unloadOllama={unloadOllama}
-        setUnloadOllama={setUnloadOllama}
         thinking={thinking}
         setThinking={setThinking}
         thinkingDisplay={thinkingDisplay}
@@ -1572,7 +1591,8 @@ export default function App() {
                 agentTools.filter(
                   (t) => agentToolCatalog.find((c) => c.id === t)?.available ?? true
                 ),
-                gen.fluxModel,
+                agentImageModel,
+                agentVideoModel,
                 fluxModels
               ).map(({ op, name }) => (
                 <GenModelPill
@@ -1640,6 +1660,10 @@ export default function App() {
             setModel={setModel}
             agentModel={agentModel}
             setAgentModel={setAgentModel}
+            agentImageModel={agentImageModel}
+            setAgentImageModel={setAgentImageModel}
+            agentVideoModel={agentVideoModel}
+            setAgentVideoModel={setAgentVideoModel}
             agentToolCatalog={agentToolCatalog}
             agentTools={agentTools}
             setAgentTools={setAgentTools}
@@ -1655,6 +1679,15 @@ export default function App() {
             fluxModels={fluxModels}
             gen={gen}
             setGen={setGen}
+            enhancerModel={enhancerModel}
+            setEnhancerModel={setEnhancerModel}
+            effectiveEnhanceModel={effectiveEnhanceModel}
+            enhancerMode={enhancerMode}
+            setEnhancerMode={setEnhancerMode}
+            enhanceTemplate={enhanceTemplate}
+            setEnhanceTemplate={setEnhanceTemplate}
+            unloadOllama={unloadOllama}
+            setUnloadOllama={setUnloadOllama}
             enhancing={enhancing}
             thinking={thinking}
             pinnedCount={pinnedImages.length}

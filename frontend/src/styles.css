@@ -2428,6 +2428,12 @@ textarea {
   color: var(--red);
 }
 
+/* An agent model under 7B: allowed, but flagged on the picker too, so the
+   warning outlives the hint scrolling out of mind. */
+.model-control.warn select {
+  border-color: var(--red);
+}
+
 .btn.send.agent {
   background: var(--accent);
   border-color: var(--accent);

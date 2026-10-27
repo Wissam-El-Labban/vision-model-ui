@@ -190,7 +190,8 @@ class AgentRequest(BaseModel):
     attachment_hashes: list[str] = []
     model: str  # the Ollama model doing the deciding; must be agent-eligible
     enabled_tools: list[str] = agent.DEFAULT_TOOLS
-    flux_model: str | None = None
+    flux_model: str | None = None  # image tools' pick (None = each role's default)
+    video_model: str | None = None  # animate's pick, kept apart so one can't evict the other
     steps: int | None = None
     guidance: float | None = None
     width: int = 1024
@@ -1045,6 +1046,13 @@ def generate(req: GenerateRequest):
 # --------------------------------------------------------------------------- #
 # Agent mode: the model picks the workflow and writes the prompt
 # --------------------------------------------------------------------------- #
+def _agent_pick(req: "AgentRequest", role: str) -> str | None:
+    """The user's model pick for a role: the video pick for animate, the image
+    pick for everything else. One field for both meant picking Wan sent every
+    image tool back to its default, and the reverse."""
+    return req.video_model if role == fx.ROLE_ANIMATE else req.flux_model
+
+
 AGENT_NO_MODEL = (
     "Agent mode needs an Ollama model with tool support and vision. None is "
     "installed — pull one from the "
@@ -1193,8 +1201,8 @@ def agent_turn(req: AgentRequest):
                 unets = []
                 for _, _, spec in specs:
                     try:
-                        unets.append(fx.resolve_unet(
-                            req.flux_model, fx.role_for_mode(spec["mode"])))
+                        role = fx.role_for_mode(spec["mode"])
+                        unets.append(fx.resolve_unet(_agent_pick(req, role), role))
                     except Exception:
                         unets.append("")  # unknown: forces the safe unload
                 _free_gpu_for_flux(req.ollama_url, unets, emit,
@@ -1206,7 +1214,7 @@ def agent_turn(req: AgentRequest):
                           "args": call.get("arguments") or {}})
                     try:
                         role = fx.role_for_mode(spec["mode"])
-                        unet = fx.resolve_unet(req.flux_model, role)
+                        unet = fx.resolve_unet(_agent_pick(req, role), role)
                         label = fx.label(unet)
                         seed = (req.seed if req.seed is not None
                                 else random.randint(0, 2**31 - 1))

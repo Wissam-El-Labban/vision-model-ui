@@ -27,14 +27,15 @@ export interface ModelDetail {
   name: string;
   /** Ollama's own string, e.g. "9.7B" — shown to the user verbatim. */
   parameter_size: string;
-  /** That string as a number of billions, which is what the agent floor tests. */
+  /** That string as a number of billions — what the composer's small-agent-model
+   *  warning tests. 0 when Ollama didn't say. */
   params_b: number;
   /** e.g. ["vision", "completion", "tools", "thinking"]. */
   capabilities: string[];
 }
 
 /** Installed models grouped by what they can do. `agent` is the subset that can
- *  run agent mode (tools + vision + the size floor); `details` says why. */
+ *  run agent mode (tools + vision); `details` says why, and how big each is. */
 export async function getModels(
   ollamaUrl: string
 ): Promise<{
@@ -841,7 +842,9 @@ export interface AgentParams {
   attachment_hashes: string[];
   model: string;
   enabled_tools: AgentToolId[];
+  /** Image tools' model; animate uses `video_model`. null = each role's default. */
   flux_model?: string | null;
+  video_model?: string | null;
   steps?: number | null;
   guidance?: number | null;
   width: number;
