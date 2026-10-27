@@ -668,6 +668,8 @@ export async function enhancePrompt(params: {
   think?: boolean;
   /** Documents whose details (a character sheet, a style guide) may inform it. */
   doc_ids?: string[];
+  /** The chat's "use in prompts" opt-in; off, the backend ignores doc_ids. */
+  doc_prompts?: boolean;
 }): Promise<{ prompt: string; source: "vlm" | "template"; thinking: string }> {
   const res = await fetch("/api/flux/enhance", {
     method: "POST",
@@ -831,6 +833,8 @@ export interface AgentParams {
   think?: boolean;
   /** Documents to plan and answer from. */
   doc_ids?: string[];
+  /** Whether they may shape the prompts the agent writes; off, they only answer. */
+  doc_prompts?: boolean;
 }
 
 /** One tool the agent decided to call. `index` orders the steps within the turn
@@ -948,6 +952,7 @@ export async function putChat(
     pinned_hashes: string[];
     system_image_hash: string | null;
     doc_ids?: string[];
+    doc_prompts?: boolean;
   }
 ): Promise<void> {
   const res = await fetch(`/api/chats/${id}`, {

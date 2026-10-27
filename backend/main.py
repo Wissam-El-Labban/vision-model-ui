@@ -89,6 +89,7 @@ class ChatUpsert(BaseModel):
     pinned_hashes: list[str] = []
     system_image_hash: str | None = None
     doc_ids: list[str] | None = None  # None = leave the chat's selection alone
+    doc_prompts: bool | None = None  # likewise for the "use in prompts" switch
 
 
 class MessageAppend(BaseModel):
@@ -123,6 +124,7 @@ class EnhanceRequest(BaseModel):
     contact: bool = False
     think: bool = False  # the composer's 💭 toggle, shared with chat
     doc_ids: list[str] = []  # documents whose details may inform the rewrite
+    doc_prompts: bool = False  # the chat's opt-in; off means doc_ids are ignored
 
 
 class GenerateRequest(BaseModel):
@@ -209,6 +211,10 @@ class AgentRequest(BaseModel):
     chat_id: str | None = None
     think: bool = False  # the sidebar's 💭 toggle, shared with chat and enhance
     doc_ids: list[str] = []  # documents to plan and answer from
+    # Whether those documents may shape the prompts the agent writes for its tools.
+    # Off, they still answer questions — the agent is just told to keep them out
+    # of tool arguments.
+    doc_prompts: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -385,7 +391,7 @@ def flux_enhance(req: EnhanceRequest):
                 pass
         think = req.think and oc.supports_thinking(req.ollama_url, req.model)
         reference = ""
-        if req.doc_ids:
+        if req.doc_ids and req.doc_prompts:
             # Fails soft like the rest of this endpoint: a rewrite without the
             # documents beats no rewrite.
             try:
@@ -1121,8 +1127,9 @@ def agent_turn(req: AgentRequest):
                 if req.doc_ids:
                     emit({"type": "status", "message": "Searching your documents…"})
                     try:
-                        found = _with_documents(history, req.doc_ids, req.prompt,
-                                                req.ollama_url)
+                        found = _with_documents(
+                            history, req.doc_ids, req.prompt, req.ollama_url,
+                            "answer" if req.doc_prompts else "answer_only")
                         emit({"type": "sources", "sources": found})
                     except Exception as exc:
                         emit({"type": "docs_error", "message":
@@ -1419,6 +1426,7 @@ def put_chat(chat_id: str, req: ChatUpsert):
         req.pinned_hashes,
         req.system_image_hash,
         req.doc_ids,
+        req.doc_prompts,
     )
     return {"ok": True}
 

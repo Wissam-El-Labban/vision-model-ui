@@ -525,6 +525,8 @@ def format_context(hits: list[dict], purpose: str = "answer") -> str:
 
     "answer" asks for citations; "reference" (the prompt enhancer) asks for the
     details to be used silently, since an image prompt has no place for "[2]".
+    "answer_only" is "answer" for an agent whose chat hasn't opted documents into
+    prompts: cite them in words, keep them out of image and video tool arguments.
     """
     if not hits:
         return ""
@@ -540,6 +542,11 @@ def format_context(hits: list[dict], purpose: str = "answer") -> str:
             "they're relevant, and cite the ones you use as [1], [2] and so on. If "
             "they don't contain the answer, say so instead of guessing."
         )
+        if purpose == "answer_only":
+            intro += (
+                " Use them only to answer in words: never put details from them "
+                "into an image or video tool argument."
+            )
     body = "\n\n".join(f"[{i}] {_cite(h)}\n{h['text']}" for i, h in enumerate(hits, 1))
     return f"{CONTEXT_OPEN}\n{intro}\n\n{body}\n{CONTEXT_CLOSE}"
 

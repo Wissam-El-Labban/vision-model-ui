@@ -140,12 +140,16 @@ With documents ticked, the chat answers from them:
   best-matching excerpts, which it cites as `[1]`, `[2]`. A collapsible **📄 Sources** footer under
   the answer shows which document and page each one came from. Documents small enough to fit are
   sent whole, so *"summarise this"* works.
-- **Agent** reads them before it plans, so *"draw the captain from my character sheet"* writes its
-  image prompt from the sheet.
-- **The prompt enhancer** (Generate mode, enhancer on) uses them as reference notes — a style
-  guide, a character or a setting — without citing them in the prompt.
+- **🎨 Use in image & video prompts** is a per-chat switch in the Documents panel, **off by
+  default**, and shown as a *🎨 Prompts: On/Off* tag at the front of the document pills (click it
+  to flip). Off, documents only answer questions. On:
+  - **Agent** may write its image and video prompts from them, so *"draw the captain from my
+    character sheet"* uses the sheet. (Off, it still reads them to answer, but is told to keep
+    them out of tool prompts.)
+  - **The prompt enhancer** (Generate mode, enhancer on — image and video alike) uses them as
+    reference notes — a style guide, a character or a setting — without citing them.
 - **Image and video generation themselves** can't read documents: FLUX and Wan only take a prompt
-  and images. Documents reach them through the enhancer or the agent.
+  and images. Documents reach them through the enhancer or the agent, with the switch on.
 
 **Scanned PDFs.** Pages with no text layer are rendered and transcribed by your vision model
 (the chat model), so scans index too, only slower. With no vision model available those pages

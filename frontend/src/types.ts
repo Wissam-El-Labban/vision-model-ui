@@ -239,5 +239,7 @@ export interface ChatDetail {
   pinned: string[];
   /** Ids of the documents this chat answers from. */
   documents?: string[];
+  /** Whether those documents may shape image/video prompts (off by default). */
+  doc_prompts?: boolean;
   messages: StoredMessage[];
 }

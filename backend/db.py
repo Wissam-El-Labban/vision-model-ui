@@ -50,7 +50,10 @@ CREATE TABLE IF NOT EXISTS chats (
     system_prompt     TEXT NOT NULL DEFAULT '',
     system_image_hash TEXT,
     created_at        INTEGER NOT NULL,
-    updated_at        INTEGER NOT NULL
+    updated_at        INTEGER NOT NULL,
+    -- Whether the chat's documents may shape image/video prompts (enhancer and
+    -- agent), not just answers. Opt-in: off until the user turns it on.
+    doc_prompts       INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS messages (
     id         TEXT PRIMARY KEY,
@@ -123,6 +126,10 @@ def init_db() -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
         if "sources_json" not in cols:
             conn.execute("ALTER TABLE messages ADD COLUMN sources_json TEXT")
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(chats)")}
+        if "doc_prompts" not in cols:
+            conn.execute(
+                "ALTER TABLE chats ADD COLUMN doc_prompts INTEGER NOT NULL DEFAULT 0")
         # A server that died mid-index left the row saying so forever.
         conn.execute(
             "UPDATE documents SET status = 'error', "
@@ -323,6 +330,7 @@ def get_chat(chat_id: str) -> dict | None:
             "system_image": sys_img,
             "pinned": pinned,
             "documents": _chat_doc_ids(conn, chat_id),
+            "doc_prompts": bool(c["doc_prompts"]),
             "messages": messages,
         }
 
@@ -334,12 +342,13 @@ def upsert_chat(
     pinned_hashes: list[str],
     system_image_hash: str | None,
     doc_ids: list[str] | None = None,
+    doc_prompts: bool | None = None,
 ) -> None:
     """Create the chat row if new, else update its metadata + pinned images.
 
     Title is never overwritten here (it's set once by the LLM titler). `doc_ids`
     replaces the chat's document selection; None leaves it as it is, so a caller
-    that doesn't know about documents can't clear them.
+    that doesn't know about documents can't clear them. `doc_prompts` likewise.
     """
     now = _now()
     with _connect() as conn:
@@ -367,6 +376,9 @@ def upsert_chat(
             "INSERT INTO chat_pinned_images(chat_id, image_hash, ordinal) VALUES (?, ?, ?)",
             [(chat_id, h, i) for i, h in enumerate(pinned_hashes)],
         )
+        if doc_prompts is not None:
+            conn.execute("UPDATE chats SET doc_prompts = ? WHERE id = ?",
+                         (int(doc_prompts), chat_id))
         if doc_ids is not None:
             conn.execute("DELETE FROM chat_documents WHERE chat_id = ?", (chat_id,))
             # INSERT ... SELECT so an id that's since been deleted is skipped rather

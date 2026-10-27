@@ -8,6 +8,9 @@ interface Props {
   /** Ids ticked for the current chat. */
   activeIds: string[];
   setActiveIds: (ids: string[]) => void;
+  /** Whether this chat's documents may also shape image/video prompts. */
+  docPrompts: boolean;
+  setDocPrompts: (v: boolean) => void;
   ollamaUrl: string;
   /** The vision model scanned pages are read with ("" = none installed). */
   ocrModel: string;
@@ -37,6 +40,8 @@ export default function Documents({
   docs,
   activeIds,
   setActiveIds,
+  docPrompts,
+  setDocPrompts,
   ollamaUrl,
   ocrModel,
   open,
@@ -97,7 +102,9 @@ export default function Documents({
         </span>
         <span className="section-head-right">
           <span className={`section-status ${activeCount ? "on" : ""}`}>
-            {activeCount ? `${activeCount} in chat` : "None"}
+            {activeCount
+              ? `${activeCount} in chat${docPrompts ? " · 🎨 prompts" : ""}`
+              : "None"}
           </span>
           <span className="chev">{open ? "▾" : "▸"}</span>
         </span>
@@ -193,8 +200,26 @@ export default function Documents({
           {library.documents.length === 0 && uploads.length === 0 && (
             <p className="hint muted small">
               Nothing here yet. Tick a document to have this chat answer from it — in
-              Analyze, Agent mode, and the prompt enhancer.
+              Analyze and Agent mode.
             </p>
+          )}
+
+          {library.documents.length > 0 && (
+            <label className="doc-prompts-switch">
+              <input
+                type="checkbox"
+                checked={docPrompts}
+                onChange={(e) => setDocPrompts(e.target.checked)}
+              />
+              <span>
+                🎨 Use in image &amp; video prompts
+                <span className="muted small">
+                  The prompt enhancer and Agent mode work details from the ticked
+                  documents (a character sheet, a style guide) into what they generate.
+                  Off, documents only answer questions.
+                </span>
+              </span>
+            </label>
           )}
 
           {library.documents.map((d) => {
@@ -202,8 +227,12 @@ export default function Documents({
             const stale =
               d.status === "ready" && !!d.embed_model && d.embed_model !== library.embed_model;
             const usable = d.status === "ready" && !progress;
+            const inUse = usable && activeIds.includes(d.id);
             return (
-              <div key={d.id} className={`doc-row ${d.status === "error" ? "error" : ""}`}>
+              <div
+                key={d.id}
+                className={`doc-row ${d.status === "error" ? "error" : ""} ${inUse ? "in-use" : ""}`}
+              >
                 <input
                   type="checkbox"
                   checked={activeIds.includes(d.id)}
@@ -231,6 +260,18 @@ export default function Documents({
                     <span className="doc-meta">Indexing…</span>
                   ) : (
                     <span className="doc-meta">
+                      <span
+                        className={`doc-use ${inUse ? "on" : ""}`}
+                        title={
+                          !inUse
+                            ? "Not used in this chat — tick it to answer from it."
+                            : docPrompts
+                              ? "Used in this chat: answers questions and shapes image & video prompts."
+                              : "Used in this chat to answer questions. Image & video prompts ignore it."
+                        }
+                      >
+                        {!inUse ? "Not in use" : docPrompts ? "In use · 🎨 prompts" : "In use · answers"}
+                      </span>
                       {docMeta(d)}
                       {stale && (
                         <span

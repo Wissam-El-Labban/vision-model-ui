@@ -257,6 +257,10 @@ export default function App() {
   // Which library documents this chat answers from. Saved with the chat (like its
   // pinned images), so each chat keeps its own selection.
   const [activeDocIds, setActiveDocIds] = useState<string[]>([]);
+  // Whether those documents may also shape image/video prompts — the enhancer's
+  // rewrite and the agent's tool prompts. Opt-in per chat: a manual or a paper
+  // has nothing to add to a picture, and would only leak into it.
+  const [docPrompts, setDocPrompts] = useState(false);
   const [docsOpen, setDocsOpen] = useState(false);
   // data-URL -> content hash, so re-sent pinned images aren't re-uploaded.
   const hashCache = useRef<Map<string, string>>(new Map());
@@ -443,6 +447,7 @@ export default function App() {
           pinned_hashes,
           system_image_hash,
           doc_ids: activeDocIds,
+          doc_prompts: docPrompts,
         });
       } catch {
         /* non-fatal */
@@ -457,6 +462,7 @@ export default function App() {
     pinnedImages,
     systemImage,
     activeDocIds,
+    docPrompts,
     ensureHashes,
   ]);
 
@@ -467,6 +473,7 @@ export default function App() {
     setMessages([]);
     setPinnedImages([]);
     setActiveDocIds([]);
+    setDocPrompts(false);
     setSystemPrompt("");
     setSystemImage(null);
     setUsage(null);
@@ -533,6 +540,7 @@ export default function App() {
       setChatExists(true);
       setPinnedImages(pinned);
       setActiveDocIds(d.documents ?? []);
+      setDocPrompts(!!d.doc_prompts);
       setSystemImage(sysImg);
       setSystemPrompt(d.system_prompt || "");
       if (d.model) setModel(d.model);
@@ -706,6 +714,7 @@ export default function App() {
             pinned_hashes,
             system_image_hash,
             doc_ids: activeDocIds,
+            doc_prompts: docPrompts,
           });
           setChatExists(true);
 
@@ -746,6 +755,7 @@ export default function App() {
       usage,
       currentChatId,
       activeDocIds,
+      docPrompts,
       readyDocIds,
       ensureHashes,
       forOllama,
@@ -897,6 +907,7 @@ export default function App() {
               ? (await ensureHashes([systemImage]))[0]
               : null,
             doc_ids: activeDocIds,
+            doc_prompts: docPrompts,
           });
           setChatExists(true);
         } catch (err) {
@@ -1071,6 +1082,7 @@ export default function App() {
       messages,
       currentChatId,
       activeDocIds,
+      docPrompts,
       ensureHashes,
       refreshChats,
     ]
@@ -1181,6 +1193,7 @@ export default function App() {
               ? (await ensureHashes([systemImage]))[0]
               : null,
             doc_ids: activeDocIds,
+            doc_prompts: docPrompts,
           });
           setChatExists(true);
         } catch (err) {
@@ -1205,6 +1218,7 @@ export default function App() {
             chat_id: chatId,
             think: thinking,
             doc_ids: readyDocIds,
+            doc_prompts: docPrompts,
           },
           {
             onToken: (token) => {
@@ -1321,6 +1335,7 @@ export default function App() {
       usage,
       currentChatId,
       activeDocIds,
+      docPrompts,
       readyDocIds,
       ensureHashes,
       forOllama,
@@ -1412,7 +1427,8 @@ export default function App() {
         image_hashes: await ensureHashes(seen),
         ollama_url: ollamaUrl,
         think: thinking,
-        doc_ids: readyDocIds,
+        doc_ids: docPrompts ? readyDocIds : [],
+        doc_prompts: docPrompts,
         // Only meaningful for a studio pose; the backend ignores it elsewhere.
         ...(op === "control" && studioMaps.length > 0 && studioMeta ? studioMeta : {}),
       });
@@ -1546,6 +1562,8 @@ export default function App() {
         docs={docs}
         activeDocIds={activeDocIds}
         setActiveDocIds={setActiveDocIds}
+        docPrompts={docPrompts}
+        setDocPrompts={setDocPrompts}
         docsOpen={docsOpen}
         setDocsOpen={setDocsOpen}
         ocrModel={ocrModel}
@@ -1580,13 +1598,16 @@ export default function App() {
                 />
               ))}
             {/* Documents reach the model in Analyze and Agent, and in Generate
-                only through the enhancer — so the pill shows exactly when they
-                will be read. */}
+                only through the enhancer — and there only with the chat's
+                "Prompts" tag on, which the pills lead with so it's always visible
+                whether they will be read. */}
             {readyDocIds.length > 0 && (!genMode || enhancerMode !== "off") && (
               <DocPills
                 docs={docs.library.documents.filter((d) => readyDocIds.includes(d.id))}
                 onOpen={() => setDocsOpen(true)}
                 onRemove={(id) => setActiveDocIds((prev) => prev.filter((x) => x !== id))}
+                prompts={docPrompts}
+                onTogglePrompts={() => setDocPrompts((v) => !v)}
               />
             )}
             {model && <span className="model-pill">{model}</span>}

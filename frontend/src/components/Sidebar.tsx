@@ -36,6 +36,8 @@ interface Props {
   docs: DocumentsApi;
   activeDocIds: string[];
   setActiveDocIds: (ids: string[]) => void;
+  docPrompts: boolean;
+  setDocPrompts: (v: boolean) => void;
   docsOpen: boolean;
   setDocsOpen: (v: boolean) => void;
   ocrModel: string;
@@ -68,6 +70,8 @@ export default function Sidebar(props: Props) {
     docs,
     activeDocIds,
     setActiveDocIds,
+    docPrompts,
+    setDocPrompts,
     docsOpen,
     setDocsOpen,
     ocrModel,
@@ -105,6 +109,8 @@ export default function Sidebar(props: Props) {
         docs={docs}
         activeIds={activeDocIds}
         setActiveIds={setActiveDocIds}
+        docPrompts={docPrompts}
+        setDocPrompts={setDocPrompts}
         ollamaUrl={ollamaUrl}
         ocrModel={ocrModel}
         open={docsOpen}

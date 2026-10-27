@@ -2542,6 +2542,26 @@ textarea {
   color: var(--amber);
 }
 
+/* Whether this chat is using the document, on its own card. */
+.doc-row.in-use .doc-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.doc-use {
+  margin-right: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+}
+
+.doc-use.on {
+  border: 1px solid var(--amber);
+  background: rgba(210, 153, 34, 0.18);
+  color: var(--text);
+}
+
 .btn.doc-btn {
   flex: none;
   padding: 2px 7px;
@@ -2639,6 +2659,43 @@ textarea {
 button.docs-pill.docs-pill-more {
   padding: 4px 12px;
   cursor: pointer;
+}
+
+/* Whether the documents also shape image/video prompts. Muted while off (the
+   default), filled amber when on, so the state reads at a glance. */
+button.docs-pill.docs-pill-prompts {
+  padding: 4px 12px;
+  cursor: pointer;
+  color: var(--muted);
+  background: none;
+  border-style: dashed;
+}
+
+button.docs-pill.docs-pill-prompts.on {
+  color: var(--text);
+  background: rgba(210, 153, 34, 0.25);
+  border-style: solid;
+  border-color: var(--amber);
+}
+
+/* The Documents panel's "use in image & video prompts" switch. */
+.doc-prompts-switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 0 8px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.doc-prompts-switch input {
+  margin-top: 3px;
+  flex: none;
+}
+
+.doc-prompts-switch .small {
+  display: block;
+  margin-top: 2px;
 }
 
 .sources {
