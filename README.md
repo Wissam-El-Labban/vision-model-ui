@@ -15,6 +15,8 @@ Built with a **React (Vite + TypeScript)** frontend and a **FastAPI** backend th
   backend, so reloading or switching chats only stops *watching* it. Come back and it picks up
   live where it has got to. A pulsing dot in the chat list marks the chats with a turn running.
   **Stop** cancels the job for real, and a failed or stopped turn offers **↻ Retry**.
+  Model downloads (Ollama and image models, text encoders, LoRAs, preprocessors), document
+  indexing and the Ollama upgrade run the same way: reload mid-download and the progress comes back.
 - **System prompt** — optional custom system prompt, with an optional persistent context image sent
   with every message.
 - **Model management** — list installed vision models, download new ones (with live progress),

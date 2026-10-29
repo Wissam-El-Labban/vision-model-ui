@@ -1,5 +1,13 @@
-import { useState } from "react";
-import { deleteModel, getRunning, pullModel, unloadAll } from "../api";
+import { useEffect, useState } from "react";
+import {
+  attachTask,
+  deleteModel,
+  getRunning,
+  listTasks,
+  ollamaPullEvents,
+  pullModel,
+  unloadAll,
+} from "../api";
 import type { RunningModel } from "../types";
 
 interface Props {
@@ -17,22 +25,47 @@ export default function ModelManager({ ollamaUrl, allModels, onChanged }: Props)
   const [running, setRunning] = useState<RunningModel[] | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
-  async function doPull() {
-    if (!pullName.trim()) return;
+  /** Follow a pull to its end, whether it started here or before a reload. */
+  async function followPull(run: (onStatus: (s: string, pct: number | null) => void) => Promise<void>) {
     setPullStatus("starting…");
     setPullPct(null);
     try {
-      await pullModel(ollamaUrl, pullName.trim(), (status, pct) => {
+      await run((status, pct) => {
         setPullStatus(status);
         setPullPct(pct);
       });
       setPullStatus("✓ downloaded");
       setPullName("");
       onChanged();
-    } catch {
-      setPullStatus("✗ download failed");
+    } catch (e) {
+      setPullStatus(`✗ ${(e as Error).message || "download failed"}`);
     }
+    setPullPct(null);
   }
+
+  async function doPull() {
+    if (!pullName.trim()) return;
+    await followPull((onStatus) => pullModel(ollamaUrl, pullName.trim(), onStatus));
+  }
+
+  // The pull runs on the backend, so it outlives a reload. Show it again.
+  useEffect(() => {
+    let cancelled = false;
+    listTasks()
+      .then((tasks) => {
+        const task = tasks.find((t) => t.kind === "ollama-pull");
+        if (!task || cancelled) return;
+        setOpen(true);
+        setPullName(task.meta.name ?? "");
+        followPull((onStatus) => attachTask(task.id, ollamaPullEvents(onStatus)));
+      })
+      .catch(() => {
+        /* nothing to resume */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function doRemove() {
     if (!removeName) return;

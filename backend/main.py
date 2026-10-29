@@ -7,7 +7,6 @@ import base64
 import json
 import logging
 import os
-import queue
 import random
 import threading
 from pathlib import Path
@@ -379,9 +378,19 @@ def chat(req: ChatRequest):
 
 @app.post("/api/models/pull")
 def pull_model(req: PullRequest):
-    return StreamingResponse(
-        oc.pull(req.ollama_url, req.name), media_type="application/x-ndjson"
-    )
+    """Pull an Ollama model as a task. Ollama abandons a pull whose client goes
+    away, so the backend is the client: a reload no longer cancels the download."""
+    def work(emit):
+        for line in oc.pull(req.ollama_url, req.name):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("error"):
+                raise RuntimeError(event["error"])
+            emit(event)
+
+    return _task("ollama-pull", f"ollama-pull:{req.name}", {"name": req.name}, work)
 
 
 @app.delete("/api/models/{name:path}")
@@ -467,32 +476,23 @@ def generate_unload():
 # --------------------------------------------------------------------------- #
 # Image models: install a catalog bundle, add a UNet from any HF repo, remove either
 # --------------------------------------------------------------------------- #
-def _ndjson(work) -> StreamingResponse:
-    """Run `work(emit)` on a thread and stream whatever it emits as NDJSON.
+def _task(kind: str, key: str, meta: dict, work) -> StreamingResponse:
+    """Run `work(emit)` as a background task and stream whatever it emits as NDJSON.
 
     Downloads are tens of GB, so the browser gets progress as it happens rather than
-    one response an hour later.
+    one response an hour later. The task belongs to the backend, not the request: a
+    reload drops the stream, and the page that comes back finds the task in
+    `/api/tasks` and follows it again from the start. Asking for a task already
+    running under the same `key` joins that one instead of starting a second.
     """
-    def gen():
-        events: queue.Queue = queue.Queue()
+    job = jobs.running_with_key(key)
+    if job is None:
+        def run(job):
+            work(job.emit)
+            job.emit({"type": "done"})
 
-        def worker():
-            try:
-                work(events.put)
-                events.put({"type": "done"})
-            except Exception as exc:
-                events.put({"type": "error", "message": str(exc)})
-            finally:
-                events.put(None)
-
-        threading.Thread(target=worker, daemon=True).start()
-        while True:
-            item = events.get()
-            if item is None:
-                break
-            yield json.dumps(item) + "\n"
-
-    return StreamingResponse(gen(), media_type="application/x-ndjson")
+        job = jobs.start(None, kind, run, key=key, meta=meta)
+    return _job_stream(job)
 
 
 @app.get("/api/flux/models")
@@ -581,7 +581,7 @@ def flux_install(req: FluxInstallRequest):
             on_progress=lambda p: emit({"type": "progress", **p}),
         )
 
-    return _ndjson(work)
+    return _task("flux", f"flux-install:{req.id}", {"id": req.id}, work)
 
 
 @app.delete("/api/flux/bundles/{bundle_id}")
@@ -612,7 +612,7 @@ def flux_pull(req: FluxPullRequest):
             on_progress=lambda p: emit({"type": "progress", **p}),
         )
 
-    return _ndjson(work)
+    return _task("flux", f"flux-pull:{req.repo}", {"repo": req.repo}, work)
 
 
 @app.delete("/api/flux/models/{name}")
@@ -652,7 +652,7 @@ def flux_text_encoder_pull(req: TextEncoderPullRequest):
             on_progress=lambda p: emit({"type": "progress", **p}),
         )
 
-    return _ndjson(work)
+    return _task("flux", f"te-pull:{req.repo}", {"repo": req.repo}, work)
 
 
 class TextEncoderSelectRequest(BaseModel):
@@ -716,7 +716,8 @@ def flux_lora_pull(req: LoraPullRequest):
             on_progress=lambda p: emit({"type": "progress", **p}),
         )
 
-    return _ndjson(work)
+    return _task("flux", f"lora-pull:{req.repo}",
+                 {"repo": req.repo, "source": req.source}, work)
 
 
 class LoraPick(BaseModel):
@@ -779,7 +780,7 @@ def flux_preprocessor_install(req: PreprocessorRequest):
             on_progress=lambda p: emit({"type": "progress", **p}),
         )
 
-    return _ndjson(work)
+    return _task("flux", f"prep-install:{req.id}", {"id": req.id}, work)
 
 
 @app.delete("/api/flux/preprocessors/{pid}")
@@ -1500,20 +1501,32 @@ def _doc_out(d: dict) -> dict:
     return {**d, "disk_bytes": rag.disk_bytes(d["id"])}
 
 
-def _index_stream(doc_id: str, kind: str, ollama_url: str, ocr_model: str):
+# One document is indexed at a time: each embeds on the same Ollama, and running them
+# side by side only makes every one of them slower to become usable. The queue is
+# here rather than in the page, so files waiting their turn survive a reload.
+_index_lock = threading.Lock()
+
+
+def _index_stream(doc_id: str, kind: str, ollama_url: str, ocr_model: str,
+                  name: str = ""):
     """Build (or rebuild) one document's index, streaming progress as NDJSON."""
     def work(emit):
         db.update_document(doc_id, status="indexing", error=None)
+        if not _index_lock.acquire(blocking=False):
+            emit({"type": "status", "message": "Waiting for the document before it…"})
+            _index_lock.acquire()
         try:
             facts = rag.build_index(doc_id, kind, ollama_url, _embed_model(),
                                     ocr_model or None, emit)
         except Exception as exc:
             db.update_document(doc_id, status="error", error=str(exc))
             raise
+        finally:
+            _index_lock.release()
         db.update_document(doc_id, status="ready", error=None, **facts)
         emit({"type": "doc", "doc": _doc_out(db.get_document(doc_id))})
 
-    return _ndjson(work)
+    return _task("doc", f"doc-index:{doc_id}", {"doc_id": doc_id, "name": name}, work)
 
 
 def _known_doc(doc_id: str) -> dict:
@@ -1564,15 +1577,18 @@ def upload_doc(
     sha = rag.sha256(data)
     existing = db.document_by_hash(sha)
     if existing and existing["status"] == "ready":
-        return _ndjson(lambda emit: emit(
-            {"type": "doc", "doc": _doc_out(existing), "duplicate": True}))
+        return StreamingResponse(
+            iter([json.dumps({"type": "doc", "doc": _doc_out(existing),
+                              "duplicate": True}) + "\n",
+                  json.dumps({"type": "done"}) + "\n"]),
+            media_type="application/x-ndjson")
     if existing:
         doc_id = existing["id"]
         db.update_document(doc_id, name=name)
     else:
         doc_id = db.create_document(name, sha, kind, len(data))
     rag.store_source(doc_id, name, data)
-    return _index_stream(doc_id, kind, ollama_url, ocr_model)
+    return _index_stream(doc_id, kind, ollama_url, ocr_model, name)
 
 
 @app.post("/api/docs/{doc_id}/reindex")
@@ -1580,7 +1596,7 @@ def reindex_doc(doc_id: str, req: ReindexRequest):
     """Rebuild a document's index — after changing the embedding model, or to retry
     one that failed (with a vision model picked this time, for a scanned PDF)."""
     d = _known_doc(doc_id)
-    return _index_stream(doc_id, d["kind"], req.ollama_url, req.ocr_model)
+    return _index_stream(doc_id, d["kind"], req.ollama_url, req.ocr_model, d["name"])
 
 
 @app.delete("/api/docs/{doc_id}")
@@ -1608,14 +1624,22 @@ def ollama_version(ollama_url: str = oc.DEFAULT_URL):
     return oc.version_info(ollama_url)
 
 
+class UpgradeRequest(BaseModel):
+    # Only when `/api/ollama/version` says one is needed. Handed to sudo for this
+    # one upgrade (see `oc.upgrade`) and kept nowhere.
+    password: str | None = None
+
+
 @app.post("/api/ollama/upgrade")
-def ollama_upgrade(ollama_url: str = oc.DEFAULT_URL):
+def ollama_upgrade(req: UpgradeRequest | None = None, ollama_url: str = oc.DEFAULT_URL):
     if not oc.is_local(ollama_url):
         raise HTTPException(
             status_code=400,
             detail="Upgrade is only available for a local Ollama. Upgrade on the host instead.",
         )
-    return StreamingResponse(oc.upgrade(), media_type="text/plain; charset=utf-8")
+    password = req.password if req else None
+    return _task("ollama-upgrade", "ollama-upgrade", {},
+                 lambda emit: oc.upgrade(ollama_url, emit, password))
 
 
 # --------------------------------------------------------------------------- #
@@ -1718,6 +1742,13 @@ def _cancel(job: "jobs.Job") -> None:
     job.cancel.set()
     if job.kind != "chat" and job.thread_id is not None:
         fx.stop(job.thread_id)
+
+
+@app.get("/api/tasks")
+def list_tasks():
+    """Running background tasks (downloads, indexing, the upgrade), so a page that
+    comes back can find what it started and follow it again."""
+    return {"tasks": [j.summary() for j in jobs.tasks()]}
 
 
 @app.get("/api/jobs")

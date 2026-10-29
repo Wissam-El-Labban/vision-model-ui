@@ -9,8 +9,12 @@ other call keeps it off.
 """
 import json
 import logging
+import os
 import re
+import shutil
 import subprocess
+import tempfile
+import time
 from urllib.parse import urlparse
 
 import requests
@@ -768,30 +772,132 @@ def version_info(url):
         "latest": latest,
         "update_available": update_available,
         "is_local": is_local(url),
+        "needs_password": bool(update_available and is_local(url) and needs_password()),
     }
 
 
-def upgrade():
-    """Run the official Ollama installer, streaming combined output lines.
+INSTALL_SH = "https://ollama.com/install.sh"
+MANUAL_UPGRADE = f"curl -fsSL {INSTALL_SH} | sh"
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\(B")
 
-    Linux only. The installer may need sudo; if it fails, the caller surfaces
-    the error and the manual fallback command.
+
+def needs_password() -> bool:
+    """Whether running the installer means asking for a sudo password."""
+    if os.geteuid() == 0:
+        return False
+    try:
+        return subprocess.run(["sudo", "-n", "true"], stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=10).returncode != 0
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+
+
+def _relay_output(stream, emit) -> None:
+    """Emit a process's output as lines, splitting on carriage returns too.
+
+    The installer's download is a curl progress bar that redraws itself with "\r"
+    and never ends a line until it's finished — read by line, the log looked frozen
+    on "Downloading…" for the whole download. A "\r" segment is sent as a
+    replacement for the line before it, and at most a few times a second.
     """
-    process = subprocess.Popen(
-        ["bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    for line in iter(process.stdout.readline, ""):
-        yield line
-    process.stdout.close()
-    code = process.wait()
-    if code != 0:
-        yield (
-            f"\n✗ Upgrade failed (exit {code}). Run manually:\n"
-            "curl -fsSL https://ollama.com/install.sh | sh\n"
+    buf = b""
+    last_replace = 0.0
+    while True:
+        chunk = stream.read1(4096) if hasattr(stream, "read1") else stream.read(4096)
+        if not chunk:
+            break
+        buf += chunk
+        while True:
+            cut = min((i for i in (buf.find(b"\n"), buf.find(b"\r")) if i >= 0),
+                      default=-1)
+            if cut < 0:
+                break
+            piece, sep, buf = buf[:cut], buf[cut:cut + 1], buf[cut + 1:]
+            text = _ANSI.sub("", piece.decode("utf-8", "replace")).rstrip()
+            if sep == b"\n":
+                if text:
+                    emit({"type": "line", "text": text})
+            elif text and time.time() - last_replace >= 0.25:
+                last_replace = time.time()
+                emit({"type": "line", "text": text, "replace": True})
+    text = _ANSI.sub("", buf.decode("utf-8", "replace")).rstrip()
+    if text:
+        emit({"type": "line", "text": text})
+
+
+def upgrade(url, emit, password: str | None = None) -> None:
+    """Run the official Ollama installer, emitting its output as it goes.
+
+    Linux only, and the installer needs root: it replaces /usr/local/bin/ollama and
+    restarts the systemd service. It calls plain `sudo`, which used to prompt for a
+    password on the terminal the backend was started from — invisible to the page,
+    so the upgrade sat on its last line forever. Now nothing can prompt on a tty
+    (no stdin, its own session), and when a password is needed it comes from the
+    page: a `sudo` on PATH that adds `-A`, and an askpass helper that answers with
+    the password from this process tree's environment. It is checked before the
+    installer starts, and never written to disk.
+    """
+    tmp = tempfile.mkdtemp(prefix="ollama-upgrade-")
+    env = {**os.environ}
+    try:
+        if needs_password():
+            if not password:
+                raise RuntimeError("Your sudo password is needed to upgrade Ollama.")
+            real_sudo = shutil.which("sudo")
+            if not real_sudo:
+                raise RuntimeError("sudo isn't installed, so the upgrade can't get root.")
+            wrapper = os.path.join(tmp, "sudo")
+            askpass = os.path.join(tmp, "askpass")
+            with open(wrapper, "w") as f:
+                f.write(f'#!/bin/sh\nexec {real_sudo} -A "$@"\n')
+            with open(askpass, "w") as f:
+                f.write('#!/bin/sh\nprintf \'%s\\n\' "$OLLAMA_UPGRADE_PW"\n')
+            os.chmod(wrapper, 0o700)
+            os.chmod(askpass, 0o700)
+            env.update(PATH=f"{tmp}:{env.get('PATH', '')}", SUDO_ASKPASS=askpass,
+                       OLLAMA_UPGRADE_PW=password)
+            emit({"type": "line", "text": "Checking your sudo password…"})
+            try:
+                check = subprocess.run(
+                    [real_sudo, "-A", "-v"], env=env, stdin=subprocess.DEVNULL,
+                    capture_output=True, timeout=30, start_new_session=True)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("sudo didn't answer within 30 seconds.")
+            if check.returncode != 0:
+                raise RuntimeError("That password was rejected by sudo.")
+
+        emit({"type": "line", "text": f"Downloading the installer from {INSTALL_SH}…"})
+        script = os.path.join(tmp, "install.sh")
+        try:
+            response = requests.get(INSTALL_SH, timeout=30)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Couldn't download the installer: {exc}")
+        with open(script, "wb") as f:
+            f.write(response.content)
+
+        process = subprocess.Popen(
+            ["sh", script], env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
-    else:
-        yield "\n✓ Ollama upgraded. Restart the Ollama service to use the new version.\n"
+        _relay_output(process.stdout, emit)
+        code = process.wait()
+        if code != 0:
+            raise RuntimeError(
+                f"The installer failed (exit {code}). To run it yourself: {MANUAL_UPGRADE}")
+
+        # The installer restarts the service itself; wait for it to answer again.
+        emit({"type": "line", "text": "Waiting for Ollama to come back…"})
+        for _ in range(30):
+            version = installed_version(url)
+            if version:
+                emit({"type": "line", "text": f"✓ Ollama {version} is running."})
+                emit({"type": "upgraded", "version": version})
+                return
+            time.sleep(1)
+        emit({"type": "line", "text":
+              "✓ Installed, but Ollama isn't answering yet. Restart the Ollama "
+              "service if it doesn't come back on its own."})
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

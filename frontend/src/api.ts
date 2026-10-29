@@ -10,6 +10,7 @@ import type {
   JobStatus,
   RunningModel,
   Source,
+  TaskInfo,
   VersionInfo,
 } from "./types";
 
@@ -183,6 +184,67 @@ async function readLines(
   if (buffer.trim()) onLine(buffer);
 }
 
+// --------------------------------------------------------------------------- #
+// Background tasks: downloads, indexing and the Ollama upgrade run on the backend,
+// so a reload loses only the page's view of them, which `attachTask` gets back.
+// --------------------------------------------------------------------------- #
+export type TaskEvent = { type?: string; [k: string]: unknown };
+
+/** Read a task's NDJSON stream into `onEvent`. Throws the backend's reason for a
+ *  refused request, and the task's own error once its stream ends. */
+async function followTask(
+  res: Response,
+  onEvent: (ev: TaskEvent) => void,
+  what: string
+): Promise<void> {
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? `${what}: ${res.status}`);
+  }
+  let failure: string | null = null;
+  await readLines(res, (line) => {
+    let ev: TaskEvent;
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      return; // keepalives
+    }
+    if (ev.type === "job" || ev.type === "end") return;
+    if (ev.type === "error") failure = ev.message as string;
+    else onEvent(ev);
+  });
+  if (failure) throw new Error(failure);
+}
+
+/** Tasks running on the backend right now. */
+export async function listTasks(): Promise<TaskInfo[]> {
+  const res = await fetch("/api/tasks");
+  if (!res.ok) throw new Error(`tasks: ${res.status}`);
+  return (await res.json()).tasks ?? [];
+}
+
+/** Follow a task that was started before this page loaded: its events so far,
+ *  then live until it ends. Read with the same reader that started it. */
+export async function attachTask(
+  id: string,
+  onEvent: (ev: TaskEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const res = await fetch(`/api/jobs/${id}/events`, { signal });
+  await followTask(res, onEvent, "task");
+}
+
+/** An image-engine download's events: status lines and byte progress. */
+export function fluxTaskEvents(
+  onStatus: (message: string) => void,
+  onProgress: (p: FluxProgress) => void
+): (ev: TaskEvent) => void {
+  return (ev) => {
+    if (ev.type === "status") onStatus(ev.message as string);
+    else if (ev.type === "progress") onProgress(ev as unknown as FluxProgress);
+  };
+}
+
 export interface Usage {
   used: number;
   prompt_tokens: number;
@@ -267,17 +329,19 @@ export async function pullModel(
       body: JSON.stringify({ name, ollama_url: ollamaUrl }),
     }
   );
-  if (!res.ok) throw new Error(`pull: ${res.status}`);
-  await readLines(res, (line) => {
-    try {
-      const d = JSON.parse(line);
-      const pct =
-        d.total && d.completed ? d.completed / d.total : null;
-      onStatus(d.status ?? "", pct);
-    } catch {
-      /* ignore non-json keepalives */
-    }
-  });
+  await followTask(res, ollamaPullEvents(onStatus), "pull");
+}
+
+/** An Ollama pull's events: its own status lines, with bytes as a fraction. */
+export function ollamaPullEvents(
+  onStatus: (status: string, pct: number | null) => void
+): (ev: TaskEvent) => void {
+  return (d) => {
+    if (d.type) return; // the task's own `done`
+    const total = d.total as number | undefined;
+    const completed = d.completed as number | undefined;
+    onStatus((d.status as string) ?? "", total && completed ? completed / total : null);
+  };
 }
 
 // --------------------------------------------------------------------------- #
@@ -368,22 +432,7 @@ export async function installFluxBundle(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id }),
   });
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(detail.detail ?? `flux install: ${res.status}`);
-  }
-  let failure: string | null = null;
-  await readLines(res, (line) => {
-    try {
-      const ev = JSON.parse(line);
-      if (ev.type === "status") onStatus(ev.message as string);
-      else if (ev.type === "progress") onProgress(ev as FluxProgress);
-      else if (ev.type === "error") failure = ev.message as string;
-    } catch {
-      /* ignore keepalives */
-    }
-  });
-  if (failure) throw new Error(failure);
+  await followTask(res, fluxTaskEvents(onStatus, onProgress), "flux install");
 }
 
 export async function deleteFluxBundle(id: string): Promise<void> {
@@ -434,22 +483,7 @@ export async function pullTextEncoder(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ repo }),
   });
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(detail.detail ?? `text encoder pull: ${res.status}`);
-  }
-  let failure: string | null = null;
-  await readLines(res, (line) => {
-    try {
-      const ev = JSON.parse(line);
-      if (ev.type === "status") onStatus(ev.message as string);
-      else if (ev.type === "progress") onProgress(ev as FluxProgress);
-      else if (ev.type === "error") failure = ev.message as string;
-    } catch {
-      /* ignore keepalives */
-    }
-  });
-  if (failure) throw new Error(failure);
+  await followTask(res, fluxTaskEvents(onStatus, onProgress), "text encoder pull");
 }
 
 /** Point a model at a different encoder. An empty name restores its default. */
@@ -533,22 +567,7 @@ export async function pullLora(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ repo, source }),
   });
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(detail.detail ?? `lora pull: ${res.status}`);
-  }
-  let failure: string | null = null;
-  await readLines(res, (line) => {
-    try {
-      const ev = JSON.parse(line);
-      if (ev.type === "status") onStatus(ev.message as string);
-      else if (ev.type === "progress") onProgress(ev as FluxProgress);
-      else if (ev.type === "error") failure = ev.message as string;
-    } catch {
-      /* ignore keepalives */
-    }
-  });
-  if (failure) throw new Error(failure);
+  await followTask(res, fluxTaskEvents(onStatus, onProgress), "lora pull");
 }
 
 /** Replace the whole set of LoRAs attached to one transformer. An empty array
@@ -611,22 +630,7 @@ export async function installPreprocessor(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id }),
   });
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(detail.detail ?? `preprocessor install: ${res.status}`);
-  }
-  let failure: string | null = null;
-  await readLines(res, (line) => {
-    try {
-      const ev = JSON.parse(line);
-      if (ev.type === "status") onStatus(ev.message as string);
-      else if (ev.type === "progress") onProgress(ev as FluxProgress);
-      else if (ev.type === "error") failure = ev.message as string;
-    } catch {
-      /* ignore keepalives */
-    }
-  });
-  if (failure) throw new Error(failure);
+  await followTask(res, fluxTaskEvents(onStatus, onProgress), "preprocessor install");
 }
 
 export async function deletePreprocessor(id: string): Promise<void> {
@@ -700,22 +704,7 @@ export async function pullFluxModel(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ repo }),
   });
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(detail.detail ?? `flux pull: ${res.status}`);
-  }
-  let failure: string | null = null;
-  await readLines(res, (line) => {
-    try {
-      const ev = JSON.parse(line);
-      if (ev.type === "status") onStatus(ev.message as string);
-      else if (ev.type === "progress") onProgress(ev as FluxProgress);
-      else if (ev.type === "error") failure = ev.message as string;
-    } catch {
-      /* ignore keepalives */
-    }
-  });
-  if (failure) throw new Error(failure);
+  await followTask(res, fluxTaskEvents(onStatus, onProgress), "flux pull");
 }
 
 export async function deleteFluxModel(name: string): Promise<void> {
@@ -1144,19 +1133,34 @@ export async function urlToDataUrl(url: string): Promise<string> {
   });
 }
 
+/** Run the Ollama installer. `password` is the user's sudo password, sent only
+ *  when `VersionInfo.needs_password` says one is needed. */
 export async function upgradeOllama(
   ollamaUrl: string,
-  onLine: (line: string) => void
+  password: string | null,
+  onEvent: (ev: TaskEvent) => void
 ): Promise<void> {
   const res = await fetch(
     `/api/ollama/upgrade?ollama_url=${encodeURIComponent(ollamaUrl)}`,
-    { method: "POST" }
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    }
   );
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(detail.detail ?? `upgrade: ${res.status}`);
-  }
-  await readLines(res, onLine);
+  await followTask(res, onEvent, "upgrade");
+}
+
+/** The installer's output. A `replace` line redraws the one before it — the
+ *  download's progress bar — and `onUpgraded` names the version now running. */
+export function upgradeEvents(
+  onLine: (text: string, replace: boolean) => void,
+  onUpgraded: (version: string) => void
+): (ev: TaskEvent) => void {
+  return (ev) => {
+    if (ev.type === "line") onLine(ev.text as string, !!ev.replace);
+    else if (ev.type === "upgraded") onUpgraded(ev.version as string);
+  };
 }
 
 // --------------------------------------------------------------------------- #
@@ -1189,19 +1193,20 @@ async function readIndexStream(
   res: Response,
   onProgress: (p: DocProgress) => void
 ): Promise<{ doc: DocInfo; duplicate: boolean }> {
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(detail.detail ?? `upload: ${res.status}`);
-  }
-  let out: { doc: DocInfo; duplicate: boolean } | null = null;
-  let error: string | null = null;
-  await readLines(res, (line) => {
-    let ev: { type: string; [k: string]: unknown };
-    try {
-      ev = JSON.parse(line);
-    } catch {
-      return;
-    }
+  const found: { out: { doc: DocInfo; duplicate: boolean } | null } = { out: null };
+  await followTask(res, docIndexEvents(onProgress, (doc, duplicate) => {
+    found.out = { doc, duplicate };
+  }), "upload");
+  if (!found.out) throw new Error("Indexing ended without a result.");
+  return found.out;
+}
+
+/** A document's indexing events: progress, then the finished document. */
+export function docIndexEvents(
+  onProgress: (p: DocProgress) => void,
+  onDoc: (doc: DocInfo, duplicate: boolean) => void
+): (ev: TaskEvent) => void {
+  return (ev) => {
     if (ev.type === "status" || ev.type === "progress") {
       const total = (ev.total as number) || 0;
       onProgress({
@@ -1209,14 +1214,9 @@ async function readIndexStream(
         frac: total ? ((ev.done as number) ?? 0) / total : null,
       });
     } else if (ev.type === "doc") {
-      out = { doc: ev.doc as DocInfo, duplicate: !!ev.duplicate };
-    } else if (ev.type === "error") {
-      error = ev.message as string;
+      onDoc(ev.doc as DocInfo, !!ev.duplicate);
     }
-  });
-  if (error) throw new Error(error);
-  if (!out) throw new Error("Indexing ended without a result.");
-  return out;
+  };
 }
 
 /** Add a PDF or text file to the library and index it. `ocrModel` is the vision

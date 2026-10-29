@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import {
+  attachTask,
   clearHfToken,
   deleteFluxBundle,
   deleteFluxModel,
   deleteLora,
   deletePreprocessor,
   deleteTextEncoder,
+  fluxTaskEvents,
   getCivitaiToken,
   getFluxCatalog,
   getLoras,
@@ -13,6 +15,7 @@ import {
   getTextEncoders,
   installFluxBundle,
   installPreprocessor,
+  listTasks,
   pullFluxModel,
   pullLora,
   pullTextEncoder,
@@ -28,9 +31,24 @@ import type {
   FluxModel,
   FluxPreprocessor,
   FluxTextEncoders,
+  FluxProgress,
   HfTokenSource,
   LoraSource,
 } from "../api";
+import type { TaskInfo } from "../types";
+
+/** Run a download: start it, or — given the task a reload left running — follow
+ *  that one with the same handlers, so the panel shows it exactly as before. */
+function download(
+  resume: TaskInfo | undefined,
+  start: (onStatus: (m: string) => void, onProgress: (p: FluxProgress) => void) => Promise<void>,
+  onStatus: (m: string) => void,
+  onProgress: (p: FluxProgress) => void
+): Promise<void> {
+  return resume
+    ? attachTask(resume.id, fluxTaskEvents(onStatus, onProgress))
+    : start(onStatus, onProgress);
+}
 
 interface Props {
   models: FluxModel[]; // installed transformers, incl. user-added ones
@@ -99,37 +117,40 @@ export default function ImageModels({ models, onChanged }: Props) {
     if (open) void refresh().then(() => onChanged());
   }, [open]);
 
-  // A download keeps running on the server even if this page reloads mid-install. Adopt
-  // it: show its progress, and poll until it finishes (the NDJSON stream that was
-  // feeding us died with the old page, so polling is the only way back in).
-  const serverInstall = cat?.installing ?? null;
+  // Downloads run on the backend, so they keep going through a reload. Pick each one
+  // back up: the same busy marker and status line as when it was started here.
   useEffect(() => {
-    if (!open || !serverInstall) return;
-    setBusy(serverInstall.id);
-    setPct(serverInstall.pct);
-    setStatus(
-      `[${serverInstall.index}/${serverInstall.count}] ${serverInstall.file} — ` +
-        `${(serverInstall.done / 1e9).toFixed(1)}/${(serverInstall.total / 1e9).toFixed(1)} GB`
-    );
-    const t = setInterval(async () => {
-      const c = await refresh();
-      if (c && !c.installing) {
-        setBusy(null);
-        setPct(null);
-        setStatus("✓ installed");
-        onChanged();
-      }
-    }, 2000);
-    return () => clearInterval(t);
-  }, [open, serverInstall?.id, serverInstall?.pct]);
+    let cancelled = false;
+    listTasks()
+      .then((tasks) => {
+        if (cancelled) return;
+        const mine = tasks.filter((t) => t.kind === "flux");
+        if (mine.length) setOpen(true);
+        for (const t of mine) {
+          const [kind] = t.key.split(":");
+          if (kind === "flux-install") install(t.meta.id, t);
+          else if (kind === "flux-pull") addRepo(t.meta.repo, t);
+          else if (kind === "te-pull") addTextEncoder(t.meta.repo, t);
+          else if (kind === "lora-pull") addLora(t.meta.repo, t.meta.source as LoraSource, t);
+          else if (kind === "prep-install") installPrep(t.meta.id, t);
+        }
+      })
+      .catch(() => {
+        /* nothing to resume */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  async function install(id: string) {
+  async function install(id: string, resume?: TaskInfo) {
     setBusy(id);
     setStatus("starting…");
     setPct(null);
     try {
-      await installFluxBundle(
-        id,
+      await download(
+        resume,
+        (s, p) => installFluxBundle(id, s, p),
         (m) => setStatus(m),
         (p) => {
           setStatus(`${p.file} — ${(p.done / 1e9).toFixed(1)}/${(p.total / 1e9).toFixed(1)} GB`);
@@ -178,14 +199,16 @@ export default function ImageModels({ models, onChanged }: Props) {
     await refresh();
   }
 
-  async function addRepo() {
-    if (!repo.trim()) return;
+  async function addRepo(name = repo.trim(), resume?: TaskInfo) {
+    if (!name) return;
+    setRepo(name);
     setBusy("repo");
     setStatus("starting…");
     setPct(null);
     try {
-      await pullFluxModel(
-        repo.trim(),
+      await download(
+        resume,
+        (s, p) => pullFluxModel(name, s, p),
         (m) => setStatus(m),
         (p) => {
           setStatus(`${p.file} — ${(p.done / 1e9).toFixed(1)}/${(p.total / 1e9).toFixed(1)} GB`);
@@ -213,14 +236,16 @@ export default function ImageModels({ models, onChanged }: Props) {
     }
   }
 
-  async function addTextEncoder() {
-    if (!teRepo.trim()) return;
+  async function addTextEncoder(name = teRepo.trim(), resume?: TaskInfo) {
+    if (!name) return;
+    setTeRepo(name);
     setBusy("te");
     setTeStatus("starting…");
     setPct(null);
     try {
-      await pullTextEncoder(
-        teRepo.trim(),
+      await download(
+        resume,
+        (s, p) => pullTextEncoder(name, s, p),
         (m) => setTeStatus(m),
         (p) => {
           const step = p.count ? `[${p.index}/${p.count}] ` : "";
@@ -284,15 +309,21 @@ export default function ImageModels({ models, onChanged }: Props) {
     }
   }
 
-  async function addLora() {
-    if (!loraRepo.trim()) return;
+  async function addLora(
+    name = loraRepo.trim(),
+    source: LoraSource = loraSource,
+    resume?: TaskInfo
+  ) {
+    if (!name) return;
+    setLoraRepo(name);
+    setLoraSource(source);
     setBusy("lora");
     setLoraStatus("starting…");
     setPct(null);
     try {
-      await pullLora(
-        loraRepo.trim(),
-        loraSource,
+      await download(
+        resume,
+        (s, p) => pullLora(name, source, s, p),
         (m) => setLoraStatus(m),
         (p) => {
           // MB, not GB like the encoders — a LoRA that reported "0.0/0.2 GB" the
@@ -390,26 +421,39 @@ export default function ImageModels({ models, onChanged }: Props) {
 
   async function togglePreprocessor(p: FluxPreprocessor) {
     if (!p.id) return; // built-in: nothing to install or remove
+    if (!p.installed) return installPrep(p.id);
     setBusy(`prep:${p.id}`);
-    setPrepStatus(p.installed ? "removing…" : "starting…");
+    setPrepStatus("removing…");
     setPct(null);
     try {
-      if (p.installed) {
-        await deletePreprocessor(p.id);
-        setPrepStatus("✓ removed");
-      } else {
-        await installPreprocessor(
-          p.id,
-          (m) => setPrepStatus(m),
-          (pr) => {
-            setPrepStatus(
-              `${pr.file} — ${(pr.done / 1e9).toFixed(1)}/${(pr.total / 1e9).toFixed(1)} GB`
-            );
-            setPct(pr.pct);
-          }
-        );
-        setPrepStatus("✓ installed");
-      }
+      await deletePreprocessor(p.id);
+      setPrepStatus("✓ removed");
+      await refresh();
+      onChanged();
+    } catch (e) {
+      setPrepStatus(`✗ ${(e as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function installPrep(id: string, resume?: TaskInfo) {
+    setBusy(`prep:${id}`);
+    setPrepStatus("starting…");
+    setPct(null);
+    try {
+      await download(
+        resume,
+        (s, pr) => installPreprocessor(id, s, pr),
+        (m) => setPrepStatus(m),
+        (pr) => {
+          setPrepStatus(
+            `${pr.file} — ${(pr.done / 1e9).toFixed(1)}/${(pr.total / 1e9).toFixed(1)} GB`
+          );
+          setPct(pr.pct);
+        }
+      );
+      setPrepStatus("✓ installed");
       setPct(null);
       await refresh();
       onChanged();
@@ -547,7 +591,7 @@ export default function ImageModels({ models, onChanged }: Props) {
                   onChange={(e) => setRepo(e.target.value)}
                   placeholder="owner/model (HuggingFace)"
                 />
-                <button className="btn" onClick={addRepo} disabled={busy !== null}>
+                <button className="btn" onClick={() => addRepo()} disabled={busy !== null}>
                   {busy === "repo" ? "Adding…" : "⬇ Add"}
                 </button>
               </div>
@@ -632,7 +676,7 @@ export default function ImageModels({ models, onChanged }: Props) {
                       onChange={(e) => setTeRepo(e.target.value)}
                       placeholder="owner/repo (HuggingFace)"
                     />
-                    <button className="btn" onClick={addTextEncoder} disabled={busy !== null}>
+                    <button className="btn" onClick={() => addTextEncoder()} disabled={busy !== null}>
                       {busy === "te" ? "Adding…" : "⬇ Add"}
                     </button>
                   </div>
@@ -823,7 +867,7 @@ export default function ImageModels({ models, onChanged }: Props) {
                       }
                       onKeyDown={(e) => e.key === "Enter" && addLora()}
                     />
-                    <button className="btn" onClick={addLora} disabled={busy !== null}>
+                    <button className="btn" onClick={() => addLora()} disabled={busy !== null}>
                       {busy === "lora" ? "Adding…" : "⬇ Add"}
                     </button>
                   </div>

@@ -31,10 +31,16 @@ class Busy(Exception):
 
 
 class Job:
-    def __init__(self, chat_id: str | None, kind: str, rerun):
+    def __init__(self, chat_id: str | None, kind: str, rerun, key: str | None = None,
+                 meta: dict | None = None):
         self.id = uuid.uuid4().hex
         self.chat_id = chat_id
         self.kind = kind
+        # A task (no chat) is known by what it works on — "ollama-pull:<name>" — so
+        # asking for the same download twice joins the first rather than racing it.
+        # `meta` is what a page needs to rebuild its progress UI after a reload.
+        self.key = key
+        self.meta = meta or {}
         # Starts the same work again as a new job, for Retry. Holds the original
         # request, which is why the log is memory-only.
         self.rerun = rerun
@@ -69,6 +75,7 @@ class Job:
 
     def summary(self) -> dict:
         return {"id": self.id, "chat_id": self.chat_id, "kind": self.kind,
+                "key": self.key, "meta": self.meta,
                 "status": self.status, "error": self.error,
                 "started_at": self.started_at}
 
@@ -100,7 +107,8 @@ def _prune() -> None:
         del _jobs[jid]
 
 
-def start(chat_id: str | None, kind: str, work, rerun) -> Job:
+def start(chat_id: str | None, kind: str, work, rerun=None,
+          key: str | None = None, meta: dict | None = None) -> Job:
     """Run `work(job)` on a thread and return the job at once.
 
     `work` emits through `job.emit`, calls `job.check()` wherever stopping is safe,
@@ -108,7 +116,7 @@ def start(chat_id: str | None, kind: str, work, rerun) -> Job:
     anything raised after a cancel) is "cancelled", another exception is "error",
     a run with a failed tool step is "partial", anything else "done".
     """
-    job = Job(chat_id, kind, rerun)
+    job = Job(chat_id, kind, rerun, key, meta)
     with _lock:
         _prune()
         if chat_id and any(j.running and j.chat_id == chat_id for j in _jobs.values()):
@@ -145,6 +153,17 @@ def latest_for_chat(chat_id: str) -> Job | None:
     with _lock:
         mine = [j for j in _jobs.values() if j.chat_id == chat_id and not j.deleted]
     return max(mine, key=lambda j: j.started_at) if mine else None
+
+
+def running_with_key(key: str) -> Job | None:
+    with _lock:
+        return next((j for j in _jobs.values() if j.running and j.key == key), None)
+
+
+def tasks() -> list[Job]:
+    """Running jobs that belong to no chat: downloads, indexing, the upgrade."""
+    with _lock:
+        return [j for j in _jobs.values() if j.running and j.chat_id is None]
 
 
 def running() -> list[Job]:

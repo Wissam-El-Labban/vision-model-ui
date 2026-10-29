@@ -204,6 +204,20 @@ export interface VersionInfo {
   latest: string | null;
   update_available: boolean;
   is_local: boolean;
+  /** Whether upgrading needs the user's sudo password. */
+  needs_password?: boolean;
+}
+
+/** A background task (a download, an index, the upgrade) running on the backend.
+ *  `key` says what it works on — "ollama-pull:<name>", "flux-install:<id>" — and
+ *  `meta` carries what a page needs to show its progress again after a reload. */
+export interface TaskInfo {
+  id: string;
+  kind: string;
+  key: string;
+  meta: Record<string, string>;
+  status: string;
+  started_at: number;
 }
 
 export interface RunningModel {

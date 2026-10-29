@@ -283,6 +283,17 @@ textarea {
   margin: 8px 0 0;
 }
 
+.upgrade-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.upgrade-error {
+  color: var(--red, #f85149);
+  margin-top: 6px;
+}
+
 /* ---------- Main / topbar ---------- */
 .main {
   flex: 1;
