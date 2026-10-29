@@ -467,20 +467,21 @@ def _server_up() -> bool:
         return False
 
 
-# Whether `ensure_server` is booting the sidecar right now — the meter's "starting".
-_booting = False
+# When `ensure_server` started booting the sidecar, while it is — the meter's
+# "starting". None otherwise.
+_booting_since: float | None = None
 
 
 def ensure_server(on_status=None) -> None:
     """Start the ComfyUI sidecar if it isn't already listening, and wait for it."""
-    global _booting
+    global _booting_since
     if _server_up():
         return
-    _booting = True
+    _booting_since = time.time()
     try:
         _start_server(on_status)
     finally:
-        _booting = False
+        _booting_since = None
 
 
 def _start_server(on_status) -> None:
@@ -578,10 +579,12 @@ def resident_models() -> dict | None:
     nothing yet (see `_residency_known`), and the list is then empty rather than a
     guess. Transformers carry their bundle's label, family and `kind` (image or
     video). Each file's `state` is loading / active (used by the run in progress) /
-    loaded. `status` is "starting" while the sidecar boots.
+    loaded, and `since` is when a loading file's loader began (epoch seconds).
+    `status` is "starting" while the sidecar boots, since `since`.
     """
-    if _booting:
-        return {"status": "starting", "known": True, "models": []}
+    booting = _booting_since
+    if booting is not None:
+        return {"status": "starting", "since": booting, "known": True, "models": []}
     if not _server_up():
         return None
     # The run in progress, if any, is fresher than `_resident`: a loader it has
@@ -600,7 +603,7 @@ def resident_models() -> dict | None:
                 elif nid in live.done or v in states:
                     roles[v], states[v] = k, "active"
     if not roles and not _residency_known:
-        return {"status": "ready", "known": False, "models": []}
+        return {"status": "ready", "since": None, "known": False, "models": []}
     models = []
     for f, key in roles.items():
         role = _ROLE_OF_INPUT.get(key, "model")
@@ -614,10 +617,11 @@ def resident_models() -> dict | None:
             "kind": None if family is None else "video" if family == cat.FAMILY_WAN else "image",
             "video": family == cat.FAMILY_WAN,
             "state": states[f],
+            "since": live.started if states[f] == "loading" else None,
         })
     rank = {r: i for i, r in enumerate(_ROLE_ORDER)}
     models.sort(key=lambda m: (rank.get(m["role"], len(rank)), m["label"]))
-    return {"status": "ready", "known": True, "models": models}
+    return {"status": "ready", "since": None, "known": True, "models": models}
 
 
 def weights_gb(unet: str) -> float | None:

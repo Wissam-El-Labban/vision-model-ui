@@ -71,9 +71,36 @@ function Placement({ pct }: { pct: number | null }) {
   );
 }
 
+/** "8s", "1m 05s" since `since` (epoch seconds); "" without one. The meter polls
+ *  every second while anything loads, and each poll re-renders this. */
+function elapsed(since: number | null | undefined): string {
+  if (since == null) return "";
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - since));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+}
+
+/** A small rotating ring — something is loading. Ollama can't say how far a load
+ *  has got, so this shows that it's happening, with the elapsed time beside it,
+ *  rather than a percentage it would have to invent. */
+function Spinner() {
+  return <span className="res-spin" aria-hidden="true" />;
+}
+
+/** "loading · 8s" with a spinner, for a row, a part, or the engine starting. */
+function Loading({ label, since }: { label: string; since: number | null | undefined }) {
+  const t = elapsed(since);
+  return (
+    <span className="res-badge loading" role="status">
+      <Spinner />
+      {label}
+      {t && <span className="res-elapsed">· {t}</span>}
+    </span>
+  );
+}
+
 /** What a row is doing, when that's more than sitting loaded. */
-function StateBadge({ state }: { state: LoadState }) {
-  if (state === "loading") return <span className="res-badge loading">⏳ loading…</span>;
+function StateBadge({ state, since }: { state: LoadState; since: number | null }) {
+  if (state === "loading") return <Loading label="loading" since={since} />;
   if (state === "unloading") return <span className="res-badge unloading">unloading…</span>;
   if (state === "active") return <span className="res-badge active">in use</span>;
   return null;
@@ -93,7 +120,7 @@ function OllamaRow({ m }: { m: LoadedOllamaModel }) {
       <div className="res-model-head">
         <span className="res-model-name">{m.name}</span>
         <span className="res-badges">
-          <StateBadge state={m.state} />
+          <StateBadge state={m.state} since={m.since} />
           {m.state !== "loading" && <Placement pct={m.gpu_pct} />}
         </span>
       </div>
@@ -110,7 +137,7 @@ function GenRow({ m }: { m: LoadedGenModel }) {
           {m.video ? "🎬" : "🎨"} {m.label}
         </span>
         <span className="res-badges">
-          <StateBadge state={m.state} />
+          <StateBadge state={m.state} since={m.since} />
         </span>
       </div>
       <div className="res-model-meta">{m.file}</div>
@@ -121,8 +148,10 @@ function GenRow({ m }: { m: LoadedGenModel }) {
 function PartRow({ m }: { m: LoadedGenModel }) {
   return (
     <div className="res-part">
-      <span className="res-part-role">{m.role}</span> {m.file}
-      {m.state === "loading" && <span className="res-part-state"> ⏳</span>}
+      <span className="res-part-name">
+        <span className="res-part-role">{m.role}</span> {m.file}
+      </span>
+      {m.state === "loading" && <Loading label="loading" since={m.since} />}
     </div>
   );
 }
@@ -205,7 +234,7 @@ function LoadedPanel({ mem, other }: { mem: SystemMemory; other: number }) {
           <div className="res-empty">Engine not running</div>
         ) : gen.status === "starting" ? (
           <div className="res-empty">
-            <span className="res-badge loading">⏳ starting…</span>
+            <Loading label="starting" since={gen.since} />
           </div>
         ) : !gen.known ? (
           <div className="res-empty">
@@ -249,20 +278,31 @@ function LoadedPanel({ mem, other }: { mem: SystemMemory; other: number }) {
 }
 
 /** The line under the bars: what's changing right now, else how many are loaded. */
-function summary(mem: SystemMemory): { text: string; tone: "" | "warn" | "busy" } {
+function summary(mem: SystemMemory): { text: string; tone: "" | "warn" | "busy"; spin?: boolean } {
   const ollama = mem.ollama_models ?? [];
   const gen = mem.gen_models?.models ?? [];
   const named = (ms: { name?: string; label?: string }[]) =>
     ms.length === 1 ? (ms[0].name ?? ms[0].label?.split(" — ")[0]) : `${ms.length} models`;
+  // Timed from the load that has been going longest.
+  const took = (ms: { since: number | null }[]) => {
+    const first = Math.min(...ms.map((m) => m.since ?? Infinity));
+    return Number.isFinite(first) ? ` · ${elapsed(first)}` : "";
+  };
   const loading = [
     ...ollama.filter((m) => m.state === "loading"),
     ...gen.filter((m) => m.state === "loading" && m.role === "transformer"),
   ];
-  if (loading.length) return { text: `⏳ loading ${named(loading)}…`, tone: "busy" };
-  if (gen.some((m) => m.state === "loading"))
-    return { text: "⏳ loading image/video components…", tone: "busy" };
+  if (loading.length)
+    return { text: `loading ${named(loading)}${took(loading)}`, tone: "busy", spin: true };
+  const parts = gen.filter((m) => m.state === "loading");
+  if (parts.length)
+    return { text: `loading image/video components${took(parts)}`, tone: "busy", spin: true };
   if (mem.gen_models?.status === "starting")
-    return { text: "⏳ starting image engine…", tone: "busy" };
+    return {
+      text: `starting image engine${took([mem.gen_models])}`,
+      tone: "busy",
+      spin: true,
+    };
   const unloading = ollama.filter((m) => m.state === "unloading");
   if (unloading.length) return { text: `unloading ${named(unloading)}…`, tone: "busy" };
   const count = ollama.length + gen.filter((m) => m.role === "transformer").length;
@@ -360,7 +400,10 @@ export default function ResourceMeter({ ollamaUrl }: Props) {
             `If this fills up, the system kills the image/video engine.`
           }
         />
-        <span className={`res-loaded${line.tone ? ` ${line.tone}` : ""}`}>{line.text}</span>
+        <span className={`res-loaded${line.tone ? ` ${line.tone}` : ""}`}>
+          {line.spin && <Spinner />}
+          {line.text}
+        </span>
       </button>
       {open && <LoadedPanel mem={mem} other={other} />}
     </div>

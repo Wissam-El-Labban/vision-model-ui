@@ -431,8 +431,9 @@ def system_memory(ollama_url: str = oc.DEFAULT_URL):
     `ollama_models` is the Ollama side: what /api/ps lists, plus a `loading` row
     for each model this backend has a request in flight for that ps doesn't list
     yet (see `oc.activity`). `kind` is embedding / vision / chat; `state` is
-    loading / active / loaded / unloading; a `gpu_pct` under 100 means part of the
-    model runs on the CPU. `gen_models` is the image/video side (see
+    loading / active / loaded / unloading, and `since` is when a load began (epoch
+    seconds, loading rows only); a `gpu_pct` under 100 means part of the model
+    runs on the CPU. `gen_models` is the image/video side (see
     `fx.resident_models`). Either is None when its engine can't be reached.
     """
     try:
@@ -449,6 +450,7 @@ def system_memory(ollama_url: str = oc.DEFAULT_URL):
             "name": name,
             "kind": oc.model_kind(ollama_url, name),
             "state": state(name),
+            "since": None,
             "size_gb": (m.get("size") or 0) / 2**30,
             "vram_gb": (m.get("size_vram") or 0) / 2**30,
             "gpu_pct": round(100 * (m.get("size_vram") or 0) / m["size"]) if m.get("size") else None,
@@ -457,7 +459,7 @@ def system_memory(ollama_url: str = oc.DEFAULT_URL):
         } for name, m in zip(names, running)]
         ollama_models += [{
             "name": name, "kind": oc.model_kind(ollama_url, name), "state": "loading",
-            "size_gb": None, "vram_gb": None, "gpu_pct": None, "context": None,
+            "since": act["since"].get(name), "size_gb": None, "vram_gb": None, "gpu_pct": None, "context": None,
             "expires_at": None,
         } for name in sorted(act["inflight"] - set(names)) if name != ":latest"]
     except Exception:

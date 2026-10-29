@@ -56,6 +56,7 @@ GITHUB_LATEST = "https://api.github.com/repos/ollama/ollama/releases/latest"
 # loading; one that ps does list is in use.
 _activity_mu = threading.Lock()
 _inflight: dict[str, int] = {}
+_inflight_since: dict[str, float] = {}  # name -> when its first open request began
 _unloading: dict[str, float] = {}   # name -> when the unload was asked for
 _UNLOAD_MARK_S = 60                 # give up on a mark Ollama never acted on
 
@@ -71,6 +72,7 @@ def using(model):
     key = canonical(model or "")
     with _activity_mu:
         _inflight[key] = _inflight.get(key, 0) + 1
+        _inflight_since.setdefault(key, time.time())
     try:
         yield
     finally:
@@ -78,10 +80,14 @@ def using(model):
             _inflight[key] -= 1
             if not _inflight[key]:
                 del _inflight[key]
+                del _inflight_since[key]
 
 
 def activity(loaded_names=()):
-    """`{"inflight": names, "unloading": names}` right now.
+    """`{"inflight": names, "since": {name: epoch s}, "unloading": names}` right now.
+
+    `since` is when a model's oldest open request began — for one ps doesn't list
+    yet, when its load started.
 
     `loaded_names` is what ps lists; an unloading mark whose model is gone from
     it has done its job and is dropped, as is one older than `_UNLOAD_MARK_S`.
@@ -91,7 +97,8 @@ def activity(loaded_names=()):
         for name, t in list(_unloading.items()):
             if name not in loaded or now - t > _UNLOAD_MARK_S:
                 del _unloading[name]
-        return {"inflight": set(_inflight), "unloading": set(_unloading)}
+        return {"inflight": set(_inflight), "since": dict(_inflight_since),
+                "unloading": set(_unloading)}
 
 
 _KIND_CACHE: dict[tuple, str] = {}

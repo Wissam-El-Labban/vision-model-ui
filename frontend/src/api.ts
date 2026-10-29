@@ -89,6 +89,8 @@ export interface LoadedOllamaModel {
   name: string;
   kind: "vision" | "chat" | "embedding";
   state: LoadState;
+  /** When a load began (epoch seconds); set on `loading` rows only. */
+  since: number | null;
   size_gb: number | null;
   vram_gb: number | null;
   gpu_pct: number | null;
@@ -106,6 +108,8 @@ export interface LoadedGenModel {
   kind: "image" | "video" | null;
   video: boolean;
   state: LoadState;
+  /** When a load began (epoch seconds); set on `loading` rows only. */
+  since: number | null;
 }
 
 /** Live memory of this machine, in GiB. `gpu`/`ram` are null when unreadable;
@@ -120,6 +124,8 @@ export interface SystemMemory {
   ollama_models: LoadedOllamaModel[] | null;
   gen_models: {
     status: "starting" | "ready";
+    /** When the engine started booting (epoch seconds), while `starting`. */
+    since: number | null;
     known: boolean;
     models: LoadedGenModel[];
   } | null;
