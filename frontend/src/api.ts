@@ -75,13 +75,38 @@ export async function getRunning(ollamaUrl: string): Promise<RunningModel[]> {
   return (await res.json()).models ?? [];
 }
 
+/** A vision/chat model Ollama has loaded. `gpu_pct` under 100 means part of it
+ *  runs on the CPU. `expires_at` is when Ollama unloads it (ISO time). */
+export interface LoadedOllamaModel {
+  name: string;
+  size_gb: number;
+  vram_gb: number;
+  gpu_pct: number | null;
+  context: number | null;
+  expires_at: string | null;
+}
+
+/** A model file the image/video engine (ComfyUI) holds. `family` and the bundle
+ *  `label` are set for transformers only; `video` marks a video model (Wan). */
+export interface LoadedGenModel {
+  file: string;
+  role: string;
+  label: string;
+  family: string | null;
+  video: boolean;
+}
+
 /** Live memory of this machine, in GiB. `gpu`/`ram` are null when unreadable;
- *  `flux_gb` is null while the FLUX engine isn't running. */
+ *  `flux_gb` and `gen_models` are null while the image engine isn't running,
+ *  `ollama_models` while Ollama can't be reached. `gen_models.known` is false when
+ *  the backend can't tell what the engine holds (it restarted while it ran). */
 export interface SystemMemory {
   gpu: { total_gb: number; used_gb: number } | null;
   ram: { total_gb: number; available_gb: number; used_gb: number; swap_gb: number } | null;
   flux_gb: number | null;
   ollama_gb: number | null;
+  ollama_models: LoadedOllamaModel[] | null;
+  gen_models: { known: boolean; models: LoadedGenModel[] } | null;
 }
 
 export async function getSystemMemory(ollamaUrl: string): Promise<SystemMemory> {

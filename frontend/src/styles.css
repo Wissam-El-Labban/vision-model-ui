@@ -1050,6 +1050,141 @@ textarea {
   transition: width 0.4s ease;
 }
 
+/* The meter is a button that opens the loaded-models list. */
+.res-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+button.res-meter {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 2px 4px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.res-meter:hover,
+button.res-meter.open {
+  border-color: var(--border);
+  background: var(--panel-2);
+}
+
+.res-loaded {
+  font-size: 10px;
+  color: var(--muted);
+  text-align: left;
+}
+
+.res-loaded.warn {
+  color: var(--amber);
+}
+
+.res-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  width: 320px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+  text-align: left;
+}
+
+.res-section + .res-section {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.res-section-title {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.res-section-title span {
+  font-weight: 400;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.res-empty {
+  color: var(--muted);
+}
+
+.res-model + .res-model {
+  margin-top: 6px;
+}
+
+.res-model-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.res-model-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.res-model-meta,
+.res-part {
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.res-part {
+  margin-top: 3px;
+  padding-left: 10px;
+}
+
+.res-part-role {
+  display: inline-block;
+  min-width: 76px;
+  color: var(--text);
+}
+
+.res-badge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid currentColor;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.res-badge.ok {
+  color: var(--green);
+}
+
+.res-badge.warn {
+  color: var(--amber);
+}
+
+.res-badge.bad {
+  color: var(--red);
+}
+
+.res-badge.video {
+  color: var(--video);
+}
+
 @media (max-width: 700px) {
   .res-meter {
     display: none;

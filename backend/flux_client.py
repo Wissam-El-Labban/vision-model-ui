@@ -486,6 +486,7 @@ def ensure_server(on_status=None) -> None:
     # which also means residency is knowable again from here on.
     global _residency_known
     _resident.clear()
+    _resident_role.clear()
     _residency_known = True
     # Estimate-based memory management: ComfyUI loads the model onto the GPU once and
     # keeps it resident until `free()`. ComfyUI's default since 0.41, dynamic VRAM,
@@ -549,6 +550,42 @@ def held_gb() -> float | None:
         return None
 
 
+# Graph input key -> what the loaded-models list calls it. Ordered: transformers first.
+_ROLE_OF_INPUT = {"unet_name": "transformer", "clip_name": "text encoder",
+                  "clip_name1": "text encoder", "vae_name": "VAE", "lora_name": "LoRA",
+                  "ckpt_name": "preprocessor", "model_name": "preprocessor"}
+_ROLE_ORDER = ("transformer", "text encoder", "VAE", "LoRA", "preprocessor")
+
+
+def resident_models() -> dict | None:
+    """The image and video model files ComfyUI holds, or None when it isn't running.
+
+    Taken from `_resident`, this process's memory of what it asked for — ComfyUI
+    has no API for what it has loaded. `known` is False when that memory means
+    nothing yet (see `_residency_known`), and the list is then empty rather than a
+    guess. Transformers carry their bundle's label and family; `video` marks Wan.
+    """
+    if not _server_up():
+        return None
+    if not _residency_known:
+        return {"known": False, "models": []}
+    models = []
+    for f in _resident:
+        role = _ROLE_OF_INPUT.get(_resident_role.get(f, ""), "model")
+        b = cat.bundle_of_unet(f) if role == "transformer" else None
+        family = (b["family"] if b else cat.FAMILY_FLUX1) if role == "transformer" else None
+        models.append({
+            "file": f,
+            "role": role,
+            "label": cat.label_of_unet(f) if role == "transformer" else f,
+            "family": family,
+            "video": family == cat.FAMILY_WAN,
+        })
+    rank = {r: i for i, r in enumerate(_ROLE_ORDER)}
+    models.sort(key=lambda m: (rank.get(m["role"], len(rank)), m["label"]))
+    return {"known": True, "models": models}
+
+
 def weights_gb(unet: str) -> float | None:
     """GiB of weights a generation on `unet` puts on the GPU: transformer, encoder, VAE.
 
@@ -590,6 +627,7 @@ def free() -> None:
     # progress bar should expect it (see `_resident`).
     global _residency_known
     _resident.clear()
+    _resident_role.clear()
     _residency_known = True
     try:
         _post("/free", {"unload_models": True, "free_memory": True})
@@ -1674,6 +1712,10 @@ _timing_cache: dict | None = None
 # pacing, never correctness — the bar is still driven by what the graph reports.
 _resident: set[str] = set()
 
+# The same files, each with the graph input that named it — what the loaded-models
+# list shows as its role. Filled and cleared alongside `_resident`.
+_resident_role: dict[str, str] = {}
+
 # Whether that memory means anything yet. A backend that restarts against a sidecar
 # left running has no idea what it is holding, and a warm run filed as cold would
 # teach the store that a 15 GB encoder loads in 200ms. Such a run is still measured —
@@ -1683,7 +1725,12 @@ _residency_known = False
 
 def _model_inputs(graph: dict) -> set[str]:
     """Every model file this graph names."""
-    return {v for node in graph.values()
+    return set(_model_roles(graph))
+
+
+def _model_roles(graph: dict) -> dict[str, str]:
+    """Every model file this graph names, mapped to the input key that names it."""
+    return {v: k for node in graph.values()
             for k, v in (node.get("inputs") or {}).items()
             if k in _MODEL_INPUTS and isinstance(v, str)}
 
@@ -1921,7 +1968,9 @@ class _Progress:
         global _residency_known
         if self.trusted:
             _remember_timings(self.measured)
-        _resident.update(_model_inputs(self.graph))
+        roles = _model_roles(self.graph)
+        _resident.update(roles)
+        _resident_role.update(roles)
         _residency_known = True
 
     # -- internals --------------------------------------------------------- #
