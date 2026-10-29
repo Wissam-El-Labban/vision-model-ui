@@ -1225,31 +1225,26 @@ button.res-meter.open {
   flex-shrink: 0;
 }
 
-.res-count {
-  font-weight: 400;
+/* A kind of model inside an engine's section: "Vision · 1". */
+.res-group + .res-group {
+  margin-top: 8px;
+}
+
+.res-group-title {
+  margin-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--muted);
 }
 
-.res-section-title .res-section-name {
-  color: var(--text);
-  font-weight: 600;
+.res-group-title span {
+  font-weight: 400;
 }
 
 .res-part-state {
   color: var(--accent);
-}
-
-.res-notes {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.5;
-}
-
-.res-pop > .res-empty:first-child + .res-notes {
-  margin-top: 8px;
 }
 
 @media (max-width: 700px) {

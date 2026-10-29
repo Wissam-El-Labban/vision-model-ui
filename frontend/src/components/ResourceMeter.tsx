@@ -127,100 +127,122 @@ function PartRow({ m }: { m: LoadedGenModel }) {
   );
 }
 
-function Section({ title, count, vram, children }: {
+function Section({ title, vram, children }: {
   title: string;
-  count: number;
-  vram?: number;
+  vram?: number | null;
   children: React.ReactNode;
 }) {
   return (
     <div className="res-section">
       <div className="res-section-title">
-        <span className="res-section-name">
-          {title} <span className="res-count">· {count}</span>
-        </span>
-        {vram != null && vram > 0 && <span>{gb(vram)} GB VRAM</span>}
+        {title}
+        {vram != null && <span>{gb(vram)} GB VRAM</span>}
       </div>
       {children}
     </div>
   );
 }
 
-const OLLAMA_SECTIONS = [
+/** A type within an engine's section — "Vision · 1" — with its rows beneath. */
+function Group({ title, count, children }: {
+  title: string;
+  count: number;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="res-group">
+      <div className="res-group-title">
+        {title} <span>· {count}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+const OLLAMA_GROUPS = [
   ["vision", "Vision"],
   ["chat", "Chat"],
   ["embedding", "Embedding (documents)"],
 ] as const;
 
-/** Every model either engine has loaded or is loading, grouped by what it's for:
- *  Ollama's by capability (vision / chat / embedding), ComfyUI's transformers by
- *  image or video, with the encoders, VAEs and LoRAs they share listed apart.
- *  The image side is the backend's memory of what it asked ComfyUI for, plus the
- *  run in progress, since ComfyUI can't be asked directly. */
+/** Every model either engine has loaded or is loading. One section per engine,
+ *  and inside it a group per kind of model: Ollama's by capability (vision /
+ *  chat / embedding), ComfyUI's transformers by image or video, with the
+ *  encoders, VAEs and LoRAs they share listed apart. The image side is the
+ *  backend's memory of what it asked ComfyUI for, plus the run in progress,
+ *  since ComfyUI can't be asked directly. */
 function LoadedPanel({ mem, other }: { mem: SystemMemory; other: number }) {
-  const ollama = mem.ollama_models ?? [];
+  const ollama = mem.ollama_models;
   const gen = mem.gen_models;
   const genModels = gen?.models ?? [];
   const image = genModels.filter((m) => m.kind === "image");
   const video = genModels.filter((m) => m.kind === "video");
   const parts = genModels.filter((m) => m.role !== "transformer");
-  const empty = ollama.length === 0 && genModels.length === 0;
-  const notes = [
-    mem.ollama_models == null && "Ollama unreachable — chat models unknown",
-    gen == null && "Image/video engine not running",
-    gen?.status === "starting" && "⏳ Image/video engine starting…",
-    gen && gen.status === "ready" && !gen.known &&
-      "Image/video engine running — contents unknown until the next generation",
-    mem.flux_gb != null && mem.flux_gb > 0.05 &&
-      `Image/video engine holds ${gb(mem.flux_gb)} GB VRAM`,
-    other >= 0.5 && `Other GPU use (other processes, the desktop): ${gb(other)} GB`,
-  ].filter(Boolean) as string[];
   return (
     <div className="res-pop" role="dialog" aria-label="Loaded models">
-      {empty && <div className="res-empty">No models loaded</div>}
-      {OLLAMA_SECTIONS.map(([kind, title]) => {
-        const rows = ollama.filter((m) => m.kind === kind);
-        if (!rows.length) return null;
-        return (
-          <Section
-            key={kind}
-            title={title}
-            count={rows.length}
-            vram={rows.reduce((t, m) => t + (m.vram_gb ?? 0), 0)}
-          >
-            {rows.map((m) => (
-              <OllamaRow key={m.name} m={m} />
-            ))}
-          </Section>
-        );
-      })}
-      {image.length > 0 && (
-        <Section title="Image" count={image.length}>
-          {image.map((m) => (
-            <GenRow key={m.file} m={m} />
-          ))}
+      <Section title="Vision / chat (Ollama)" vram={mem.ollama_gb}>
+        {ollama == null ? (
+          <div className="res-empty">Ollama unreachable</div>
+        ) : ollama.length === 0 ? (
+          <div className="res-empty">None loaded</div>
+        ) : (
+          OLLAMA_GROUPS.map(([kind, title]) => {
+            const rows = ollama.filter((m) => m.kind === kind);
+            return (
+              rows.length > 0 && (
+                <Group key={kind} title={title} count={rows.length}>
+                  {rows.map((m) => (
+                    <OllamaRow key={m.name} m={m} />
+                  ))}
+                </Group>
+              )
+            );
+          })
+        )}
+      </Section>
+      <Section title="Image / video (ComfyUI)" vram={mem.flux_gb}>
+        {gen == null ? (
+          <div className="res-empty">Engine not running</div>
+        ) : gen.status === "starting" ? (
+          <div className="res-empty">
+            <span className="res-badge loading">⏳ starting…</span>
+          </div>
+        ) : !gen.known ? (
+          <div className="res-empty">
+            Engine running — contents unknown until the next generation
+          </div>
+        ) : genModels.length === 0 ? (
+          <div className="res-empty">None loaded</div>
+        ) : (
+          <>
+            {image.length > 0 && (
+              <Group title="Image" count={image.length}>
+                {image.map((m) => (
+                  <GenRow key={m.file} m={m} />
+                ))}
+              </Group>
+            )}
+            {video.length > 0 && (
+              <Group title="Video" count={video.length}>
+                {video.map((m) => (
+                  <GenRow key={m.file} m={m} />
+                ))}
+              </Group>
+            )}
+            {parts.length > 0 && (
+              <Group title="Components" count={parts.length}>
+                {parts.map((m) => (
+                  <PartRow key={m.file} m={m} />
+                ))}
+              </Group>
+            )}
+          </>
+        )}
+      </Section>
+      {other >= 0.5 && (
+        <Section title="Other GPU use" vram={other}>
+          <div className="res-empty">Other processes, or the desktop</div>
         </Section>
-      )}
-      {video.length > 0 && (
-        <Section title="Video" count={video.length}>
-          {video.map((m) => (
-            <GenRow key={m.file} m={m} />
-          ))}
-        </Section>
-      )}
-      {parts.length > 0 && (
-        <Section title="Image/video components" count={parts.length}>
-          {parts.map((m) => (
-            <PartRow key={m.file} m={m} />
-          ))}
-        </Section>
-      )}
-      {notes.length > 0 && (
-        <div className="res-notes">
-          {notes.map((n) => (
-            <div key={n}>{n}</div>
-          ))}
-        </div>
       )}
     </div>
   );
