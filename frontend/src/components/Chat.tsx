@@ -162,6 +162,8 @@ interface Props {
   /** Liveness of the in-flight turn; null when idle. Drives the bar below. */
   progress: GenProgress | null;
   onDropFiles: (files: FileList | File[]) => void;
+  /** Offered under the last turn when it failed or was stopped. */
+  retry: { label: string; title: string; onClick: () => void } | null;
 }
 
 /** The scrolling conversation (the composer lives full-width below it). */
@@ -171,6 +173,7 @@ export default function Chat({
   disabled,
   progress,
   onDropFiles,
+  retry,
 }: Props) {
   const endRef = useRef<HTMLDivElement>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -371,6 +374,13 @@ export default function Chat({
             </Fragment>
           );
         })}
+        {retry && (
+          <div className="retry-row">
+            <button type="button" className="btn ghost small" title={retry.title} onClick={retry.onClick}>
+              {retry.label}
+            </button>
+          </div>
+        )}
         <div ref={endRef} />
       </div>
       <GenProgressBar progress={progress} />

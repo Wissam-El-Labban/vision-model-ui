@@ -635,6 +635,50 @@ def free() -> None:
         pass
 
 
+# Which ComfyUI prompt each calling thread is waiting on, and which threads have
+# been asked to stop. Keyed by thread because a job runs every graph it submits on
+# its own worker thread, and a second chat's job may be sampling at the same time:
+# stopping one must not interrupt the other.
+_prompts: dict[int, str] = {}
+_stopping: set[int] = set()
+
+
+class Stopped(RuntimeError):
+    """The graph was interrupted because its job was cancelled."""
+
+    def __init__(self):
+        super().__init__("Stopped.")
+
+
+def stop(thread_id: int) -> None:
+    """Stop whatever `thread_id` has running in ComfyUI, and anything it submits next.
+
+    Dequeues the prompt if it hasn't started and interrupts it if it has. The
+    interrupt names the prompt, so it is a no-op when another job's graph is the one
+    executing. The waiting thread notices on its next tick either way.
+    """
+    _stopping.add(thread_id)
+    pid = _prompts.get(thread_id)
+    if not pid or not _server_up():
+        return
+    for path, body in (("/queue", {"delete": [pid]}), ("/interrupt", {"prompt_id": pid})):
+        try:
+            _post(path, body)
+        except Exception:
+            pass
+
+
+def release(thread_id: int) -> None:
+    """Forget `thread_id`'s stop request, once its job is over."""
+    _stopping.discard(thread_id)
+    _prompts.pop(thread_id, None)
+
+
+def _check_stop() -> None:
+    if threading.get_ident() in _stopping:
+        raise Stopped()
+
+
 # --------------------------------------------------------------------------- #
 # HTTP helpers
 # --------------------------------------------------------------------------- #
@@ -2049,8 +2093,20 @@ def _await(graph, on_progress=None, on_status=None,
     than useless there — it stops waiting and lets the caller report "no output" for a
     job still running fine.
     """
+    _check_stop()
     client_id = uuid.uuid4().hex
     pid = _post("/prompt", {"prompt": graph, "client_id": client_id})["prompt_id"]
+    me = threading.get_ident()
+    _prompts[me] = pid
+    try:
+        return _await_prompt(pid, client_id, graph, on_progress,
+                             recv_timeout, poll_timeout)
+    finally:
+        _prompts.pop(me, None)
+
+
+def _await_prompt(pid, client_id, graph, on_progress, recv_timeout,
+                  poll_timeout) -> dict:
     prog = _Progress(graph, on_progress=on_progress)
     prog.begin()
 
@@ -2065,6 +2121,7 @@ def _await(graph, on_progress=None, on_status=None,
         try:
             silent = 0.0
             while True:
+                _check_stop()
                 try:
                     msg = ws.recv()
                 except websocket.WebSocketTimeoutException:
@@ -2094,12 +2151,18 @@ def _await(graph, on_progress=None, on_status=None,
                     prog.executing(data.get("node"))
                 elif kind == "executed":
                     prog.executing(None)
+                elif kind == "execution_interrupted":
+                    _check_stop()
+                    raise Stopped()  # interrupted from ComfyUI's own UI
         finally:
             ws.close()
+    except Stopped:
+        raise
     except Exception:
         # No websocket lib / connection: poll history until the prompt completes.
         t0 = time.time()
         while time.time() - t0 < poll_timeout:
+            _check_stop()
             h = _get("/history/" + pid)
             if h.get(pid, {}).get("outputs"):
                 break

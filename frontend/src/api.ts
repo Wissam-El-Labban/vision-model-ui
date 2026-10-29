@@ -6,6 +6,8 @@ import type {
   ChatSummary,
   ControlKind,
   DocInfo,
+  JobInfo,
+  JobStatus,
   RunningModel,
   Source,
   VersionInfo,
@@ -188,7 +190,19 @@ export interface Usage {
   num_ctx: number;
 }
 
-interface ChatHandlers {
+/** What every turn's stream also says about the backend job running it. */
+export interface JobHooks {
+  /** First event: the job's id, for Stop and Retry. */
+  onJob?: (id: string) => void;
+  /** Last event: how the turn ended. */
+  onEnd?: (status: JobStatus, error: string | null) => void;
+  /** The chat was deleted while the turn ran; nothing more was recorded. */
+  onDeleted?: () => void;
+}
+
+type JobEvent = { type: string; [k: string]: unknown };
+
+export interface ChatHandlers extends JobHooks {
   onToken: (token: string) => void;
   /** Reasoning tokens, only sent when `think` is on and the model can think. */
   onThinking?: (token: string) => void;
@@ -200,8 +214,19 @@ interface ChatHandlers {
   onDocsError?: (message: string) => void;
 }
 
+/** How the backend records a chat turn: the chat, what the user typed and
+ *  attached, and the numbered images the answer can refer to. */
+export interface ChatRecord {
+  chat_id: string;
+  user_content: string;
+  user_image_hashes: string[];
+  context_hashes: string[];
+  title_model: string | null;
+}
+
 /** Stream a chat response (NDJSON events: sources / thinking / token / usage / error).
- *  `docs` are the chat's documents and the text to search them with. */
+ *  `docs` are the chat's documents and the text to search them with. With
+ *  `record`, the backend writes both turns itself, so a reload loses neither. */
 export async function streamChat(
   ollamaUrl: string,
   model: string,
@@ -209,7 +234,8 @@ export async function streamChat(
   handlers: ChatHandlers,
   signal?: AbortSignal,
   think = false,
-  docs: { ids: string[]; query: string } = { ids: [], query: "" }
+  docs: { ids: string[]; query: string } = { ids: [], query: "" },
+  record?: ChatRecord
 ): Promise<void> {
   const res = await fetch("/api/chat", {
     method: "POST",
@@ -221,24 +247,11 @@ export async function streamChat(
       think,
       doc_ids: docs.ids,
       doc_query: docs.query,
+      ...record,
     }),
     signal,
   });
-  if (!res.ok) throw new Error(`chat: ${res.status}`);
-  await readLines(res, (line) => {
-    let ev: { type: string; [k: string]: unknown };
-    try {
-      ev = JSON.parse(line);
-    } catch {
-      return;
-    }
-    if (ev.type === "token") handlers.onToken(ev.text as string);
-    else if (ev.type === "thinking") handlers.onThinking?.(ev.text as string);
-    else if (ev.type === "usage") handlers.onUsage?.(ev as unknown as Usage);
-    else if (ev.type === "sources") handlers.onSources?.(ev.sources as Source[]);
-    else if (ev.type === "docs_error") handlers.onDocsError?.(ev.message as string);
-    else if (ev.type === "error") handlers.onError?.(ev.message as string);
-  });
+  await followTurn(res, { kind: "chat", on: handlers }, "chat");
 }
 
 export async function pullModel(
@@ -785,6 +798,8 @@ export interface GenerateParams {
   warm_model?: string | null;
   /** Always unload the Ollama model before FLUX runs (and don't reload it after). */
   unload_ollama?: boolean;
+  /** The model that names the chat after its first exchange; null = leave it. */
+  title_model?: string | null;
 }
 
 /** A `control` event: one derived control map, emitted before the final image. */
@@ -825,7 +840,7 @@ export interface GenProgressEvent {
   total: number;
 }
 
-interface GenerateHandlers {
+export interface GenerateHandlers extends JobHooks {
   onStatus?: (message: string) => void;
   onProgress?: (p: GenProgressEvent) => void;
   onImage: (r: GeneratedImage) => void;
@@ -846,31 +861,7 @@ export async function generate(
     body: JSON.stringify(params),
     signal,
   });
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(detail.detail ?? `generate: ${res.status}`);
-  }
-  await readLines(res, (line) => {
-    let ev: { type: string; [k: string]: unknown };
-    try {
-      ev = JSON.parse(line);
-    } catch {
-      return;
-    }
-    if (ev.type === "status") handlers.onStatus?.(ev.message as string);
-    else if (ev.type === "progress")
-      handlers.onProgress?.({
-        frac: Math.max(0, Math.min(1, (ev.frac as number) ?? 0)),
-        stage: (ev.stage as string) ?? "",
-        live: ev.live !== false,
-        step: (ev.step as number) ?? 0,
-        total: (ev.total as number) ?? 0,
-      });
-    else if (ev.type === "image") handlers.onImage(ev as unknown as GeneratedImage);
-    else if (ev.type === "control")
-      handlers.onControlMap?.(ev as unknown as GeneratedControlMap);
-    else if (ev.type === "error") handlers.onError?.(ev.message as string);
-  });
+  await followTurn(res, { kind: "generate", on: handlers }, "generate");
 }
 
 // --------------------------------------------------------------------------- #
@@ -908,6 +899,8 @@ export interface AgentParams {
   doc_prompts?: boolean;
   /** Always unload the Ollama model before FLUX runs (and don't reload it after). */
   unload_ollama?: boolean;
+  /** The model that names the chat after its first exchange; null = leave it. */
+  title_model?: string | null;
 }
 
 /** One tool the agent decided to call. `index` orders the steps within the turn
@@ -926,7 +919,7 @@ export interface AgentToolError {
   message: string;
 }
 
-interface AgentHandlers {
+export interface AgentHandlers extends JobHooks {
   /** The agent's own prose, streamed. Empty for a plain "make me X". */
   onToken?: (text: string) => void;
   /** Reasoning tokens, only sent when `think` is on and the model can think. */
@@ -961,45 +954,118 @@ export async function agentRun(
     body: JSON.stringify({ ...params, messages: params.messages.map(withImages) }),
     signal,
   });
+  await followTurn(res, { kind: "agent", on: handlers }, "agent");
+}
+
+// --------------------------------------------------------------------------- #
+// Jobs: every turn runs on the backend, and the page only follows it
+// --------------------------------------------------------------------------- #
+
+/** A turn's handlers, tagged with the kind of turn so its events can be read.
+ *  Starting a turn, coming back to one and retrying one all read the same
+ *  events, so all three go through `dispatch`. */
+export type TurnHandlers =
+  | { kind: "chat"; on: ChatHandlers }
+  | { kind: "generate"; on: GenerateHandlers }
+  | { kind: "agent"; on: AgentHandlers };
+
+function genProgress(ev: JobEvent): GenProgressEvent {
+  return {
+    frac: Math.max(0, Math.min(1, (ev.frac as number) ?? 0)),
+    stage: (ev.stage as string) ?? "",
+    live: ev.live !== false,
+    step: (ev.step as number) ?? 0,
+    total: (ev.total as number) ?? 0,
+  };
+}
+
+function dispatch(t: TurnHandlers, ev: JobEvent): void {
+  if (ev.type === "job") return t.on.onJob?.(ev.id as string);
+  if (ev.type === "end")
+    return t.on.onEnd?.(ev.status as JobStatus, (ev.error as string | null) ?? null);
+  if (ev.type === "deleted") return t.on.onDeleted?.();
+  if (t.kind === "chat") {
+    const h = t.on;
+    if (ev.type === "token") h.onToken(ev.text as string);
+    else if (ev.type === "thinking") h.onThinking?.(ev.text as string);
+    else if (ev.type === "usage") h.onUsage?.(ev as unknown as Usage);
+    else if (ev.type === "sources") h.onSources?.(ev.sources as Source[]);
+    else if (ev.type === "docs_error") h.onDocsError?.(ev.message as string);
+    else if (ev.type === "error") h.onError?.(ev.message as string);
+  } else if (t.kind === "generate") {
+    const h = t.on;
+    if (ev.type === "status") h.onStatus?.(ev.message as string);
+    else if (ev.type === "progress") h.onProgress?.(genProgress(ev));
+    else if (ev.type === "image") h.onImage(ev as unknown as GeneratedImage);
+    else if (ev.type === "control") h.onControlMap?.(ev as unknown as GeneratedControlMap);
+    else if (ev.type === "error") h.onError?.(ev.message as string);
+  } else {
+    const h = t.on;
+    const toolIndex = ev.tool_index as number | undefined;
+    if (ev.type === "token") h.onToken?.(ev.text as string);
+    else if (ev.type === "thinking") h.onThinking?.(ev.text as string);
+    else if (ev.type === "usage") h.onUsage?.(ev as unknown as Usage);
+    else if (ev.type === "status") h.onStatus?.(ev.message as string, toolIndex);
+    else if (ev.type === "progress") h.onProgress?.(genProgress(ev), toolIndex);
+    else if (ev.type === "tool_call") h.onToolCall?.(ev as unknown as AgentToolCall);
+    else if (ev.type === "tool_error") h.onToolError?.(ev as unknown as AgentToolError);
+    else if (ev.type === "image") h.onImage?.(ev as unknown as GeneratedImage, toolIndex);
+    else if (ev.type === "done") h.onDone?.();
+    else if (ev.type === "sources") h.onSources?.(ev.sources as Source[]);
+    else if (ev.type === "docs_error") h.onDocsError?.(ev.message as string);
+    else if (ev.type === "error") h.onError?.(ev.message as string);
+  }
+}
+
+/** Read a turn's NDJSON stream into its handlers. A refusal (a model that isn't
+ *  installed, a chat that's already busy) throws with the backend's reason. */
+async function followTurn(res: Response, t: TurnHandlers, what: string): Promise<void> {
   if (!res.ok) {
     const detail = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(detail.detail ?? `agent: ${res.status}`);
+    throw new Error(detail.detail ?? `${what}: ${res.status}`);
   }
   await readLines(res, (line) => {
-    let ev: { type: string; [k: string]: unknown };
+    let ev: JobEvent;
     try {
       ev = JSON.parse(line);
     } catch {
       return;
     }
-    const toolIndex = ev.tool_index as number | undefined;
-    if (ev.type === "token") handlers.onToken?.(ev.text as string);
-    else if (ev.type === "thinking") handlers.onThinking?.(ev.text as string);
-    else if (ev.type === "usage") handlers.onUsage?.(ev as unknown as Usage);
-    else if (ev.type === "status")
-      handlers.onStatus?.(ev.message as string, toolIndex);
-    else if (ev.type === "progress")
-      handlers.onProgress?.(
-        {
-          frac: Math.max(0, Math.min(1, (ev.frac as number) ?? 0)),
-          stage: (ev.stage as string) ?? "",
-          live: ev.live !== false,
-          step: (ev.step as number) ?? 0,
-          total: (ev.total as number) ?? 0,
-        },
-        toolIndex
-      );
-    else if (ev.type === "tool_call")
-      handlers.onToolCall?.(ev as unknown as AgentToolCall);
-    else if (ev.type === "tool_error")
-      handlers.onToolError?.(ev as unknown as AgentToolError);
-    else if (ev.type === "image")
-      handlers.onImage?.(ev as unknown as GeneratedImage, toolIndex);
-    else if (ev.type === "done") handlers.onDone?.();
-    else if (ev.type === "sources") handlers.onSources?.(ev.sources as Source[]);
-    else if (ev.type === "docs_error") handlers.onDocsError?.(ev.message as string);
-    else if (ev.type === "error") handlers.onError?.(ev.message as string);
+    dispatch(t, ev);
   });
+}
+
+/** Follow a turn already running (or finished): its events so far, then live. */
+export async function attachJob(
+  id: string,
+  t: TurnHandlers,
+  signal?: AbortSignal
+): Promise<void> {
+  const res = await fetch(`/api/jobs/${id}/events`, { signal });
+  await followTurn(res, t, "job");
+}
+
+/** Run a finished turn again in place of itself, and follow the new run. */
+export async function retryJob(
+  id: string,
+  t: TurnHandlers,
+  signal?: AbortSignal
+): Promise<void> {
+  const res = await fetch(`/api/jobs/${id}/retry`, { method: "POST", signal });
+  await followTurn(res, t, "retry");
+}
+
+/** Stop a turn. Leaving the page doesn't; this does. */
+export async function cancelJob(id: string): Promise<void> {
+  const res = await fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
+  if (!res.ok) throw new Error(`cancel: ${res.status}`);
+}
+
+/** Turns running right now, in any chat. */
+export async function listRunningJobs(): Promise<JobInfo[]> {
+  const res = await fetch("/api/jobs");
+  if (!res.ok) throw new Error(`jobs: ${res.status}`);
+  return (await res.json()).jobs ?? [];
 }
 
 // --------------------------------------------------------------------------- #
@@ -1036,23 +1102,11 @@ export async function putChat(
   if (!res.ok) throw new Error(`putChat: ${res.status}`);
 }
 
-export async function appendMessage(
-  id: string,
-  body: {
-    role: string;
-    content: string;
-    model: string | null;
-    image_hashes: string[];
-    context_hashes?: string[];
-    sources?: Source[];
-  }
-): Promise<void> {
-  const res = await fetch(`/api/chats/${id}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+export async function deleteMessage(chatId: string, messageId: string): Promise<void> {
+  const res = await fetch(`/api/chats/${chatId}/messages/${messageId}`, {
+    method: "DELETE",
   });
-  if (!res.ok) throw new Error(`appendMessage: ${res.status}`);
+  if (!res.ok) throw new Error(`deleteMessage: ${res.status}`);
 }
 
 /** Upload images (full + thumbnail data-URLs). Returns their content hashes. */
@@ -1067,20 +1121,6 @@ export async function uploadImages(
   });
   if (!res.ok) throw new Error(`uploadImages: ${res.status}`);
   return (await res.json()).hashes ?? [];
-}
-
-export async function generateTitle(
-  id: string,
-  model: string,
-  ollamaUrl: string
-): Promise<string> {
-  const res = await fetch(`/api/chats/${id}/title`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, ollama_url: ollamaUrl }),
-  });
-  if (!res.ok) throw new Error(`title: ${res.status}`);
-  return (await res.json()).title ?? "";
 }
 
 export async function deleteChat(id: string): Promise<void> {

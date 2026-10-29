@@ -82,6 +82,19 @@ def supports_thinking(url, model):
 _THINKING_CACHE = {}
 
 
+def _lines(response):
+    """A streamed response's lines, closing it however the reading ends.
+
+    A caller that stops reading early — a cancelled job — closes the generator
+    above this one, and the close lands here: dropping the connection is what tells
+    Ollama to stop generating, rather than finish an answer nobody will read.
+    """
+    try:
+        yield from response.iter_lines()
+    finally:
+        response.close()
+
+
 def stream_chat(url, model, messages, think=False):
     """POST to Ollama's /api/chat and yield streaming events.
 
@@ -113,7 +126,7 @@ def stream_chat(url, model, messages, think=False):
     if response.status_code != 200:
         raise RuntimeError(f"Ollama returned {response.status_code}: {response.text}")
 
-    for line in response.iter_lines():
+    for line in _lines(response):
         if not line:
             continue
         try:
@@ -169,7 +182,7 @@ def stream_chat_tools(url, model, messages, tools, think=False):
         raise RuntimeError(f"Ollama returned {response.status_code}: {response.text}")
 
     calls = []
-    for line in response.iter_lines():
+    for line in _lines(response):
         if not line:
             continue
         try:

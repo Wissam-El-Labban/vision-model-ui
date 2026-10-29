@@ -3,6 +3,8 @@ export type Role = "user" | "assistant" | "system";
 export interface ChatMessage {
   role: Role;
   content: string;
+  /** The stored row's id, for messages loaded from history. */
+  id?: string;
   /** Data-URL strings (data:image/...;base64,...) for display + sending. */
   images?: string[];
   /** Generated video URLs (`/api/images/<hash>.webm`) — never data-URLs, unlike
@@ -220,6 +222,7 @@ export interface ChatSummary {
 
 /** A message as returned by GET /api/chats/{id} (images are URLs, not data). */
 export interface StoredMessage {
+  id: string;
   role: Role;
   content: string;
   model: string | null;
@@ -242,4 +245,23 @@ export interface ChatDetail {
   /** Whether those documents may shape image/video prompts (off by default). */
   doc_prompts?: boolean;
   messages: StoredMessage[];
+  /** The chat's latest turn, if the backend still knows it: running (follow it)
+   *  or finished (offer Retry if it failed). */
+  job: JobInfo | null;
+}
+
+/** Which endpoint a turn ran on, and so how its events read. */
+export type JobKind = "chat" | "generate" | "agent";
+
+/** `partial` is an agent turn where some steps worked and some didn't. */
+export type JobStatus = "running" | "done" | "partial" | "error" | "cancelled";
+
+/** One turn running (or recently run) on the backend. */
+export interface JobInfo {
+  id: string;
+  chat_id: string | null;
+  kind: JobKind;
+  status: JobStatus;
+  error: string | null;
+  started_at: number;
 }

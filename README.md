@@ -11,6 +11,10 @@ Built with a **React (Vite + TypeScript)** frontend and a **FastAPI** backend th
   follow-up*. Images are sent as separate images (not combined into one), so the model sees each one
   distinctly. This replaces the old Single/Dual/Triple tabs.
 - **Streaming responses** — tokens appear live as the model generates them.
+- **Turns that survive a reload** — every answer, image and agent turn runs as a job on the
+  backend, so reloading or switching chats only stops *watching* it. Come back and it picks up
+  live where it has got to. A pulsing dot in the chat list marks the chats with a turn running.
+  **Stop** cancels the job for real, and a failed or stopped turn offers **↻ Retry**.
 - **System prompt** — optional custom system prompt, with an optional persistent context image sent
   with every message.
 - **Model management** — list installed vision models, download new ones (with live progress),

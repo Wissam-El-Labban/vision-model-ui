@@ -21,6 +21,7 @@ interface Props {
   onNewChat: () => void;
   onOpenChat: (id: string) => void;
   onDeleteChat: (id: string) => void;
+  runningChats: Set<string>;
   thinking: boolean;
   setThinking: (v: boolean) => void;
   thinkingDisplay: ThinkingDisplay;
@@ -48,6 +49,7 @@ export default function Sidebar(props: Props) {
     onNewChat,
     onOpenChat,
     onDeleteChat,
+    runningChats,
     thinking,
     setThinking,
     thinkingDisplay,
@@ -88,6 +90,7 @@ export default function Sidebar(props: Props) {
         onNewChat={onNewChat}
         onOpenChat={onOpenChat}
         onDeleteChat={onDeleteChat}
+        runningChats={runningChats}
       />
 
       <Documents

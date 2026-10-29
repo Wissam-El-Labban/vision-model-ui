@@ -7,6 +7,8 @@ interface Props {
   onNewChat: () => void;
   onOpenChat: (id: string) => void;
   onDeleteChat: (id: string) => void;
+  /** Chats with a turn running on the backend. */
+  runningChats: Set<string>;
 }
 
 /** List of saved conversations. Each row shows the chat's first pinned image(s)
@@ -18,6 +20,7 @@ export default function ChatList({
   onNewChat,
   onOpenChat,
   onDeleteChat,
+  runningChats,
 }: Props) {
   // Two-step delete guardrail: first click on ✕ arms "Delete?"; a second click
   // deletes. Auto-reverts after a few seconds (and on leaving the row).
@@ -41,12 +44,18 @@ export default function ChatList({
         <p className="muted small chat-empty">No saved chats yet.</p>
       ) : (
         <ul className="chat-items">
-          {chats.map((c) => (
+          {chats.map((c) => {
+            const running = runningChats.has(c.id);
+            return (
             <li
               key={c.id}
               className={`chat-item ${c.id === currentChatId ? "active" : ""}`}
               onClick={() => onOpenChat(c.id)}
-              title={c.title ?? "Untitled chat"}
+              title={
+                running
+                  ? `${c.title ?? "Untitled chat"} — working on a turn`
+                  : c.title ?? "Untitled chat"
+              }
             >
               <div className="chat-icons">
                 {c.icons.length > 0 ? (
@@ -58,11 +67,18 @@ export default function ChatList({
                 )}
               </div>
               <span className="chat-title">
+                {running && <span className="chat-running" aria-label="Working" />}
                 {c.title ?? <span className="muted">Untitled…</span>}
               </span>
               <button
                 className={`chat-del ${confirmId === c.id ? "confirming" : ""}`}
-                title={confirmId === c.id ? "Click again to delete" : "Delete chat"}
+                title={
+                  confirmId === c.id
+                    ? running
+                      ? "Click again to delete — this stops the turn it's working on"
+                      : "Click again to delete"
+                    : "Delete chat"
+                }
                 onClick={(e) => {
                   e.stopPropagation();
                   if (confirmId === c.id) {
@@ -73,10 +89,11 @@ export default function ChatList({
                   }
                 }}
               >
-                {confirmId === c.id ? "Delete?" : "✕"}
+                {confirmId === c.id ? (running ? "Stop & delete?" : "Delete?") : "✕"}
               </button>
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
     </div>

@@ -349,6 +349,7 @@ def get_chat(chat_id: str) -> dict | None:
             )
             messages.append(
                 {
+                    "id": m["id"],
                     "role": m["role"],
                     "content": m["content"],
                     "model": m["model"],
@@ -476,6 +477,12 @@ def set_title(chat_id: str, title: str) -> None:
         conn.execute("UPDATE chats SET title = ? WHERE id = ?", (title, chat_id))
 
 
+def get_title(chat_id: str) -> str | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT title FROM chats WHERE id = ?", (chat_id,)).fetchone()
+    return row["title"] if row else None
+
+
 def get_first_exchange(chat_id: str) -> tuple[str, str] | None:
     """Return (first_user_content, first_assistant_content) for titling."""
     with _connect() as conn:
@@ -492,6 +499,29 @@ def get_first_exchange(chat_id: str) -> tuple[str, str] | None:
     if not user:
         return None
     return (user["content"], assistant["content"] if assistant else "")
+
+
+def chat_exists(chat_id: str) -> bool:
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT 1 FROM chats WHERE id = ?", (chat_id,)
+        ).fetchone() is not None
+
+
+def delete_messages(chat_id: str, ids: list[str]) -> None:
+    """Remove these messages (and their image links) from `chat_id`.
+
+    For Retry, which replaces a failed turn rather than adding a second copy of it.
+    Image files are left alone, as `delete_chat` leaves them.
+    """
+    if not ids:
+        return
+    marks = ",".join("?" * len(ids))
+    with _connect() as conn:
+        # Image links go with them (ON DELETE CASCADE).
+        conn.execute(
+            f"DELETE FROM messages WHERE chat_id = ? AND id IN ({marks})",
+            (chat_id, *ids))
 
 
 def delete_chat(chat_id: str) -> None:

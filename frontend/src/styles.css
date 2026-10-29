@@ -2113,6 +2113,28 @@ button.res-meter.open {
   white-space: nowrap;
   font-size: 13px;
 }
+/* A turn is running in this chat on the backend. */
+.chat-running {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+  animation: chat-running 1.2s ease-in-out infinite;
+}
+@keyframes chat-running {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.7); }
+}
+
+/* Retry, under a turn that failed or was stopped. */
+.retry-row {
+  display: flex;
+  justify-content: flex-start;
+  padding: 0 0 8px 44px;
+}
 
 .chat-del {
   flex-shrink: 0;

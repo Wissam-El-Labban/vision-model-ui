@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from . import images  # noqa: F401  (imported first: pins HF offline env)
 from . import agent
 from . import db
+from . import jobs
 from . import flux_catalog as cat
 from . import flux_client as fx
 from . import ollama_client as oc
@@ -68,6 +69,16 @@ class ChatRequest(BaseModel):
     # with — what the user typed, without the image manifest the last message has.
     doc_ids: list[str] = []
     doc_query: str = ""
+    # The chat to record the turn in, and the turn as it should be recorded: what
+    # the user typed and attached (the last message carries the image manifest
+    # instead), plus the numbered images the answer's "image N" refers to. The job
+    # writes both turns itself, so a reload mid-answer loses neither. None = don't
+    # record. The chat row must already exist (PUT /api/chats/<id>).
+    chat_id: str | None = None
+    user_content: str = ""
+    user_image_hashes: list[str] = []
+    context_hashes: list[str] = []
+    title_model: str | None = None  # names the chat after its first exchange
 
 
 class PullRequest(BaseModel):
@@ -179,6 +190,7 @@ class GenerateRequest(BaseModel):
     # the request, so it — not the browser — is what writes the turns. None means
     # don't record. The chat row must already exist (PUT /api/chats/<id>).
     chat_id: str | None = None
+    title_model: str | None = None  # names the chat after its first exchange
 
 
 class AgentRequest(BaseModel):
@@ -222,6 +234,7 @@ class AgentRequest(BaseModel):
     # Off, they still answer questions — the agent is just told to keep them out
     # of tool arguments.
     doc_prompts: bool = False
+    title_model: str | None = None  # names the chat after its first exchange
 
 
 # --------------------------------------------------------------------------- #
@@ -268,29 +281,100 @@ def _with_documents(messages: list[dict], doc_ids: list[str], query: str,
     return rag.sources(hits)
 
 
-@app.post("/api/chat")
-def chat(req: ChatRequest):
-    messages = [m.model_dump(exclude_none=True) for m in req.messages]
+def _start_job(chat_id: str | None, kind: str, work, rerun) -> "jobs.Job":
+    try:
+        return jobs.start(chat_id, kind, work, rerun)
+    except jobs.Busy:
+        raise HTTPException(
+            status_code=409,
+            detail="This chat is still working on a turn. Stop it or wait for it "
+                   "to finish.",
+        )
 
-    def gen():
+
+def _job_stream(job: "jobs.Job", after: int = 0) -> StreamingResponse:
+    return StreamingResponse(jobs.subscribe(job, after),
+                             media_type="application/x-ndjson")
+
+
+def _relay(job: "jobs.Job", stream):
+    """Pass a model stream through, cutting it off when the job is cancelled.
+
+    Closing it drops the connection to Ollama, which stops the generation instead
+    of leaving it to finish an answer nobody asked to keep.
+    """
+    try:
+        for event in stream:
+            job.check()
+            yield event
+    finally:
+        stream.close()
+
+
+def _name_chat(job: "jobs.Job", model: str | None, ollama_url: str) -> None:
+    """Title the chat after its first exchange, if nothing has titled it yet.
+
+    Done here rather than by the page, so a turn that finished while the page was
+    closed still names its chat. Best-effort, like the titler itself.
+    """
+    if not job.chat_id or not model or job.deleted:
+        return
+    try:
+        if db.get_title(job.chat_id):
+            return
+        exchange = db.get_first_exchange(job.chat_id)
+        if exchange:
+            title = oc.generate_title(ollama_url, model, *exchange)
+            if title and not job.deleted:
+                db.set_title(job.chat_id, title)
+    except Exception:
+        logging.exception("titling chat %s failed", job.chat_id)
+
+
+def _chat_job(req: ChatRequest) -> "jobs.Job":
+    def work(job):
+        messages = [m.model_dump(exclude_none=True) for m in req.messages]
+        record = _recorder(req.chat_id, job)
+        # First, before anything slow: this turn must survive the page that asked.
+        record("user", req.user_content, req.model, list(req.user_image_hashes))
+        text, found, failure = "", [], None
         try:
             if req.doc_ids:
                 try:
                     found = _with_documents(messages, req.doc_ids, req.doc_query,
                                             req.ollama_url)
-                    yield json.dumps({"type": "sources", "sources": found}) + "\n"
+                    job.emit({"type": "sources", "sources": found})
                 except Exception as exc:
                     # Said, then answered anyway: the question still deserves an
                     # answer, but not one that looks like it read the documents.
-                    yield json.dumps({"type": "docs_error", "message":
-                                      f"Documents weren't searched: {exc}"}) + "\n"
+                    job.emit({"type": "docs_error", "message":
+                              f"Documents weren't searched: {exc}"})
             think = req.think and oc.supports_thinking(req.ollama_url, req.model)
-            for event in oc.stream_chat(req.ollama_url, req.model, messages, think):
-                yield json.dumps(event) + "\n"
-        except Exception as exc:  # surfaced inline so the client can show it
-            yield json.dumps({"type": "error", "message": str(exc)}) + "\n"
+            for event in _relay(job, oc.stream_chat(req.ollama_url, req.model,
+                                                    messages, think)):
+                if event["type"] == "token":
+                    text += event["text"]
+                job.emit(event)
+        except Exception as exc:
+            failure = exc
+        # Whatever arrived is recorded, however the turn ended: a stopped answer
+        # keeps what it got to, and a failed one says why, as it did on screen.
+        content = text.strip()
+        if failure is not None and not job.cancel.is_set():
+            content = f"{content}\n\n⚠️ {failure}".strip()
+        elif failure is not None and not content:
+            content = "⏹ Stopped."
+        record("assistant", content, req.model, [], list(req.context_hashes), found)
+        if failure is not None:
+            raise failure
+        _name_chat(job, req.title_model or req.model, req.ollama_url)
 
-    return StreamingResponse(gen(), media_type="application/x-ndjson")
+    return _start_job(req.chat_id, "chat", work, lambda: _chat_job(req))
+
+
+@app.post("/api/chat")
+def chat(req: ChatRequest):
+    return _job_stream(_chat_job(req))
 
 
 @app.post("/api/models/pull")
@@ -798,8 +882,8 @@ def _resolve(h: str):
         )
 
 
-def _emitter(events: queue.Queue, tool_index: int | None = None):
-    """Push events onto the stream, tagged with which agent step produced them.
+def _emitter(put, tool_index: int | None = None):
+    """Push events through `put`, tagged with which agent step produced them.
 
     Agent mode can run several generations in one response, so a progress event
     means nothing without saying which step it belongs to. `/api/generate` has one
@@ -809,7 +893,7 @@ def _emitter(events: queue.Queue, tool_index: int | None = None):
     def emit(event: dict) -> None:
         if tool_index is not None:
             event = {**event, "tool_index": tool_index}
-        events.put(event)
+        put(event)
 
     return emit
 
@@ -940,21 +1024,27 @@ def _run_job(*, mode, prompt, init_image, ref_images, control_maps, unet, label,
     )
 
 
-def _recorder(chat_id: str | None):
+def _recorder(chat_id: str | None, job: "jobs.Job | None" = None):
     """A `record(turn, content, model, hashes)` that writes to `chat_id`.
 
     Best-effort: a database that won't take the row is no reason to sink a job the
     user has already waited minutes for. The generation itself is still delivered
     over the stream regardless.
+
+    With a `job`, each row's id is noted on it — so a running job's rows can be
+    left to its replay, and a retried job's rows replaced — and nothing is written
+    once the chat has been deleted under it.
     """
     def record(turn: str, content: str, model_label: str, hashes: list[str],
                context_hashes: list[str] | None = None,
                sources: list[dict] | None = None) -> None:
-        if not chat_id:
+        if not chat_id or (job and job.deleted):
             return
         try:
-            db.append_message(chat_id, turn, content, model_label, hashes,
-                              context_hashes, sources)
+            msg_id = db.append_message(chat_id, turn, content, model_label, hashes,
+                                       context_hashes, sources)
+            if job:
+                job.message_ids.append(msg_id)
         except Exception:
             logging.exception("recording %s turn in chat %s failed", turn, chat_id)
 
@@ -1047,83 +1137,86 @@ def generate(req: GenerateRequest):
     FLUX dev, edit/compose on FLUX Kontext. The other GPU tenant (the Ollama vision
     model) is freed first when the GPU can't hold both (see `_free_gpu_for_flux`),
     and reloaded in the background afterwards. The synchronous call runs
-    in a worker thread that pushes events onto a queue the response generator drains.
+    as a job (see `jobs`) that the response, and any page that comes back to it, follows.
     """
     if not fx.available():
         raise HTTPException(status_code=503, detail=FLUX_MISSING)
+    return _job_stream(_generate_job(req))
 
+
+def _generate_job(req: GenerateRequest) -> "jobs.Job":
     # Resolve stored image hashes to PIL objects (init image for img2img/edit,
     # reference images for compose).
     init_image = _resolve(req.init_image_hash) if req.init_image_hash else None
     ref_images = [_resolve(h) for h in req.ref_image_hashes]
     control_maps = [_resolve(h) for h in req.control_map_hashes]
 
-    def gen():
-        events: queue.Queue = queue.Queue()
-        emit = _emitter(events)
-        record = _recorder(req.chat_id)
+    def work(job):
+        emit = _emitter(job.emit)
+        record = _recorder(req.chat_id, job)
+        unet = None
+        try:
+            # Resolve the transformer once, here, and pass the resolved name down
+            # (resolving is idempotent). A request naming a model that can't serve
+            # this mode still falls back rather than failing — a stale model list
+            # is a legitimate reason to arrive here — but it says so instead of
+            # quietly running something else.
+            role = fx.role_for_mode(req.mode)
+            unet = fx.resolve_unet(req.flux_model, role)
+            if req.flux_model and unet != os.path.basename(str(req.flux_model)):
+                emit({"type": "status", "message":
+                      f"{os.path.basename(str(req.flux_model))} can't {req.mode} "
+                      f"here — using {fx.label(unet)} instead"})
+            label = fx.label(unet)
 
-        def worker():
-            unet = None
-            try:
-                # Resolve the transformer once, here, and pass the resolved name down
-                # (resolving is idempotent). A request naming a model that can't serve
-                # this mode still falls back rather than failing — a stale model list
-                # is a legitimate reason to arrive here — but it says so instead of
-                # quietly running something else.
-                role = fx.role_for_mode(req.mode)
-                unet = fx.resolve_unet(req.flux_model, role)
-                if req.flux_model and unet != os.path.basename(str(req.flux_model)):
-                    emit({"type": "status", "message":
-                          f"{os.path.basename(str(req.flux_model))} can't {req.mode} "
-                          f"here — using {fx.label(unet)} instead"})
-                label = fx.label(unet)
-                _free_gpu_for_flux(req.ollama_url, [unet], emit,
-                                   always=req.unload_ollama)
+            # Record the prompt before anything slow rather than after the image.
+            # A reload drops the stream but not the job, and a page that comes back
+            # mid-run replays the job's events onto the turn it finds here — so a
+            # turn written only on completion would be missing in exactly the case
+            # that hurts, a cold FLUX.2 load that runs for minutes.
+            # `label` is what will actually run, so the pair can't disagree.
+            # Every image the job conditions on, not just the first. An edit takes
+            # the scene in `init_image_hash` *and* subject references after it;
+            # recording only the init left a reloaded turn showing fewer images
+            # than the generate actually used. compose sends no init, so the same
+            # expression covers every mode.
+            record("user", req.display_prompt or req.prompt, label,
+                   [h for h in (req.init_image_hash,) if h]
+                   + list(req.ref_image_hashes) + list(req.control_map_hashes))
 
-                # Record the prompt before sampling rather than after it. This thread
-                # outlives the request — a reload or a Stop drops the stream but not
-                # the job — so a turn written only on completion is lost in exactly
-                # the case that hurts, a cold FLUX.2 load that runs for minutes.
-                # `label` is what will actually run, so the pair can't disagree.
-                # Every image the job conditions on, not just the first. An edit takes
-                # the scene in `init_image_hash` *and* subject references after it;
-                # recording only the init left a reloaded turn showing fewer images
-                # than the generate actually used. compose sends no init, so the same
-                # expression covers every mode.
-                record("user", req.display_prompt or req.prompt, label,
-                       [h for h in (req.init_image_hash,) if h]
-                       + list(req.ref_image_hashes) + list(req.control_map_hashes))
+            _free_gpu_for_flux(req.ollama_url, [unet], emit,
+                               always=req.unload_ollama)
+            job.check()
 
-                seed = req.seed if req.seed is not None else random.randint(0, 2**31 - 1)
-                _run_job(
-                    mode=req.mode, prompt=req.prompt,
-                    init_image=init_image, ref_images=ref_images,
-                    control_maps=control_maps, unet=unet, label=label, seed=seed,
-                    emit=emit, record=record,
-                    steps=req.steps, guidance=req.guidance, strength=req.strength,
-                    enhance=req.enhance, width=req.width, height=req.height,
-                    seconds=req.seconds, control_kinds=req.control_kinds,
-                    structure_lock=req.structure_lock,
-                    control_strength=req.control_strength,
-                    canny_low=req.canny_low, canny_high=req.canny_high,
-                    parent_hash=req.init_image_hash,
-                )
-            except Exception as exc:
-                events.put({"type": "error", "message": str(exc)})
-            finally:
-                events.put(None)  # sentinel: worker done
-                if unet and not req.unload_ollama:
-                    _warm_after(req.ollama_url, req.warm_model, [unet])
+            seed = req.seed if req.seed is not None else random.randint(0, 2**31 - 1)
+            _run_job(
+                mode=req.mode, prompt=req.prompt,
+                init_image=init_image, ref_images=ref_images,
+                control_maps=control_maps, unet=unet, label=label, seed=seed,
+                emit=emit, record=record,
+                steps=req.steps, guidance=req.guidance, strength=req.strength,
+                enhance=req.enhance, width=req.width, height=req.height,
+                seconds=req.seconds, control_kinds=req.control_kinds,
+                structure_lock=req.structure_lock,
+                control_strength=req.control_strength,
+                canny_low=req.canny_low, canny_high=req.canny_high,
+                parent_hash=req.init_image_hash,
+            )
+        except Exception as exc:
+            # The turn already has its prompt; give it the outcome too, so a chat
+            # opened later says what happened rather than ending on a question.
+            if job.message_ids:
+                stopped = job.cancel.is_set()
+                record("assistant", "⏹ Stopped." if stopped else f"⚠️ {exc}",
+                       fx.label(unet), [])
+            raise
+        finally:
+            fx.release(threading.get_ident())
+            if unet and not req.unload_ollama:
+                _warm_after(req.ollama_url, req.warm_model, [unet])
+        _name_chat(job, req.title_model, req.ollama_url)
 
-        threading.Thread(target=worker, daemon=True).start()
-        while True:
-            item = events.get()
-            if item is None:
-                break
-            yield json.dumps(item) + "\n"
-
-    return StreamingResponse(gen(), media_type="application/x-ndjson")
+    return _start_job(req.chat_id, "generate", work, lambda: _generate_job(req))
 
 
 # --------------------------------------------------------------------------- #
@@ -1190,6 +1283,10 @@ def agent_turn(req: AgentRequest):
         if db.image_path(h) is None:
             raise HTTPException(status_code=404, detail=f"image {h} not found")
 
+    return _job_stream(_agent_job(req))
+
+
+def _agent_job(req: AgentRequest) -> "jobs.Job":
     n_images = len(req.context_hashes)
     enabled = set(req.enabled_tools)
     # The user's own system prompt, if they set one, arrives as a leading system
@@ -1208,172 +1305,179 @@ def agent_turn(req: AgentRequest):
             )
         return [{"role": "system", "content": system}, *history]
 
-    def gen():
-        events: queue.Queue = queue.Queue()
-        emit = _emitter(events)
-        record = _recorder(req.chat_id)
+    def work(job):
+        emit = _emitter(job.emit)
+        record = _recorder(req.chat_id, job)
+        text, answered = "", False
+        try:
+            # Before anything slow, for the same reason /api/generate records
+            # early: this thread outlives the request, so a reload must not be
+            # able to lose the turn that started the work.
+            record("user", req.prompt, req.model, list(req.attachment_hashes),
+                   list(req.context_hashes))
 
-        def worker():
-            try:
-                # Before anything slow, for the same reason /api/generate records
-                # early: this thread outlives the request, so a reload must not be
-                # able to lose the turn that started the work.
-                record("user", req.prompt, req.model, list(req.attachment_hashes),
-                       list(req.context_hashes))
+            # Documents first, so the planner reads them whichever way the turn
+            # goes: answered in words, or a prompt written from a character
+            # sheet. `history` is what `brief` sends, so this lands in both.
+            found = []
+            if req.doc_ids:
+                emit({"type": "status", "message": "Searching your documents…"})
+                try:
+                    found = _with_documents(
+                        history, req.doc_ids, req.prompt, req.ollama_url,
+                        "answer" if req.doc_prompts else "answer_only")
+                    emit({"type": "sources", "sources": found})
+                except Exception as exc:
+                    emit({"type": "docs_error", "message":
+                          f"Documents weren't searched: {exc}"})
 
-                # Documents first, so the planner reads them whichever way the turn
-                # goes: answered in words, or a prompt written from a character
-                # sheet. `history` is what `brief` sends, so this lands in both.
-                found = []
-                if req.doc_ids:
-                    emit({"type": "status", "message": "Searching your documents…"})
-                    try:
-                        found = _with_documents(
-                            history, req.doc_ids, req.prompt, req.ollama_url,
-                            "answer" if req.doc_prompts else "answer_only")
-                        emit({"type": "sources", "sources": found})
-                    except Exception as exc:
-                        emit({"type": "docs_error", "message":
-                              f"Documents weren't searched: {exc}"})
+            emit({"type": "status", "message": f"Thinking with {req.model}…"})
+            think = req.think and oc.supports_thinking(req.ollama_url, req.model)
+            calls = []
 
-                emit({"type": "status", "message": f"Thinking with {req.model}…"})
-                think = req.think and oc.supports_thinking(req.ollama_url, req.model)
-                text = ""
-                calls = []
+            # Is this a request to make an image at all? Settled first, on the
+            # text alone, so a question is answered by a model that was never
+            # shown a tool — see `agent.wants_image`. Skipped when no tool is
+            # switched on, since the answer couldn't change anything.
+            tools = agent.tool_schemas(enabled, n_images)
+            if tools and not agent.wants_image(req.ollama_url, req.model, req.prompt):
+                tools = []
 
-                # Is this a request to make an image at all? Settled first, on the
-                # text alone, so a question is answered by a model that was never
-                # shown a tool — see `agent.wants_image`. Skipped when no tool is
-                # switched on, since the answer couldn't change anything.
-                tools = agent.tool_schemas(enabled, n_images)
-                if tools and not agent.wants_image(req.ollama_url, req.model, req.prompt):
-                    tools = []
-
-                if tools:
-                    messages = brief(agent.system_prompt(enabled, n_images))
-                    for event in oc.stream_chat_tools(
-                        req.ollama_url, req.model, messages, tools, think
-                    ):
-                        if event["type"] == "token":
-                            text += event["text"]
-                            emit(event)
-                        elif event["type"] == "tool_calls":
-                            calls = event["calls"]
-                        else:
-                            emit(event)  # usage, for the context meter
-
-                # Either this was a question, or the turn above produced nothing at
-                # all — a dead end that leaves the user an empty bubble and no
-                # reason for it. Both want the same thing: answer, with no tool
-                # vocabulary in the way. Ollama is still loaded here, so the retry
-                # costs a round trip and no model swap.
-                if not calls and not text.strip():
-                    for event in oc.stream_chat(
-                        req.ollama_url, req.model, brief(agent.answer_system()), think
-                    ):
-                        if event["type"] == "token":
-                            text += event["text"]
+            if tools:
+                messages = brief(agent.system_prompt(enabled, n_images))
+                for event in _relay(job, oc.stream_chat_tools(
+                    req.ollama_url, req.model, messages, tools, think
+                )):
+                    if event["type"] == "token":
+                        text += event["text"]
                         emit(event)
+                    elif event["type"] == "tool_calls":
+                        calls = event["calls"]
+                    else:
+                        emit(event)  # usage, for the context meter
 
-                # Validate everything before running anything. A plan that is half
-                # impossible should say so up front rather than after four minutes
-                # of sampling the half that worked.
-                specs = []
-                for index, call in enumerate(calls):
-                    try:
-                        specs.append((index, call, agent.validate(
-                            call["name"], call.get("arguments") or {}, n_images)))
-                    except ValueError as exc:
-                        emit({"type": "tool_error", "index": index,
-                              "name": call.get("name", ""), "message": str(exc)})
+            # Either this was a question, or the turn above produced nothing at
+            # all — a dead end that leaves the user an empty bubble and no
+            # reason for it. Both want the same thing: answer, with no tool
+            # vocabulary in the way. Ollama is still loaded here, so the retry
+            # costs a round trip and no model swap.
+            if not calls and not text.strip():
+                for event in _relay(job, oc.stream_chat(
+                    req.ollama_url, req.model, brief(agent.answer_system()), think
+                )):
+                    if event["type"] == "token":
+                        text += event["text"]
+                    emit(event)
 
-                # No tool calls is a normal outcome, not a failure: the model was
-                # asked a question, or wants to know which image is meant. Its
-                # answer is the whole turn.
-                if text.strip():
-                    record("assistant", text.strip(), req.model, [], sources=found)
-                if not specs:
-                    emit({"type": "done"})
-                    return
+            # Validate everything before running anything. A plan that is half
+            # impossible should say so up front rather than after four minutes
+            # of sampling the half that worked.
+            specs = []
+            for index, call in enumerate(calls):
+                try:
+                    specs.append((index, call, agent.validate(
+                        call["name"], call.get("arguments") or {}, n_images)))
+                except ValueError as exc:
+                    emit({"type": "tool_error", "index": index,
+                          "name": call.get("name", ""), "message": str(exc)})
 
-                unets = []
-                for _, _, spec in specs:
-                    try:
-                        role = fx.role_for_mode(spec["mode"])
-                        unets.append(fx.resolve_unet(_agent_pick(req, role), role))
-                    except Exception:
-                        unets.append("")  # unknown: forces the safe unload
-                _free_gpu_for_flux(req.ollama_url, unets, emit,
-                                   always=req.unload_ollama)
-
-                for index, call, spec in specs:
-                    step = _emitter(events, tool_index=index)
-                    step({"type": "tool_call", "index": index, "name": call["name"],
-                          "args": call.get("arguments") or {}})
-                    try:
-                        role = fx.role_for_mode(spec["mode"])
-                        unet = fx.resolve_unet(_agent_pick(req, role), role)
-                        label = fx.label(unet)
-                        seed = (req.seed if req.seed is not None
-                                else random.randint(0, 2**31 - 1))
-                        init_hash = (req.context_hashes[spec["init"]]
-                                     if spec["init"] is not None else None)
-                        ref_hashes = [req.context_hashes[i] for i in spec["refs"]]
-                        prompt = spec["prompt"]
-                        people = spec.get("people", False)
-                        if spec["mode"] == "edit":
-                            line = db.lineage(init_hash)
-                            people = people or bool(line and line["people"])
-                            root_ok = bool(line and db.image_path(line["root_hash"]))
-                            prompt, root = agent.guard_edit(
-                                prompt, people, line, root_ok)
-                            # Last, so the guard's "final reference image" is it.
-                            if root and root != init_hash and root not in ref_hashes:
-                                step({"type": "status", "message":
-                                      "Anchoring the face to the original photo…"})
-                                ref_hashes.append(root)
-                        _run_job(
-                            mode=spec["mode"], prompt=prompt,
-                            init_image=(_resolve(init_hash)
-                                        if init_hash is not None else None),
-                            ref_images=[_resolve(h) for h in ref_hashes],
-                            control_maps=[], unet=unet, label=label, seed=seed,
-                            emit=step, record=record,
-                            steps=req.steps, guidance=req.guidance,
-                            # The agent's aspect choice if it made one, else the
-                            # size the user set in the generate settings.
-                            width=spec.get("width") or req.width,
-                            height=spec.get("height") or req.height,
-                            seconds=spec.get("seconds"),
-                            # It writes its own prompt to the same brief the
-                            # enhancer uses, so wrapping it in the photoreal
-                            # template on top would fight what it wrote.
-                            enhance=False,
-                            parent_hash=init_hash, people=people,
-                        )
-                    except Exception as exc:
-                        # One failed step doesn't sink the others. The user still
-                        # gets the images that worked, and a reason for the one
-                        # that didn't.
-                        logging.exception("agent tool %s failed", call["name"])
-                        step({"type": "tool_error", "index": index,
-                              "name": call["name"], "message": str(exc)})
+            # No tool calls is a normal outcome, not a failure: the model was
+            # asked a question, or wants to know which image is meant. Its
+            # answer is the whole turn.
+            if text.strip():
+                record("assistant", text.strip(), req.model, [], sources=found)
+            answered = True
+            if not specs:
                 emit({"type": "done"})
-                if not req.unload_ollama:
-                    _warm_after(req.ollama_url, req.model, unets)
-            except Exception as exc:
-                events.put({"type": "error", "message": str(exc)})
-            finally:
-                events.put(None)  # sentinel: worker done
+                _name_chat(job, req.title_model or req.model, req.ollama_url)
+                return
 
-        threading.Thread(target=worker, daemon=True).start()
-        while True:
-            item = events.get()
-            if item is None:
-                break
-            yield json.dumps(item) + "\n"
+            unets = []
+            for _, _, spec in specs:
+                try:
+                    role = fx.role_for_mode(spec["mode"])
+                    unets.append(fx.resolve_unet(_agent_pick(req, role), role))
+                except Exception:
+                    unets.append("")  # unknown: forces the safe unload
+            job.check()
+            _free_gpu_for_flux(req.ollama_url, unets, emit,
+                               always=req.unload_ollama)
 
-    return StreamingResponse(gen(), media_type="application/x-ndjson")
+            for index, call, spec in specs:
+                # Stopped between steps: the ones still to come never start.
+                job.check()
+                step = _emitter(job.emit, tool_index=index)
+                step({"type": "tool_call", "index": index, "name": call["name"],
+                      "args": call.get("arguments") or {}})
+                try:
+                    role = fx.role_for_mode(spec["mode"])
+                    unet = fx.resolve_unet(_agent_pick(req, role), role)
+                    label = fx.label(unet)
+                    seed = (req.seed if req.seed is not None
+                            else random.randint(0, 2**31 - 1))
+                    init_hash = (req.context_hashes[spec["init"]]
+                                 if spec["init"] is not None else None)
+                    ref_hashes = [req.context_hashes[i] for i in spec["refs"]]
+                    prompt = spec["prompt"]
+                    people = spec.get("people", False)
+                    if spec["mode"] == "edit":
+                        line = db.lineage(init_hash)
+                        people = people or bool(line and line["people"])
+                        root_ok = bool(line and db.image_path(line["root_hash"]))
+                        prompt, root = agent.guard_edit(
+                            prompt, people, line, root_ok)
+                        # Last, so the guard's "final reference image" is it.
+                        if root and root != init_hash and root not in ref_hashes:
+                            step({"type": "status", "message":
+                                  "Anchoring the face to the original photo…"})
+                            ref_hashes.append(root)
+                    _run_job(
+                        mode=spec["mode"], prompt=prompt,
+                        init_image=(_resolve(init_hash)
+                                    if init_hash is not None else None),
+                        ref_images=[_resolve(h) for h in ref_hashes],
+                        control_maps=[], unet=unet, label=label, seed=seed,
+                        emit=step, record=record,
+                        steps=req.steps, guidance=req.guidance,
+                        # The agent's aspect choice if it made one, else the
+                        # size the user set in the generate settings.
+                        width=spec.get("width") or req.width,
+                        height=spec.get("height") or req.height,
+                        seconds=spec.get("seconds"),
+                        # It writes its own prompt to the same brief the
+                        # enhancer uses, so wrapping it in the photoreal
+                        # template on top would fight what it wrote.
+                        enhance=False,
+                        parent_hash=init_hash, people=people,
+                    )
+                except Exception as exc:
+                    if job.cancel.is_set():
+                        raise
+                    # One failed step doesn't sink the others. The user still
+                    # gets the images that worked, and a reason for the one
+                    # that didn't.
+                    logging.exception("agent tool %s failed", call["name"])
+                    step({"type": "tool_error", "index": index,
+                          "name": call["name"], "message": str(exc)})
+            emit({"type": "done"})
+            if not req.unload_ollama:
+                _warm_after(req.ollama_url, req.model, unets)
+            _name_chat(job, req.title_model or req.model, req.ollama_url)
+        except Exception as exc:
+            # Ended before the answer was recorded: keep what it had said, and why
+            # it stopped, as `/api/chat` does.
+            if not answered and job.message_ids:
+                content = text.strip()
+                if not job.cancel.is_set():
+                    content = f"{content}\n\n⚠️ {exc}".strip()
+                elif not content:
+                    content = "⏹ Stopped."
+                record("assistant", content, req.model, [])
+            raise
+        finally:
+            fx.release(threading.get_ident())
+
+    return _start_job(req.chat_id, "agent", work, lambda: _agent_job(req))
 
 
 # --------------------------------------------------------------------------- #
@@ -1533,6 +1637,15 @@ def get_chat(chat_id: str):
     chat = db.get_chat(chat_id)
     if chat is None:
         raise HTTPException(status_code=404, detail="Chat not found")
+    # The chat's latest turn, so the page can follow one still running and offer
+    # Retry on one that failed. While it runs, the rows it has written past its
+    # prompt are left out: the page rebuilds them by replaying the job's events,
+    # and would otherwise show an agent's early images twice.
+    job = jobs.latest_for_chat(chat_id)
+    chat["job"] = job.summary() if job else None
+    if job and job.running:
+        later = set(job.message_ids[1:])
+        chat["messages"] = [m for m in chat["messages"] if m["id"] not in later]
     return chat
 
 
@@ -1571,10 +1684,77 @@ def make_title(chat_id: str, req: TitleRequest):
     return {"title": title}
 
 
+@app.delete("/api/chats/{chat_id}/messages/{message_id}")
+def remove_message(chat_id: str, message_id: str):
+    db.delete_messages(chat_id, [message_id])
+    return {"ok": True}
+
+
 @app.delete("/api/chats/{chat_id}")
 def remove_chat(chat_id: str):
+    # A turn still running in it is stopped first, and told the chat is gone so it
+    # writes nothing more. Most stop within a moment; one stuck in a model load
+    # can't be interrupted, and `deleted` keeps whatever it does later harmless.
+    job = jobs.latest_for_chat(chat_id)
+    if job and job.running:
+        job.deleted = True
+        _cancel(job)
+        job.wait(5)
     db.delete_chat(chat_id)
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Jobs: the turns running (or recently run) in the background
+# --------------------------------------------------------------------------- #
+def _known_job(job_id: str) -> "jobs.Job":
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="That turn is no longer known.")
+    return job
+
+
+def _cancel(job: "jobs.Job") -> None:
+    job.cancel.set()
+    if job.kind != "chat" and job.thread_id is not None:
+        fx.stop(job.thread_id)
+
+
+@app.get("/api/jobs")
+def list_jobs():
+    """Running turns, so the sidebar can show which chats are busy."""
+    return {"jobs": [j.summary() for j in jobs.running()]}
+
+
+@app.get("/api/jobs/{job_id}/events")
+def job_events(job_id: str, after: int = 0):
+    """A turn's events from `after` on: everything so far, then live until it ends."""
+    return _job_stream(_known_job(job_id), after)
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    job = _known_job(job_id)
+    if job.running:
+        _cancel(job)
+    return {"ok": True}
+
+
+@app.post("/api/jobs/{job_id}/retry")
+def retry_job(job_id: str):
+    """Run a finished turn again in place of itself: its rows go, a new job starts."""
+    job = _known_job(job_id)
+    if job.running:
+        raise HTTPException(status_code=409, detail="That turn is still running.")
+    if job.deleted or (job.chat_id and not db.chat_exists(job.chat_id)):
+        raise HTTPException(status_code=404, detail="That chat was deleted.")
+    if job.chat_id:
+        busy = jobs.latest_for_chat(job.chat_id)
+        if busy and busy.running:
+            raise HTTPException(status_code=409,
+                                detail="This chat is still working on a turn.")
+        db.delete_messages(job.chat_id, job.message_ids)
+    return _job_stream(job.rerun())
 
 
 @app.on_event("shutdown")

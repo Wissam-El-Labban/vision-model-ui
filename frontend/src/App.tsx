@@ -12,11 +12,12 @@ import ResourceMeter from "./components/ResourceMeter";
 const PoseStudio = lazy(() => import("./components/PoseStudio"));
 import {
   agentRun,
-  appendMessage,
+  attachJob,
+  cancelJob,
   deleteChat,
+  deleteMessage,
   enhancePrompt,
   generate,
-  generateTitle,
   getAgentTools,
   isDocFile,
   getChat,
@@ -25,14 +26,21 @@ import {
   getModels,
   getPreprocessors,
   listChats,
+  listRunningJobs,
   putChat,
+  retryJob,
   streamChat,
   uploadImages,
   urlToDataUrl,
+  type AgentHandlers,
+  type ChatHandlers,
+  type ChatRecord,
   type FluxModel,
   type FluxPreprocessor,
+  type GenerateHandlers,
   type ModelDetail,
   type SystemFit,
+  type TurnHandlers,
   type Usage,
 } from "./api";
 import { fileToDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
@@ -60,11 +68,36 @@ import type {
   GenSettings,
   GenOp,
   EnhancerMode,
-  Source,
+  JobKind,
+  JobStatus,
   ThinkingDisplay,
 } from "./types";
 
 const DEFAULT_URL = "http://localhost:11434";
+
+/** The chat to reopen after a reload. */
+const CURRENT_CHAT_KEY = "currentChat";
+
+/** One turn's view onto the last message: the handlers its events go to, what to
+ *  show if the request itself fails, and how to settle the bubble once it ends. */
+interface Turn<H> {
+  on: H;
+  fail: (message: string) => void;
+  end: (status: JobStatus) => void;
+}
+
+/** A progress bar for a turn that has started but said nothing yet. */
+function startingProgress(phase: string): GenProgress {
+  return {
+    phase,
+    stage: "",
+    frac: null,
+    step: 0,
+    total: 0,
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+}
 
 /** Extract the sha256 hash from an image/thumb URL like /api/images/<hash>.png.
  *  The store keeps each image in its own format, so match any extension. */
@@ -267,7 +300,26 @@ export default function App() {
   const [progress, setProgress] = useState<GenProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [usage, setUsage] = useState<Usage | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  // The turn this page is following in the open chat. Every turn runs as a job
+  // on the backend, so dropping the fetch here only stops *watching* it — that is
+  // what switching chats and reloading do. Stop is what cancels.
+  const activeRef = useRef<{
+    chatId: string;
+    jobId: string | null;
+    controller: AbortController;
+  } | null>(null);
+  // The open chat's last turn once it has ended, for Retry.
+  const [lastJob, setLastJob] = useState<{
+    chatId: string;
+    id: string;
+    kind: JobKind;
+    status: JobStatus;
+  } | null>(null);
+  // Chats with a turn running on the backend, for the sidebar.
+  const [runningChats, setRunningChats] = useState<Set<string>>(() => new Set());
+  // Read at call time by `thinking` handlers, which can outlive a render.
+  const thinkingDisplayRef = useRef(thinkingDisplay);
+  thinkingDisplayRef.current = thinkingDisplay;
 
   // Persistence: one "current chat" whose id is minted up front; the DB row is
   // created lazily on the first send. `chatExists` gates metadata sync so we
@@ -276,6 +328,13 @@ export default function App() {
   const [currentChatId, setCurrentChatId] = useState<string>(() =>
     crypto.randomUUID()
   );
+  // The same id, readable from a turn's handlers before React has re-rendered:
+  // a turn writes to the screen only while its chat is the one open.
+  const currentChatRef = useRef(currentChatId);
+  const switchChat = useCallback((id: string) => {
+    currentChatRef.current = id;
+    setCurrentChatId(id);
+  }, []);
   const [chatExists, setChatExists] = useState(false);
   // Which library documents this chat answers from. Saved with the chat (like its
   // pinned images), so each chat keeps its own selection.
@@ -501,9 +560,19 @@ export default function App() {
     ensureHashes,
   ]);
 
+  /** Stop following the open chat's turn, without stopping the turn itself. */
+  const detach = useCallback(() => {
+    activeRef.current?.controller.abort();
+    activeRef.current = null;
+    setStreaming(false);
+    setProgress(null);
+    setLastJob(null);
+  }, []);
+
   const newChat = useCallback(() => {
-    abortRef.current?.abort();
-    setCurrentChatId(crypto.randomUUID());
+    detach();
+    switchChat(crypto.randomUUID());
+    localStorage.removeItem(CURRENT_CHAT_KEY);
     setChatExists(false);
     setMessages([]);
     setPinnedImages([]);
@@ -515,91 +584,558 @@ export default function App() {
     setError(null);
     setComposerText("");
     setComposerImages([]);
-  }, []);
+  }, [detach, switchChat]);
 
-  const openChat = useCallback(async (id: string) => {
-    try {
-      abortRef.current?.abort();
-      const d = await getChat(id);
+  // ------------------------------------------------------------------------- #
+  // Turns. Each kind has one builder for the handlers that fill in its assistant
+  // bubble, shared by the turn as it starts, the same turn followed again after a
+  // reload, and a retry of it. A page that comes back replays the job's events
+  // from the beginning, so the bubble is rebuilt exactly as it was built live.
+  //
+  // `alive` says whether the page is still following this turn. Once it isn't (the
+  // user opened another chat), nothing may write to the screen: `messages` is
+  // then another chat's, and "the last message" is somebody else's turn.
+  // ------------------------------------------------------------------------- #
+  const lastMessageWriter = useCallback(
+    (alive: () => boolean) =>
+      (patch: (m: ChatMessage) => Partial<ChatMessage>) => {
+        if (!alive()) return;
+        setMessages((prev) => {
+          const next = [...prev];
+          const last = next[next.length - 1];
+          next[next.length - 1] = { ...last, ...patch(last) };
+          return next;
+        });
+      },
+    []
+  );
 
-      // Load images back into memory as data-URLs and pre-seed the hash cache
-      // so they aren't re-uploaded on the next send. A missing file (e.g. one a
-      // past GC removed) resolves to null so we can drop it instead of showing a
-      // broken image or re-persisting a dead reference.
-      const loadImg = async (url: string): Promise<string | null> => {
-        try {
-          const data = await urlToDataUrl(url);
-          hashCache.current.set(data, hashFromUrl(url));
-          return data;
-        } catch {
-          return null;
+  /** Reasoning tokens: shown in the bubble when verbose, else only named on the bar. */
+  const thinkingHandler = useCallback(
+    (alive: () => boolean, write: ReturnType<typeof lastMessageWriter>) =>
+      (token: string) => {
+        if (!alive()) return;
+        if (thinkingDisplayRef.current === "verbose") {
+          // The reasoning is its own liveness signal, like the answer.
+          setProgress(null);
+          write((m) => ({ thinking: (m.thinking ?? "") + token }));
+        } else {
+          setProgress((p) => p && { ...p, phase: "💭 Thinking…", updatedAt: Date.now() });
         }
+      },
+    []
+  );
+
+  const chatTurn = useCallback(
+    (alive: () => boolean): Turn<ChatHandlers> => {
+      const write = lastMessageWriter(alive);
+      return {
+        on: {
+          onThinking: thinkingHandler(alive, write),
+          onToken: (token) => {
+            if (!alive()) return;
+            setProgress(null);
+            write((m) => ({ content: m.content + token }));
+          },
+          onUsage: (u) => alive() && setUsage(u),
+          onSources: (found) => write(() => ({ sources: found })),
+          onDocsError: (msg) => alive() && setError(msg),
+          onError: (msg) => write((m) => ({ content: `${m.content || ""}\n\n⚠️ ${msg}` })),
+        },
+        fail: (msg) =>
+          write((m) => ({ content: `${m.content}${m.content ? "\n\n" : ""}⚠️ ${msg}` })),
+        end: (status) => {
+          if (status === "cancelled")
+            write((m) => (m.content.trim() ? {} : { content: "⏹ Stopped." }));
+        },
       };
-      const present = (arr: (string | null)[]) =>
-        arr.filter((x): x is string => x !== null);
-      // The store holds video under the same `images` list a still uses — it's one
-      // content-addressed blob store and the hash doesn't say what it is. The URL's
-      // extension does, and it's the only signal here. Split on it so `images`
-      // stays "data-URLs of decodable images" on reload, exactly as it is live.
-      const isVideoUrl = (url: string) => url.toLowerCase().endsWith(".webm");
+    },
+    [lastMessageWriter, thinkingHandler]
+  );
 
-      // Dropping missing pinned images here also self-heals the DB: the next
-      // send re-persists the pinned set without them.
-      const pinned = present(await Promise.all(d.pinned.map(loadImg)));
-      const sysImg = d.system_image ? await loadImg(d.system_image) : null;
-      const msgs: ChatMessage[] = await Promise.all(
-        d.messages.map(async (m) => {
-          const videos = m.images.filter(isVideoUrl);
-          videos.forEach((url) => hashCache.current.set(url, hashFromUrl(url)));
-          const images = present(
-            await Promise.all(m.images.filter((u) => !isVideoUrl(u)).map(loadImg))
+  const generateTurn = useCallback(
+    (alive: () => boolean, icon: string, modelId: string): Turn<GenerateHandlers> => {
+      const write = lastMessageWriter(alive);
+      const setAssistant = (patch: Partial<ChatMessage>) => write(() => patch);
+      // Starts as this client's prediction; the backend's echo replaces it.
+      let resultLabel = modelId;
+      let produced = false;
+      // Control maps arrive one event at a time, before the image. Accumulated here
+      // rather than read back off the message, because `setAssistant` is a state
+      // update and the next map can land before it has applied.
+      let controlMaps: ControlMap[] = [];
+      return {
+        on: {
+          onStatus: (m) => {
+            setAssistant({ content: `${icon} ${m}` });
+            // A status line renames the job; it doesn't rewind it. The fraction
+            // covers the whole graph, so it survives every phase change until the
+            // job ends.
+            if (alive())
+              setProgress((p) => (p ? { ...p, phase: m, updatedAt: Date.now() } : p));
+          },
+          onProgress: ({ live, ...p }) => {
+            setAssistant({
+              content:
+                p.step > 0
+                  ? `${icon} ${p.stage}… step ${p.step}/${p.total} (${Math.round(p.frac * 100)}%)`
+                  : `${icon} ${p.stage}… ${Math.round(p.frac * 100)}%`,
+            });
+            // Only a live update means the backend is still there, so only a live
+            // update clears the stall clock — an estimate ticking through a silent
+            // load looks identical to a wedged one, and must not vouch for it.
+            if (alive())
+              setProgress((cur) =>
+                cur
+                  ? { ...cur, ...p, updatedAt: live ? Date.now() : cur.updatedAt }
+                  : cur
+              );
+          },
+          onControlMap: async (m) => {
+            // Fetched back as a data-URL like a generated image is, so a map can
+            // be pinned and re-fed on the next roll without a round trip — that's
+            // how you iterate on a prompt while holding one pose fixed.
+            let url = m.url;
+            try {
+              url = await urlToDataUrl(m.url);
+              hashCache.current.set(url, m.hash);
+            } catch {
+              /* fall back to the URL */
+            }
+            controlMaps = [...controlMaps, { kind: m.kind, url }];
+            setAssistant({ controlMaps });
+          },
+          onImage: async (r) => {
+            produced = true;
+            // The store keeps each result in its own format, so take the URL the
+            // backend built rather than assuming an extension here.
+            const url = r.url || `/api/images/${r.hash}.png`;
+            // The model the backend actually ran, which is the authoritative
+            // answer — `modelId` above is only this client's prediction of it.
+            if (r.model_label) resultLabel = r.model_label;
+
+            if (r.kind === "video") {
+              // Deliberately *not* urlToDataUrl'd. A 5s 720p clip is megabytes,
+              // which is a lot to hold base64'd in state for every turn — and
+              // `images` is data-URLs by convention, feeding a canvas resize
+              // (`ensureHashes`), the pin panel and the vision model, none of
+              // which can read a webm. Keeping video in its own field is what
+              // stops it reaching them.
+              hashCache.current.set(url, r.hash);
+              setAssistant({ content: "", videos: [url], model: resultLabel });
+            } else {
+              // Load the stored image back as a data-URL for display + pin/reuse
+              // parity, and seed the hash cache so it isn't re-uploaded.
+              let resultDataUrl: string | null = null;
+              try {
+                resultDataUrl = await urlToDataUrl(url);
+                hashCache.current.set(resultDataUrl, r.hash);
+              } catch {
+                /* fall back to the URL below */
+              }
+              setAssistant({
+                content: "",
+                images: [resultDataUrl ?? url],
+                model: resultLabel,
+              });
+            }
+            // Relabel the user turn too, so the pair on screen matches the one the
+            // backend recorded — otherwise a fallback shows this client's guess
+            // now and the model that really ran on reload.
+            if (alive())
+              setMessages((prev) =>
+                prev.map((m, i) =>
+                  i === prev.length - 2 && m.role === "user"
+                    ? { ...m, model: resultLabel }
+                    : m
+                )
+              );
+          },
+          onError: (msg) => setAssistant({ content: `⚠️ ${msg}` }),
+        },
+        fail: (msg) => setAssistant({ content: `⚠️ ${msg}` }),
+        end: (status) => {
+          if (status === "cancelled" && !produced) setAssistant({ content: "⏹ Stopped." });
+        },
+      };
+    },
+    [lastMessageWriter]
+  );
+
+  const agentTurn = useCallback(
+    (alive: () => boolean): Turn<AgentHandlers> => {
+      const write = lastMessageWriter(alive);
+      const setAssistant = (patch: Partial<ChatMessage>) => write(() => patch);
+      // Keyed by the backend's step index, not by arrival order: a call that
+      // fails validation is reported before any call runs, so the two orders
+      // differ and a chip would otherwise attach its progress to the wrong step.
+      const steps = new Map<number, AgentStep>();
+      const flush = () =>
+        setAssistant({
+          agentSteps: [...steps.entries()]
+            .sort(([a], [b]) => a - b)
+            .map(([, step]) => step),
+        });
+      const mark = (index: number, patch: Partial<AgentStep>) => {
+        const current = steps.get(index);
+        if (current) steps.set(index, { ...current, ...patch });
+        flush();
+      };
+      let assistantText = "";
+      const resultImages: string[] = [];
+      const resultVideos: string[] = [];
+      const warn = (msg: string) => {
+        assistantText = `${assistantText}${assistantText ? "\n\n" : ""}⚠️ ${msg}`;
+        setAssistant({ content: assistantText });
+      };
+      return {
+        on: {
+          onToken: (token) => {
+            assistantText += token;
+            setAssistant({ content: assistantText });
+          },
+          onSources: (sources) => setAssistant({ sources }),
+          onDocsError: (msg) => alive() && setError(msg),
+          onThinking: thinkingHandler(alive, write),
+          onUsage: (u) => alive() && setUsage(u),
+          onStatus: (m) =>
+            alive() &&
+            setProgress((p) => (p ? { ...p, phase: m, updatedAt: Date.now() } : p)),
+          onProgress: ({ live, ...p }) =>
+            alive() &&
+            setProgress((cur) =>
+              cur
+                ? { ...cur, ...p, updatedAt: live ? Date.now() : cur.updatedAt }
+                : cur
+            ),
+          onToolCall: ({ index, name, args }) => {
+            steps.set(index, { name, args, state: "running" });
+            flush();
+          },
+          onToolError: ({ index, name, message }) => {
+            steps.set(index, {
+              ...(steps.get(index) ?? { name, args: {} }),
+              state: "error",
+              message,
+            });
+            flush();
+          },
+          onImage: async (r, toolIndex) => {
+            const url = r.url || `/api/images/${r.hash}.png`;
+            if (r.kind === "video") {
+              // Left as a URL, never a data-URL — see the same branch in
+              // `generateTurn` for why video must not reach `images`.
+              hashCache.current.set(url, r.hash);
+              resultVideos.push(url);
+              setAssistant({ videos: [...resultVideos] });
+            } else {
+              let dataUrl: string | null = null;
+              try {
+                dataUrl = await urlToDataUrl(url);
+                hashCache.current.set(dataUrl, r.hash);
+              } catch {
+                /* fall back to the URL */
+              }
+              resultImages.push(dataUrl ?? url);
+              setAssistant({ images: [...resultImages] });
+            }
+            if (toolIndex !== undefined) mark(toolIndex, { state: "done" });
+          },
+          onError: warn,
+        },
+        fail: warn,
+        end: (status) => {
+          // A step still "running" when the turn is over never will finish.
+          for (const [index, step] of steps)
+            if (step.state === "running")
+              steps.set(index, { ...step, state: "error", message: "Stopped." });
+          if (steps.size) flush();
+          if (
+            status === "cancelled" &&
+            !assistantText.trim() &&
+            !resultImages.length &&
+            !resultVideos.length
+          )
+            setAssistant({ content: "⏹ Stopped." });
+        },
+      };
+    },
+    [lastMessageWriter, thinkingHandler]
+  );
+
+  /** The handlers for a turn of `kind` whose start this page didn't see. */
+  const turnFor = useCallback(
+    (kind: JobKind, model: string) =>
+      (alive: () => boolean): TurnHandlers & { turn: Turn<unknown> } => {
+        if (kind === "chat") {
+          const turn = chatTurn(alive);
+          return { kind, on: turn.on, turn };
+        }
+        if (kind === "generate") {
+          const turn = generateTurn(alive, "🎨", model);
+          return { kind, on: turn.on, turn };
+        }
+        const turn = agentTurn(alive);
+        return { kind, on: turn.on, turn };
+      },
+    [chatTurn, generateTurn, agentTurn]
+  );
+
+  /** Follow one turn in `chatId` to its end: started here, come back to, or retried.
+   *
+   * `start` makes the request and reads the stream into the handlers it's given.
+   * While it runs this is the open chat's turn — the composer shows Stop, and Stop
+   * cancels the job it names. Opening another chat detaches it (see `detach`); the
+   * job keeps running and the sidebar keeps showing it.
+   */
+  const follow = useCallback(
+    async (
+      chatId: string,
+      build: (alive: () => boolean) => TurnHandlers & { turn: Turn<unknown> },
+      start: (t: TurnHandlers, signal: AbortSignal) => Promise<void>
+    ) => {
+      activeRef.current?.controller.abort();
+      const mine = { chatId, jobId: null as string | null, controller: new AbortController() };
+      activeRef.current = mine;
+      const alive = () =>
+        !mine.controller.signal.aborted && currentChatRef.current === chatId;
+      setStreaming(true);
+      setLastJob(null);
+
+      const built = build(alive);
+      const { turn } = built;
+      // An object, not a `let`: it's assigned from inside the handlers.
+      const outcome: { status: JobStatus | null } = { status: null };
+      const t = {
+        kind: built.kind,
+        on: {
+          ...built.on,
+          onJob: (id: string) => {
+            mine.jobId = id;
+            setRunningChats((prev) => new Set(prev).add(chatId));
+          },
+          onEnd: (status: JobStatus) => {
+            outcome.status = status;
+            turn.end(status);
+          },
+          onDeleted: () => {
+            // Deleted from another tab while this one watched. This tab's own
+            // delete detaches first, so it never gets here.
+            if (!alive()) return;
+            newChat();
+            setError("That chat was deleted while it was working on a turn.");
+          },
+        },
+      } as TurnHandlers;
+
+      try {
+        await start(t, mine.controller.signal);
+      } catch (e) {
+        if ((e as Error).name !== "AbortError" && alive()) turn.fail((e as Error).message);
+      } finally {
+        const watching = alive();
+        if (activeRef.current === mine) activeRef.current = null;
+        if (watching) {
+          setStreaming(false);
+          setProgress(null);
+          const status = outcome.status;
+          if (mine.jobId && status)
+            setLastJob({ chatId, id: mine.jobId, kind: built.kind, status });
+        }
+        if (outcome.status) {
+          setRunningChats((prev) => {
+            const next = new Set(prev);
+            next.delete(chatId);
+            return next;
+          });
+          // The backend titles a chat after its first exchange.
+          refreshChats();
+        }
+      }
+    },
+    [newChat, refreshChats]
+  );
+
+  const openChat = useCallback(
+    async (id: string, quiet = false) => {
+      try {
+        detach();
+        const d = await getChat(id);
+
+        // Load images back into memory as data-URLs and pre-seed the hash cache
+        // so they aren't re-uploaded on the next send. A missing file (e.g. one a
+        // past GC removed) resolves to null so we can drop it instead of showing a
+        // broken image or re-persisting a dead reference.
+        const loadImg = async (url: string): Promise<string | null> => {
+          try {
+            const data = await urlToDataUrl(url);
+            hashCache.current.set(data, hashFromUrl(url));
+            return data;
+          } catch {
+            return null;
+          }
+        };
+        const present = (arr: (string | null)[]) =>
+          arr.filter((x): x is string => x !== null);
+        // The store holds video under the same `images` list a still uses — it's one
+        // content-addressed blob store and the hash doesn't say what it is. The URL's
+        // extension does, and it's the only signal here. Split on it so `images`
+        // stays "data-URLs of decodable images" on reload, exactly as it is live.
+        const isVideoUrl = (url: string) => url.toLowerCase().endsWith(".webm");
+
+        // Dropping missing pinned images here also self-heals the DB: the next
+        // send re-persists the pinned set without them.
+        const pinned = present(await Promise.all(d.pinned.map(loadImg)));
+        const sysImg = d.system_image ? await loadImg(d.system_image) : null;
+        const msgs: ChatMessage[] = await Promise.all(
+          d.messages.map(async (m) => {
+            const videos = m.images.filter(isVideoUrl);
+            videos.forEach((url) => hashCache.current.set(url, hashFromUrl(url)));
+            const images = present(
+              await Promise.all(m.images.filter((u) => !isVideoUrl(u)).map(loadImg))
+            );
+            // Keep context-image positions stable (missing -> "") so the model's
+            // "image N" references still line up; "" simply renders no thumbnail.
+            const contextImages = (
+              await Promise.all(m.context_images.map(loadImg))
+            ).map((x) => x ?? "");
+            return {
+              id: m.id,
+              role: m.role,
+              content: m.content,
+              model: m.model ?? undefined,
+              images: images.length ? images : undefined,
+              videos: videos.length ? videos : undefined,
+              contextImages: contextImages.length ? contextImages : undefined,
+              sources: m.sources?.length ? m.sources : undefined,
+            };
+          })
+        );
+
+        switchChat(d.id);
+        setChatExists(true);
+        setPinnedImages(pinned);
+        setActiveDocIds(d.documents ?? []);
+        setDocPrompts(!!d.doc_prompts);
+        setSystemImage(sysImg);
+        setSystemPrompt(d.system_prompt || "");
+        if (d.model) setModel(d.model);
+        setUsage(null);
+        setError(null);
+        setComposerText("");
+        setComposerImages([]);
+
+        const job = d.job;
+        if (job?.status === "running") {
+          // Still working: show the turn it's on, then replay its events onto a
+          // fresh bubble and follow it live from there.
+          const turnModel = msgs[msgs.length - 1]?.model ?? "";
+          setMessages([
+            ...msgs,
+            {
+              role: "assistant",
+              content: job.kind === "generate" ? "🎨 Working…" : "",
+              model: turnModel,
+            },
+          ]);
+          setProgress(startingProgress("Working…"));
+          follow(d.id, turnFor(job.kind, turnModel), (t, signal) =>
+            attachJob(job.id, t, signal)
           );
-          // Keep context-image positions stable (missing -> "") so the model's
-          // "image N" references still line up; "" simply renders no thumbnail.
-          const contextImages = (
-            await Promise.all(m.context_images.map(loadImg))
-          ).map((x) => x ?? "");
-          return {
-            role: m.role,
-            content: m.content,
-            model: m.model ?? undefined,
-            images: images.length ? images : undefined,
-            videos: videos.length ? videos : undefined,
-            contextImages: contextImages.length ? contextImages : undefined,
-            sources: m.sources?.length ? m.sources : undefined,
-          };
-        })
-      );
-
-      setCurrentChatId(d.id);
-      setChatExists(true);
-      setPinnedImages(pinned);
-      setActiveDocIds(d.documents ?? []);
-      setDocPrompts(!!d.doc_prompts);
-      setSystemImage(sysImg);
-      setSystemPrompt(d.system_prompt || "");
-      if (d.model) setModel(d.model);
-      setMessages(msgs);
-      setUsage(null);
-      setError(null);
-      setComposerText("");
-      setComposerImages([]);
-    } catch {
-      setError("Could not open that chat.");
-    }
-  }, []);
+        } else {
+          setMessages(msgs);
+          if (job) setLastJob({ chatId: d.id, id: job.id, kind: job.kind, status: job.status });
+        }
+      } catch {
+        if (quiet) localStorage.removeItem(CURRENT_CHAT_KEY);
+        else setError("Could not open that chat.");
+      }
+    },
+    [detach, follow, switchChat, turnFor]
+  );
 
   const removeChat = useCallback(
     async (id: string) => {
+      // Stop watching first: the backend stops the chat's running turn as part of
+      // the delete, and this page shouldn't report that as a failure.
+      if (id === currentChatId) detach();
       try {
         await deleteChat(id);
       } catch {
         /* ignore */
       }
+      if (localStorage.getItem(CURRENT_CHAT_KEY) === id) {
+        localStorage.removeItem(CURRENT_CHAT_KEY);
+      }
+      setRunningChats((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
       if (id === currentChatId) newChat();
       refreshChats();
     },
-    [currentChatId, newChat, refreshChats]
+    [currentChatId, detach, newChat, refreshChats]
+  );
+
+  // Reopen the chat that was open before a reload — including one mid-turn, which
+  // then picks up where the job has got to.
+  useEffect(() => {
+    const saved = localStorage.getItem(CURRENT_CHAT_KEY);
+    if (saved) openChat(saved, true);
+  }, []); // once, on load
+  useEffect(() => {
+    if (chatExists) localStorage.setItem(CURRENT_CHAT_KEY, currentChatId);
+  }, [chatExists, currentChatId]);
+
+  // Which chats are busy, for the sidebar. Polled because a turn can be started,
+  // finish, or be deleted from another tab. A chat leaving the set has just
+  // finished, which is when the backend titles it.
+  useEffect(() => {
+    let known = new Set<string>();
+    const tick = async () => {
+      try {
+        const ids = new Set(
+          (await listRunningJobs()).flatMap((j) => (j.chat_id ? [j.chat_id] : []))
+        );
+        const changed =
+          ids.size !== known.size || [...ids].some((id) => !known.has(id));
+        known = ids;
+        if (changed) {
+          setRunningChats(ids);
+          refreshChats();
+        }
+      } catch {
+        /* backend unreachable; try again next tick */
+      }
+    };
+    tick();
+    const timer = setInterval(tick, 3000);
+    return () => clearInterval(timer);
+  }, [refreshChats]);
+
+  /** Record the chat's settings before a turn, so the backend has a row to write
+   *  the turn into. Best-effort: losing the history is a smaller harm than
+   *  refusing to answer. Returns whether the row is there. */
+  const saveChat = useCallback(
+    async (chatId: string, chatModel: string) => {
+      try {
+        await putChat(chatId, {
+          model: chatModel,
+          system_prompt: systemPrompt,
+          pinned_hashes: await ensureHashes(pinnedImages),
+          system_image_hash: systemImage ? (await ensureHashes([systemImage]))[0] : null,
+          doc_ids: activeDocIds,
+          doc_prompts: docPrompts,
+        });
+        setChatExists(true);
+        return true;
+      } catch (err) {
+        console.error("putChat failed; this turn won't be recorded", err);
+        return false;
+      }
+    },
+    [systemPrompt, pinnedImages, systemImage, activeDocIds, docPrompts, ensureHashes]
   );
 
   const send = useCallback(
@@ -611,8 +1147,6 @@ export default function App() {
       setError(null);
 
       const chatId = currentChatId;
-      const isFirstExchange = messages.length === 0;
-
       const userMsg: ChatMessage = { role: "user", content: text, images, model };
       const history = [...messages, userMsg];
       setMessages([...history, { role: "assistant", content: "", model }]);
@@ -622,15 +1156,7 @@ export default function App() {
       // bar clears on first token rather than running the whole turn.
       // No fraction: Ollama reports nothing at all while it loads, so the bar shows
       // the phase and the clock rather than inventing a position for itself.
-      setProgress({
-        phase: `Loading ${model}…`,
-        stage: "",
-        frac: null,
-        step: 0,
-        total: 0,
-        startedAt: Date.now(),
-        updatedAt: Date.now(),
-      });
+      setProgress(startingProgress(`Loading ${model}…`));
 
       // Every image the conversation has seen, consolidated onto the last message
       // and numbered — see `buildOllamaContext` for why both are necessary.
@@ -662,139 +1188,55 @@ export default function App() {
       }
       payload.push(...merged);
 
-      let assistantText = "";
-      let sources: Source[] = [];
-      const controller = new AbortController();
-      abortRef.current = controller;
-      try {
-        await streamChat(
-          ollamaUrl,
-          model,
-          payload,
-          {
-            onThinking: (token) => {
-              if (thinkingDisplay === "verbose") {
-                // The reasoning is its own liveness signal, like the answer.
-                setProgress(null);
-                setMessages((prev) => {
-                  const next = [...prev];
-                  const last = next[next.length - 1];
-                  next[next.length - 1] = {
-                    ...last,
-                    thinking: (last.thinking ?? "") + token,
-                  };
-                  return next;
-                });
-              } else {
-                setProgress((p) =>
-                  p && { ...p, phase: "💭 Thinking…", updatedAt: Date.now() }
-                );
-              }
-            },
-            onToken: (token) => {
-              assistantText += token;
-              setProgress(null);
-              setMessages((prev) => {
-                const next = [...prev];
-                next[next.length - 1] = {
-                  ...next[next.length - 1],
-                  content: next[next.length - 1].content + token,
-                };
-                return next;
-              });
-            },
-            onUsage: (u) => setUsage(u),
-            onSources: (found) => {
-              sources = found;
-              setMessages((prev) => {
-                const next = [...prev];
-                next[next.length - 1] = { ...next[next.length - 1], sources: found };
-                return next;
-              });
-            },
-            onDocsError: (msg) => setError(msg),
-            onError: (msg) =>
-              setMessages((prev) => {
-                const next = [...prev];
-                next[next.length - 1] = {
-                  ...next[next.length - 1],
-                  content:
-                    (next[next.length - 1].content || "") + `\n\n⚠️ ${msg}`,
-                };
-                return next;
-              }),
-          },
-          controller.signal,
-          thinking,
-          { ids: readyDocIds, query: text }
-        );
-      } catch (e) {
-        if ((e as Error).name !== "AbortError") {
-          setError(`Could not reach Ollama at ${ollamaUrl}`);
-        }
-      } finally {
-        setStreaming(false);
-        setProgress(null);
-        abortRef.current = null;
-
-        // Persist this turn (best-effort; a failure here must not break the UI).
-        try {
-          const pinned_hashes = await ensureHashes(pinnedImages);
-          const system_image_hash = systemImage
-            ? (await ensureHashes([systemImage]))[0]
-            : null;
-          await putChat(chatId, {
-            model,
-            system_prompt: systemPrompt,
-            pinned_hashes,
-            system_image_hash,
-            doc_ids: activeDocIds,
-            doc_prompts: docPrompts,
-          });
-          setChatExists(true);
-
-          const userHashes = await ensureHashes(images);
-          await appendMessage(chatId, {
-            role: "user",
-            content: text,
-            model,
-            image_hashes: userHashes,
-          });
-          await appendMessage(chatId, {
-            role: "assistant",
-            content: assistantText,
-            model,
-            image_hashes: [],
-            context_hashes: await ensureHashes(outImages),
-            sources,
-          });
-
-          if (isFirstExchange) {
-            await generateTitle(chatId, model, ollamaUrl).catch(() => "");
+      await follow(
+        chatId,
+        (alive) => {
+          const turn = chatTurn(alive);
+          return { kind: "chat", on: turn.on, turn };
+        },
+        async (t, signal) => {
+          // The backend writes both turns, from a job that outlives this page —
+          // which is what lets a reload mid-answer find the question and the
+          // answer, rather than neither.
+          let record: ChatRecord | undefined;
+          if (await saveChat(chatId, model)) {
+            record = {
+              chat_id: chatId,
+              user_content: text,
+              user_image_hashes: await ensureHashes(images),
+              context_hashes: await ensureHashes(outImages),
+              title_model: model,
+            };
           }
-          await refreshChats();
-        } catch (err) {
-          console.error("persist failed", err);
+          await streamChat(
+            ollamaUrl,
+            model,
+            payload,
+            t.on as ChatHandlers,
+            signal,
+            thinking,
+            { ids: readyDocIds, query: text },
+            record
+          );
         }
-      }
+      );
     },
     [
       messages,
       model,
       ollamaUrl,
       thinking,
-      thinkingDisplay,
       systemPrompt,
       systemImage,
       pinnedImages,
       usage,
       currentChatId,
-      activeDocIds,
-      docPrompts,
       readyDocIds,
       ensureHashes,
       forOllama,
-      refreshChats,
+      follow,
+      chatTurn,
+      saveChat,
     ]
   );
 
@@ -827,7 +1269,6 @@ export default function App() {
       }
       setError(null);
       const chatId = currentChatId;
-      const isFirstExchange = messages.length === 0;
 
       // compose blends every reference image. edit takes the first image as the
       // scene being changed and the rest as subject references. create uses one
@@ -895,233 +1336,94 @@ export default function App() {
         userMsg,
         { role: "assistant", content: `${icon} Preparing…`, model: modelId },
       ]);
-      setStreaming(true);
-      setProgress({
-        phase: "Preparing…",
-        stage: "",
-        frac: null,
-        step: 0,
-        total: 0,
-        startedAt: Date.now(),
-        updatedAt: Date.now(),
-      });
+      setProgress(startingProgress("Preparing…"));
 
-      const setAssistant = (patch: Partial<ChatMessage>) =>
-        setMessages((prev) => {
-          const next = [...prev];
-          next[next.length - 1] = { ...next[next.length - 1], ...patch };
-          return next;
-        });
+      await follow(
+        chatId,
+        (alive) => {
+          const turn = generateTurn(alive, icon, modelId);
+          return { kind: "generate", on: turn.on, turn };
+        },
+        async (t, signal) => {
+          const initHash = initUrl ? (await ensureHashes([initUrl]))[0] : null;
+          const refHashes = refUrls.length ? await ensureHashes(refUrls) : [];
+          const mapHashes = mapUrls.length ? await ensureHashes(mapUrls) : [];
 
-      const controller = new AbortController();
-      abortRef.current = controller;
-      let resultHash: string | null = null;
-      let resultDataUrl: string | null = null;
-      // Starts as this client's prediction; the backend's echo replaces it.
-      let resultLabel = modelId;
-      // Control maps arrive one event at a time, before the image. Accumulated here
-      // rather than read back off the message, because `setAssistant` is a state
-      // update and the next map can land before it has applied.
-      let controlMaps: ControlMap[] = [];
-      try {
-        const initHash = initUrl ? (await ensureHashes([initUrl]))[0] : null;
-        const refHashes = refUrls.length ? await ensureHashes(refUrls) : [];
-        const mapHashes = mapUrls.length ? await ensureHashes(mapUrls) : [];
+          // Create the chat before sampling, so the backend has a row to record
+          // the turns against — it writes them from a job that outlives this page.
+          await saveChat(chatId, model || modelId);
 
-        // Create the chat before sampling, so the backend has a row to record the
-        // turns against — it writes them from a thread that outlives this page,
-        // which is what lets a reload mid-generation find the result. Best-effort
-        // for the same reason it always was: losing the history is a smaller harm
-        // than refusing to generate.
-        try {
-          await putChat(chatId, {
-            model: model || modelId,
-            system_prompt: systemPrompt,
-            pinned_hashes: await ensureHashes(pinnedImages),
-            system_image_hash: systemImage
-              ? (await ensureHashes([systemImage]))[0]
-              : null,
-            doc_ids: activeDocIds,
-            doc_prompts: docPrompts,
-          });
-          setChatExists(true);
-        } catch (err) {
-          console.error("putChat failed; this turn won't be recorded", err);
+          await generate(
+            {
+              mode,
+              chat_id: chatId,
+              flux_model: fluxModel || null,
+              prompt: sendPrompt,
+              // Only set when the two diverge, so a reloaded turn shows what the
+              // user actually saw live rather than a rewrite they never typed.
+              display_prompt: sendPrompt !== prompt ? prompt : null,
+              init_image_hash: initHash,
+              ref_image_hashes: refHashes,
+              steps: gen.steps,
+              guidance: gen.guidance,
+              strength: gen.strength,
+              // The static template is a fallback for an un-enhanced create prompt.
+              // Wrapping it around a prompt the settings-level auto-enhancer already
+              // rewrote would bury the rewrite's own framing inside a second,
+              // blunter one.
+              enhance: enhanceTemplate && sendPrompt === prompt,
+              width: gen.width,
+              height: gen.height,
+              // Only sent for control, so no other mode's request changes shape. The
+              // backend defaults every one of these, so omitting them is the same as
+              // not knowing about them.
+              ...(isControl
+                ? {
+                    // Studio maps are finished maps. With no scene photo there is
+                    // no source to derive more from, and asking would just error;
+                    // with one, derived maps stack with the studio's on the
+                    // backend, which is how a photo's own depth joins the pose.
+                    control_kinds: usingStudio && !studioScene ? [] : gen.controlKinds,
+                    control_map_hashes: mapHashes,
+                    structure_lock: gen.structureLock,
+                    control_strength: gen.controlStrength,
+                    canny_low: gen.cannyLow,
+                    canny_high: gen.cannyHigh,
+                  }
+                : {}),
+              seed: gen.seed ? parseInt(gen.seed, 10) : null,
+              ollama_url: ollamaUrl,
+              // Whichever model the next prompt will hit, so the backend can reload
+              // it while this image is on screen rather than on the next send.
+              warm_model:
+                (enhancerMode !== "off" ? effectiveEnhanceModel : model) || null,
+              unload_ollama: unloadOllama,
+              // The backend names the chat after its first exchange, on the VLM.
+              title_model: model || null,
+            },
+            t.on as GenerateHandlers,
+            signal
+          );
         }
-
-        await generate(
-          {
-            mode,
-            chat_id: chatId,
-            flux_model: fluxModel || null,
-            prompt: sendPrompt,
-            // Only set when the two diverge, so a reloaded turn shows what the
-            // user actually saw live rather than a rewrite they never typed.
-            display_prompt: sendPrompt !== prompt ? prompt : null,
-            init_image_hash: initHash,
-            ref_image_hashes: refHashes,
-            steps: gen.steps,
-            guidance: gen.guidance,
-            strength: gen.strength,
-            // The static template is a fallback for an un-enhanced create prompt.
-            // Wrapping it around a prompt the settings-level auto-enhancer already
-            // rewrote would bury the rewrite's own framing inside a second,
-            // blunter one.
-            enhance: enhanceTemplate && sendPrompt === prompt,
-            width: gen.width,
-            height: gen.height,
-            // Only sent for control, so no other mode's request changes shape. The
-            // backend defaults every one of these, so omitting them is the same as
-            // not knowing about them.
-            ...(isControl
-              ? {
-                  // Studio maps are finished maps. With no scene photo there is
-                  // no source to derive more from, and asking would just error;
-                  // with one, derived maps stack with the studio's on the
-                  // backend, which is how a photo's own depth joins the pose.
-                  control_kinds: usingStudio && !studioScene ? [] : gen.controlKinds,
-                  control_map_hashes: mapHashes,
-                  structure_lock: gen.structureLock,
-                  control_strength: gen.controlStrength,
-                  canny_low: gen.cannyLow,
-                  canny_high: gen.cannyHigh,
-                }
-              : {}),
-            seed: gen.seed ? parseInt(gen.seed, 10) : null,
-            ollama_url: ollamaUrl,
-            // Whichever model the next prompt will hit, so the backend can reload
-            // it while this image is on screen rather than on the next send.
-            warm_model:
-              (enhancerMode !== "off" ? effectiveEnhanceModel : model) || null,
-            unload_ollama: unloadOllama,
-          },
-          {
-            onStatus: (m) => {
-              setAssistant({ content: `${icon} ${m}` });
-              // A status line renames the job; it doesn't rewind it. The fraction
-              // covers the whole graph, so it survives every phase change until the
-              // job ends.
-              setProgress((p) => (p ? { ...p, phase: m, updatedAt: Date.now() } : p));
-            },
-            onProgress: ({ live, ...p }) => {
-              setAssistant({
-                content:
-                  p.step > 0
-                    ? `${icon} ${p.stage}… step ${p.step}/${p.total} (${Math.round(p.frac * 100)}%)`
-                    : `${icon} ${p.stage}… ${Math.round(p.frac * 100)}%`,
-              });
-              // Only a live update means the backend is still there, so only a live
-              // update clears the stall clock — an estimate ticking through a silent
-              // load looks identical to a wedged one, and must not vouch for it.
-              setProgress((cur) =>
-                cur
-                  ? { ...cur, ...p, updatedAt: live ? Date.now() : cur.updatedAt }
-                  : cur
-              );
-            },
-            onControlMap: async (m) => {
-              // Fetched back as a data-URL like a generated image is, so a map can
-              // be pinned and re-fed on the next roll without a round trip — that's
-              // how you iterate on a prompt while holding one pose fixed.
-              let url = m.url;
-              try {
-                url = await urlToDataUrl(m.url);
-                hashCache.current.set(url, m.hash);
-              } catch {
-                /* fall back to the URL */
-              }
-              controlMaps = [...controlMaps, { kind: m.kind, url }];
-              setAssistant({ controlMaps });
-            },
-            onImage: async (r) => {
-              resultHash = r.hash;
-              // The store keeps each result in its own format, so take the URL the
-              // backend built rather than assuming an extension here.
-              const url = r.url || `/api/images/${r.hash}.png`;
-              // The model the backend actually ran, which is the authoritative
-              // answer — `modelId` above is only this client's prediction of it.
-              if (r.model_label) resultLabel = r.model_label;
-
-              if (r.kind === "video") {
-                // Deliberately *not* urlToDataUrl'd. A 5s 720p clip is megabytes,
-                // which is a lot to hold base64'd in state for every turn — and
-                // `images` is data-URLs by convention, feeding a canvas resize
-                // (`ensureHashes`), the pin panel and the vision model, none of
-                // which can read a webm. Keeping video in its own field is what
-                // stops it reaching them.
-                hashCache.current.set(url, r.hash);
-                setAssistant({ content: "", videos: [url], model: resultLabel });
-              } else {
-                // Load the stored image back as a data-URL for display + pin/reuse
-                // parity, and seed the hash cache so it isn't re-uploaded.
-                try {
-                  resultDataUrl = await urlToDataUrl(url);
-                  hashCache.current.set(resultDataUrl, r.hash);
-                } catch {
-                  /* fall back to the URL below */
-                }
-                setAssistant({
-                  content: "",
-                  images: [resultDataUrl ?? url],
-                  model: resultLabel,
-                });
-              }
-              // Relabel the user turn too, so the pair on screen matches the one the
-              // backend recorded — otherwise a fallback shows this client's guess
-              // now and the model that really ran on reload.
-              setMessages((prev) =>
-                prev.map((m, i) =>
-                  i === prev.length - 2 && m.role === "user"
-                    ? { ...m, model: resultLabel }
-                    : m
-                )
-              );
-            },
-            onError: (msg) => setAssistant({ content: `⚠️ ${msg}` }),
-          },
-          controller.signal
-        );
-      } catch (e) {
-        if ((e as Error).name !== "AbortError") {
-          setAssistant({ content: `⚠️ ${(e as Error).message}` });
-        }
-      } finally {
-        setStreaming(false);
-        setProgress(null);
-        abortRef.current = null;
-
-        // Both turns are the backend's to write (see `chat_id` above), so what's
-        // left here is only the work that needs this page: the title, which runs
-        // on the VLM, and the sidebar.
-        if (resultHash) {
-          try {
-            if (isFirstExchange && model) {
-              await generateTitle(chatId, model, ollamaUrl).catch(() => "");
-            }
-            await refreshChats();
-          } catch (err) {
-            console.error("post-generate refresh failed", err);
-          }
-        }
-      }
+      );
     },
     [
       gen,
       enhanceTemplate,
+      enhancerMode,
+      enhancerModel,
+      models,
       unloadOllama,
       fluxAvailable,
       fluxModels,
       model,
       ollamaUrl,
-      systemPrompt,
-      systemImage,
-      pinnedImages,
-      messages,
       currentChatId,
-      activeDocIds,
-      docPrompts,
+      studioMaps,
       ensureHashes,
-      refreshChats,
+      follow,
+      generateTurn,
+      saveChat,
     ]
   );
 
@@ -1147,28 +1449,12 @@ export default function App() {
       }
       setError(null);
       const chatId = currentChatId;
-      const isFirstExchange = messages.length === 0;
 
       const userMsg: ChatMessage = { role: "user", content: text, images, model: agentModel };
       const history = [...messages, userMsg];
       setMessages([...history, { role: "assistant", content: "", model: agentModel }]);
       setStreaming(true);
-      setProgress({
-        phase: `Loading ${agentModel}…`,
-        stage: "",
-        frac: null,
-        step: 0,
-        total: 0,
-        startedAt: Date.now(),
-        updatedAt: Date.now(),
-      });
-
-      const setAssistant = (patch: Partial<ChatMessage>) =>
-        setMessages((prev) => {
-          const next = [...prev];
-          next[next.length - 1] = { ...next[next.length - 1], ...patch };
-          return next;
-        });
+      setProgress(startingProgress(`Loading ${agentModel}…`));
 
       // `alwaysNumber` because the tool arguments are image numbers: with one
       // image analyze has nothing to disambiguate, but the agent still has to be
@@ -1180,7 +1466,11 @@ export default function App() {
         forOllama,
         alwaysNumber: true,
       });
-      setAssistant({ contextImages: outImages });
+      setMessages((prev) => {
+        const next = [...prev];
+        next[next.length - 1] = { ...next[next.length - 1], contextImages: outImages };
+        return next;
+      });
 
       const payload: ChatMessage[] = [];
       if (systemPrompt.trim()) {
@@ -1192,175 +1482,52 @@ export default function App() {
       }
       payload.push(...merged);
 
-      // Keyed by the backend's step index, not by arrival order: a call that
-      // fails validation is reported before any call runs, so the two orders
-      // differ and a chip would otherwise attach its progress to the wrong step.
-      const steps = new Map<number, AgentStep>();
-      const flush = () =>
-        setAssistant({
-          agentSteps: [...steps.entries()]
-            .sort(([a], [b]) => a - b)
-            .map(([, step]) => step),
-        });
-      const mark = (index: number, patch: Partial<AgentStep>) => {
-        const current = steps.get(index);
-        if (current) steps.set(index, { ...current, ...patch });
-        flush();
-      };
+      await follow(
+        chatId,
+        (alive) => {
+          const turn = agentTurn(alive);
+          return { kind: "agent", on: turn.on, turn };
+        },
+        async (t, signal) => {
+          const context_hashes = await ensureHashes(outImages);
+          const attachment_hashes = await ensureHashes(images);
 
-      let assistantText = "";
-      let produced = 0;
-      const resultImages: string[] = [];
-      const resultVideos: string[] = [];
-      const controller = new AbortController();
-      abortRef.current = controller;
-      try {
-        const context_hashes = await ensureHashes(outImages);
-        const attachment_hashes = await ensureHashes(images);
+          // Before the run, for the same reason generateImage does it: the backend
+          // writes both turns from a job that outlives this page, and it needs a
+          // chat row to write them against.
+          await saveChat(chatId, agentModel);
 
-        // Before the run, for the same reason generateImage does it: the backend
-        // writes both turns from a thread that outlives this page, and it needs a
-        // chat row to write them against.
-        try {
-          await putChat(chatId, {
-            model: agentModel,
-            system_prompt: systemPrompt,
-            pinned_hashes: await ensureHashes(pinnedImages),
-            system_image_hash: systemImage
-              ? (await ensureHashes([systemImage]))[0]
-              : null,
-            doc_ids: activeDocIds,
-            doc_prompts: docPrompts,
-          });
-          setChatExists(true);
-        } catch (err) {
-          console.error("putChat failed; this turn won't be recorded", err);
+          await agentRun(
+            {
+              messages: payload,
+              prompt: text,
+              context_hashes,
+              attachment_hashes,
+              model: agentModel,
+              enabled_tools: agentTools,
+              flux_model: agentImageModel || null,
+              video_model: agentVideoModel || null,
+              // Left to the backend: Generate's steps and guidance are tuned to
+              // Generate's model, and one agent turn can run an image model and
+              // a video model, which want different values.
+              steps: null,
+              guidance: null,
+              width: gen.width,
+              height: gen.height,
+              seed: gen.seed ? parseInt(gen.seed, 10) : null,
+              ollama_url: ollamaUrl,
+              chat_id: chatId,
+              think: thinking,
+              doc_ids: readyDocIds,
+              doc_prompts: docPrompts,
+              unload_ollama: unloadOllama,
+              title_model: model || agentModel,
+            },
+            t.on as AgentHandlers,
+            signal
+          );
         }
-
-        await agentRun(
-          {
-            messages: payload,
-            prompt: text,
-            context_hashes,
-            attachment_hashes,
-            model: agentModel,
-            enabled_tools: agentTools,
-            flux_model: agentImageModel || null,
-            video_model: agentVideoModel || null,
-            // Left to the backend: Generate's steps and guidance are tuned to
-            // Generate's model, and one agent turn can run an image model and
-            // a video model, which want different values.
-            steps: null,
-            guidance: null,
-            width: gen.width,
-            height: gen.height,
-            seed: gen.seed ? parseInt(gen.seed, 10) : null,
-            ollama_url: ollamaUrl,
-            chat_id: chatId,
-            think: thinking,
-            doc_ids: readyDocIds,
-            doc_prompts: docPrompts,
-            unload_ollama: unloadOllama,
-          },
-          {
-            onToken: (token) => {
-              assistantText += token;
-              setAssistant({ content: assistantText });
-            },
-            onSources: (sources) => setAssistant({ sources }),
-            onDocsError: (msg) => setError(msg),
-            onThinking: (token) => {
-              if (thinkingDisplay === "verbose") {
-                setMessages((prev) => {
-                  const next = [...prev];
-                  const last = next[next.length - 1];
-                  next[next.length - 1] = {
-                    ...last,
-                    thinking: (last.thinking ?? "") + token,
-                  };
-                  return next;
-                });
-              } else {
-                setProgress((p) =>
-                  p && { ...p, phase: "💭 Thinking…", updatedAt: Date.now() }
-                );
-              }
-            },
-            onUsage: (u) => setUsage(u),
-            onStatus: (m) =>
-              setProgress((p) => (p ? { ...p, phase: m, updatedAt: Date.now() } : p)),
-            onProgress: ({ live, ...p }) =>
-              setProgress((cur) =>
-                cur
-                  ? { ...cur, ...p, updatedAt: live ? Date.now() : cur.updatedAt }
-                  : cur
-              ),
-            onToolCall: ({ index, name, args }) => {
-              steps.set(index, { name, args, state: "running" });
-              flush();
-            },
-            onToolError: ({ index, name, message }) => {
-              steps.set(index, {
-                ...(steps.get(index) ?? { name, args: {} }),
-                state: "error",
-                message,
-              });
-              flush();
-            },
-            onImage: async (r, toolIndex) => {
-              produced += 1;
-              const url = r.url || `/api/images/${r.hash}.png`;
-              if (r.kind === "video") {
-                // Left as a URL, never a data-URL — see the same branch in
-                // `generateImage` for why video must not reach `images`.
-                hashCache.current.set(url, r.hash);
-                resultVideos.push(url);
-                setAssistant({ videos: [...resultVideos] });
-              } else {
-                let dataUrl: string | null = null;
-                try {
-                  dataUrl = await urlToDataUrl(url);
-                  hashCache.current.set(dataUrl, r.hash);
-                } catch {
-                  /* fall back to the URL */
-                }
-                resultImages.push(dataUrl ?? url);
-                setAssistant({ images: [...resultImages] });
-              }
-              if (toolIndex !== undefined) mark(toolIndex, { state: "done" });
-            },
-            onError: (msg) => {
-              assistantText = `${assistantText}${assistantText ? "\n\n" : ""}⚠️ ${msg}`;
-              setAssistant({ content: assistantText });
-            },
-          },
-          controller.signal
-        );
-      } catch (e) {
-        if ((e as Error).name !== "AbortError") {
-          assistantText = `${assistantText}${assistantText ? "\n\n" : ""}⚠️ ${
-            (e as Error).message
-          }`;
-          setAssistant({ content: assistantText });
-        }
-      } finally {
-        setStreaming(false);
-        setProgress(null);
-        abortRef.current = null;
-
-        // The backend recorded both turns (see `chat_id` above), so all that's
-        // left is what needs this page: the title and the sidebar. Titling runs
-        // on the chat model — a turn that generated nothing still deserves one,
-        // since the agent answering in words is a normal outcome.
-        try {
-          if (isFirstExchange && (produced > 0 || assistantText.trim())) {
-            await generateTitle(chatId, model || agentModel, ollamaUrl).catch(() => "");
-          }
-          await refreshChats();
-        } catch (err) {
-          console.error("post-agent refresh failed", err);
-        }
-      }
+      );
     },
     [
       agentModel,
@@ -1372,23 +1539,80 @@ export default function App() {
       ollamaUrl,
       thinking,
       unloadOllama,
-      thinkingDisplay,
       systemPrompt,
       systemImage,
       pinnedImages,
       messages,
       usage,
       currentChatId,
-      activeDocIds,
       docPrompts,
       readyDocIds,
       ensureHashes,
       forOllama,
-      refreshChats,
+      follow,
+      agentTurn,
+      saveChat,
     ]
   );
 
-  const stop = useCallback(() => abortRef.current?.abort(), []);
+  /** Stop the open chat's turn — on the backend, not just on this page. */
+  const stop = useCallback(() => {
+    const active = activeRef.current;
+    if (!active) return;
+    // Before the backend has named the job there is nothing to cancel yet, only
+    // a request still being prepared; dropping it is the stop.
+    if (!active.jobId) active.controller.abort();
+    else cancelJob(active.jobId).catch(() => active.controller.abort());
+  }, []);
+
+  // A question whose answer never got recorded: the backend restarted mid-turn,
+  // taking the job (and its Retry) with it. All that can be done is ask again.
+  const orphan =
+    !streaming && !lastJob && messages.length > 0
+      ? messages[messages.length - 1]
+      : null;
+  const orphanQuestion = orphan?.role === "user" && orphan.id ? orphan : null;
+
+  /** Run the open chat's last turn again, in place of the one that failed. */
+  const retry = useCallback(async () => {
+    if (lastJob && lastJob.chatId === currentChatId) {
+      const job = lastJob;
+      const lastUser = messages.map((m) => m.role).lastIndexOf("user");
+      if (lastUser < 0) return;
+      const turnModel = messages[lastUser].model ?? "";
+      setError(null);
+      setMessages([
+        ...messages.slice(0, lastUser + 1),
+        {
+          role: "assistant",
+          content: job.kind === "generate" ? "🎨 Preparing…" : "",
+          model: turnModel,
+          // The same conversation goes back to the model, so its numbering holds.
+          contextImages: messages[lastUser + 1]?.contextImages,
+        },
+      ]);
+      setProgress(startingProgress("Retrying…"));
+      await follow(job.chatId, turnFor(job.kind, turnModel), (t, signal) =>
+        retryJob(job.id, t, signal)
+      );
+    } else if (orphanQuestion?.id) {
+      // Back into the composer, for whichever mode it should go to.
+      const q = orphanQuestion;
+      try {
+        await deleteMessage(currentChatId, q.id!);
+      } catch {
+        /* still worth asking again */
+      }
+      setMessages((prev) => prev.slice(0, -1));
+      setComposerText(q.content);
+      setComposerImages(q.images ?? []);
+    }
+  }, [lastJob, currentChatId, messages, orphanQuestion, follow, turnFor]);
+  const retryable =
+    !streaming &&
+    ((lastJob?.chatId === currentChatId &&
+      ["error", "cancelled", "partial"].includes(lastJob.status)) ||
+      !!orphanQuestion);
 
   // Composer (full-width, bottom) state lives here so the input bar spans the
   // whole width — unobstructed by the left image panel.
@@ -1659,6 +1883,7 @@ export default function App() {
         onNewChat={newChat}
         onOpenChat={openChat}
         onDeleteChat={removeChat}
+        runningChats={runningChats}
         thinking={thinking}
         setThinking={setThinking}
         thinkingDisplay={thinkingDisplay}
@@ -1787,6 +2012,22 @@ export default function App() {
               progress={progress}
               disabled={composerMode === "analyze" && !model}
               onDropFiles={addComposerFiles}
+              retry={
+                retryable
+                  ? orphanQuestion
+                    ? {
+                        label: "↻ Ask again",
+                        title:
+                          "No answer was saved for this question. Put it back in the composer to send again.",
+                        onClick: retry,
+                      }
+                    : {
+                        label: "↻ Retry",
+                        title: "Run this turn again in place of this one",
+                        onClick: retry,
+                      }
+                  : null
+              }
             />
           </div>
           <Composer
