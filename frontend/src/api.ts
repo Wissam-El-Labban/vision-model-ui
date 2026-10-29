@@ -78,25 +78,34 @@ export async function getRunning(ollamaUrl: string): Promise<RunningModel[]> {
   return (await res.json()).models ?? [];
 }
 
-/** A vision/chat model Ollama has loaded. `gpu_pct` under 100 means part of it
- *  runs on the CPU. `expires_at` is when Ollama unloads it (ISO time). */
+/** Where a loaded-models row is: `loading` (asked for, not in VRAM yet),
+ *  `active` (loaded and serving a request), `loaded` (idle), `unloading`. */
+export type LoadState = "loading" | "active" | "loaded" | "unloading";
+
+/** A model Ollama has loaded, or is loading. `gpu_pct` under 100 means part of
+ *  it runs on the CPU. `expires_at` is when Ollama unloads it (ISO time). Sizes
+ *  are null while it's still loading. */
 export interface LoadedOllamaModel {
   name: string;
-  size_gb: number;
-  vram_gb: number;
+  kind: "vision" | "chat" | "embedding";
+  state: LoadState;
+  size_gb: number | null;
+  vram_gb: number | null;
   gpu_pct: number | null;
   context: number | null;
   expires_at: string | null;
 }
 
-/** A model file the image/video engine (ComfyUI) holds. `family` and the bundle
- *  `label` are set for transformers only; `video` marks a video model (Wan). */
+/** A model file the image/video engine (ComfyUI) holds. `family`, `kind` and the
+ *  bundle `label` are set for transformers only. */
 export interface LoadedGenModel {
   file: string;
   role: string;
   label: string;
   family: string | null;
+  kind: "image" | "video" | null;
   video: boolean;
+  state: LoadState;
 }
 
 /** Live memory of this machine, in GiB. `gpu`/`ram` are null when unreadable;
@@ -109,7 +118,11 @@ export interface SystemMemory {
   flux_gb: number | null;
   ollama_gb: number | null;
   ollama_models: LoadedOllamaModel[] | null;
-  gen_models: { known: boolean; models: LoadedGenModel[] } | null;
+  gen_models: {
+    status: "starting" | "ready";
+    known: boolean;
+    models: LoadedGenModel[];
+  } | null;
 }
 
 export async function getSystemMemory(ollamaUrl: string): Promise<SystemMemory> {

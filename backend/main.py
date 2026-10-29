@@ -428,22 +428,38 @@ _GIB = 1e9 / 2**30  # ollama_client reports GB; system.py speaks GiB
 def system_memory(ollama_url: str = oc.DEFAULT_URL):
     """Live VRAM and RAM use, with what each engine holds and which models it has loaded.
 
-    `ollama_models` is the vision/chat side, straight from Ollama's /api/ps; a
-    `gpu_pct` under 100 means part of the model runs on the CPU. `gen_models` is
-    the image/video side (see `fx.resident_models`). Either is None when its
-    engine can't be reached.
+    `ollama_models` is the Ollama side: what /api/ps lists, plus a `loading` row
+    for each model this backend has a request in flight for that ps doesn't list
+    yet (see `oc.activity`). `kind` is embedding / vision / chat; `state` is
+    loading / active / loaded / unloading; a `gpu_pct` under 100 means part of the
+    model runs on the CPU. `gen_models` is the image/video side (see
+    `fx.resident_models`). Either is None when its engine can't be reached.
     """
     try:
         running = oc.running(ollama_url)
         ollama = sum(m.get("size_vram") or 0 for m in running) / 1e9 * _GIB
+        names = [oc.canonical(m.get("name", "")) for m in running]
+        act = oc.activity(names)
+
+        def state(name):
+            return ("unloading" if name in act["unloading"] else
+                    "active" if name in act["inflight"] else "loaded")
+
         ollama_models = [{
-            "name": m.get("name", ""),
+            "name": name,
+            "kind": oc.model_kind(ollama_url, name),
+            "state": state(name),
             "size_gb": (m.get("size") or 0) / 2**30,
             "vram_gb": (m.get("size_vram") or 0) / 2**30,
             "gpu_pct": round(100 * (m.get("size_vram") or 0) / m["size"]) if m.get("size") else None,
             "context": m.get("context_length"),
             "expires_at": m.get("expires_at"),
-        } for m in running]
+        } for name, m in zip(names, running)]
+        ollama_models += [{
+            "name": name, "kind": oc.model_kind(ollama_url, name), "state": "loading",
+            "size_gb": None, "vram_gb": None, "gpu_pct": None, "context": None,
+            "expires_at": None,
+        } for name in sorted(act["inflight"] - set(names)) if name != ":latest"]
     except Exception:
         ollama = ollama_models = None
     return {"gpu": system.gpu(), "ram": system.ram(), "flux_gb": fx.held_gb(),

@@ -1093,6 +1093,10 @@ button.res-meter.open {
   color: var(--amber);
 }
 
+.res-loaded.busy {
+  color: var(--accent);
+}
+
 .res-pop {
   position: absolute;
   top: calc(100% + 6px);
@@ -1194,6 +1198,58 @@ button.res-meter.open {
 
 .res-badge.video {
   color: var(--video);
+}
+
+.res-badge.loading {
+  color: var(--accent);
+  animation: res-pulse 1.4s ease-in-out infinite;
+}
+
+.res-badge.unloading {
+  color: var(--muted);
+}
+
+.res-badge.active {
+  color: var(--accent);
+}
+
+@keyframes res-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.res-badges {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.res-count {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.res-section-title .res-section-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.res-part-state {
+  color: var(--accent);
+}
+
+.res-notes {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.res-pop > .res-empty:first-child + .res-notes {
+  margin-top: 8px;
 }
 
 @media (max-width: 700px) {

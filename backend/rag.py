@@ -161,7 +161,8 @@ def _ocr(url: str, model: str, image) -> str:
         "options": {"num_ctx": 8192, "temperature": 0},
     }
     try:
-        r = requests.post(f"{url}/api/chat", json=payload, timeout=OCR_TIMEOUT)
+        with oc.using(model):
+            r = requests.post(f"{url}/api/chat", json=payload, timeout=OCR_TIMEOUT)
         if r.status_code != 200:
             logging.warning("OCR with %s failed: %s", model, r.text[:200])
             return ""
@@ -316,7 +317,8 @@ def embed(url: str, model: str, texts: list[str], role: str = "document") -> np.
         "truncate": True,
     }
     try:
-        r = requests.post(f"{url}/api/embed", json=payload, timeout=EMBED_TIMEOUT)
+        with oc.using(model):
+            r = requests.post(f"{url}/api/embed", json=payload, timeout=EMBED_TIMEOUT)
     except requests.RequestException as exc:
         raise RuntimeError(f"Couldn't reach Ollama to embed: {exc}")
     if r.status_code == 404:

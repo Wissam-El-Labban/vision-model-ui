@@ -14,7 +14,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from urllib.parse import urlparse
 
 import requests
@@ -43,6 +45,72 @@ DOCS_TAG = "<documents>"
 DOCS_EXTRA_CTX = 4096
 
 GITHUB_LATEST = "https://api.github.com/repos/ollama/ollama/releases/latest"
+
+
+# --------------------------------------------------------------------------- #
+# Activity — what the resource meter shows as loading / in use / unloading
+# --------------------------------------------------------------------------- #
+# Ollama's /api/ps only lists a model once its load has finished, so a 45 s disk
+# read looks like nothing at all. What this process has asked for is the only
+# other signal: a model with a request in flight that ps doesn't list yet is
+# loading; one that ps does list is in use.
+_activity_mu = threading.Lock()
+_inflight: dict[str, int] = {}
+_unloading: dict[str, float] = {}   # name -> when the unload was asked for
+_UNLOAD_MARK_S = 60                 # give up on a mark Ollama never acted on
+
+
+def canonical(name):
+    """`nomic-embed-text` as ps spells it: `nomic-embed-text:latest`."""
+    return name if ":" in name.rsplit("/", 1)[-1] else f"{name}:latest"
+
+
+@contextmanager
+def using(model):
+    """Mark `model` as having a request in flight for the duration."""
+    key = canonical(model or "")
+    with _activity_mu:
+        _inflight[key] = _inflight.get(key, 0) + 1
+    try:
+        yield
+    finally:
+        with _activity_mu:
+            _inflight[key] -= 1
+            if not _inflight[key]:
+                del _inflight[key]
+
+
+def activity(loaded_names=()):
+    """`{"inflight": names, "unloading": names}` right now.
+
+    `loaded_names` is what ps lists; an unloading mark whose model is gone from
+    it has done its job and is dropped, as is one older than `_UNLOAD_MARK_S`.
+    """
+    now, loaded = time.time(), set(loaded_names)
+    with _activity_mu:
+        for name, t in list(_unloading.items()):
+            if name not in loaded or now - t > _UNLOAD_MARK_S:
+                del _unloading[name]
+        return {"inflight": set(_inflight), "unloading": set(_unloading)}
+
+
+_KIND_CACHE: dict[tuple, str] = {}
+
+
+def model_kind(url, name):
+    """"embedding", "vision" or "chat", from the model's capabilities.
+
+    Cached per name; /api/tags is only read again when a name turns up that the
+    cache doesn't know, so the meter's poll doesn't re-read it every time.
+    """
+    key = (url, canonical(name))
+    if key not in _KIND_CACHE:
+        for d in model_details(url):
+            caps = set(d["capabilities"])
+            _KIND_CACHE[(url, canonical(d["name"]))] = (
+                "embedding" if "embedding" in caps else
+                "vision" if "vision" in caps else "chat")
+    return _KIND_CACHE.get(key, "chat")
 
 
 # --------------------------------------------------------------------------- #
@@ -100,6 +168,11 @@ def _lines(response):
 
 
 def stream_chat(url, model, messages, think=False):
+    with using(model):
+        yield from _stream_chat(url, model, messages, think)
+
+
+def _stream_chat(url, model, messages, think=False):
     """POST to Ollama's /api/chat and yield streaming events.
 
     Yields dicts: {"type": "token", "text": ...} for content,
@@ -157,6 +230,11 @@ def stream_chat(url, model, messages, think=False):
 
 
 def stream_chat_tools(url, model, messages, tools, think=False):
+    with using(model):
+        yield from _stream_chat_tools(url, model, messages, tools, think)
+
+
+def _stream_chat_tools(url, model, messages, tools, think=False):
     """Like `stream_chat`, but offers the model tools and reports what it called.
 
     Yields the same {"type": "token"} and {"type": "usage"} events, plus one
@@ -246,7 +324,8 @@ def ask_once(url, model, system, user, num_ctx=MIN_CTX):
         "options": {"num_ctx": num_ctx},
     }
     try:
-        response = requests.post(f"{url}/api/chat", json=payload, timeout=CHAT_TIMEOUT)
+        with using(model):
+            response = requests.post(f"{url}/api/chat", json=payload, timeout=CHAT_TIMEOUT)
         if response.status_code != 200:
             return ""
         return ((response.json().get("message") or {}).get("content") or "").strip()
@@ -278,9 +357,10 @@ def generate_title(url, model, first_user, first_assistant):
         "options": {"num_ctx": MIN_CTX},
     }
     try:
-        response = requests.post(
-            f"{url}/api/chat", json=payload, timeout=CHAT_TIMEOUT
-        )
+        with using(model):
+            response = requests.post(
+                f"{url}/api/chat", json=payload, timeout=CHAT_TIMEOUT
+            )
         if response.status_code != 200:
             return ""
         text = (response.json().get("message") or {}).get("content", "")
@@ -487,7 +567,8 @@ def enhance_prompt(url, model, prompt, mode, images_b64=(), subjects=1, contact=
         "options": {"num_ctx": context_size_for(messages)},
     }
     try:
-        response = requests.post(f"{url}/api/chat", json=payload, timeout=CHAT_TIMEOUT)
+        with using(model):
+            response = requests.post(f"{url}/api/chat", json=payload, timeout=CHAT_TIMEOUT)
         if response.status_code != 200:
             return "", ""
         message = response.json().get("message") or {}
@@ -654,6 +735,8 @@ def unload_all(url):
         name = model.get("name", "")
         if not name:
             continue
+        with _activity_mu:
+            _unloading[canonical(name)] = time.time()
         requests.post(
             f"{url}/api/generate",
             json={"model": name, "keep_alive": 0},
@@ -714,12 +797,13 @@ def warm(url, model, reserved_gb):
             model, held, size * 1.2, reserved_gb, total, "warm" if fits else "skip")
         if not fits:
             return False
-        requests.post(
-            f"{url}/api/chat",
-            json={"model": model, "messages": [], "keep_alive": KEEP_ALIVE,
-                  "options": {"num_ctx": MIN_CTX}},
-            timeout=CHAT_TIMEOUT,
-        )
+        with using(model):
+            requests.post(
+                f"{url}/api/chat",
+                json={"model": model, "messages": [], "keep_alive": KEEP_ALIVE,
+                      "options": {"num_ctx": MIN_CTX}},
+                timeout=CHAT_TIMEOUT,
+            )
         return True
     except requests.RequestException:
         return False

@@ -467,11 +467,24 @@ def _server_up() -> bool:
         return False
 
 
+# Whether `ensure_server` is booting the sidecar right now — the meter's "starting".
+_booting = False
+
+
 def ensure_server(on_status=None) -> None:
     """Start the ComfyUI sidecar if it isn't already listening, and wait for it."""
-    global _proc
+    global _booting
     if _server_up():
         return
+    _booting = True
+    try:
+        _start_server(on_status)
+    finally:
+        _booting = False
+
+
+def _start_server(on_status) -> None:
+    global _proc
     if not runtime_ready():
         raise RuntimeError("The image engine isn't installed. Re-run ./run.sh.")
     if not cat.installed_bundles():
@@ -563,15 +576,34 @@ def resident_models() -> dict | None:
     Taken from `_resident`, this process's memory of what it asked for — ComfyUI
     has no API for what it has loaded. `known` is False when that memory means
     nothing yet (see `_residency_known`), and the list is then empty rather than a
-    guess. Transformers carry their bundle's label and family; `video` marks Wan.
+    guess. Transformers carry their bundle's label, family and `kind` (image or
+    video). Each file's `state` is loading / active (used by the run in progress) /
+    loaded. `status` is "starting" while the sidecar boots.
     """
+    if _booting:
+        return {"status": "starting", "known": True, "models": []}
     if not _server_up():
         return None
-    if not _residency_known:
-        return {"known": False, "models": []}
+    # The run in progress, if any, is fresher than `_resident`: a loader it has
+    # finished (or found cached) holds its file now, not at `finish()`, and the
+    # loader it is on is what's loading.
+    roles = dict(_resident_role) if _residency_known else {}
+    states = dict.fromkeys(roles, "loaded")
+    live = _live
+    if live is not None:
+        for nid, node in live.graph.items():
+            for k, v in (node.get("inputs") or {}).items():
+                if k not in _MODEL_INPUTS or not isinstance(v, str):
+                    continue
+                if nid == live.node:
+                    roles[v], states[v] = k, "loading"
+                elif nid in live.done or v in states:
+                    roles[v], states[v] = k, "active"
+    if not roles and not _residency_known:
+        return {"status": "ready", "known": False, "models": []}
     models = []
-    for f in _resident:
-        role = _ROLE_OF_INPUT.get(_resident_role.get(f, ""), "model")
+    for f, key in roles.items():
+        role = _ROLE_OF_INPUT.get(key, "model")
         b = cat.bundle_of_unet(f) if role == "transformer" else None
         family = (b["family"] if b else cat.FAMILY_FLUX1) if role == "transformer" else None
         models.append({
@@ -579,11 +611,13 @@ def resident_models() -> dict | None:
             "role": role,
             "label": cat.label_of_unet(f) if role == "transformer" else f,
             "family": family,
+            "kind": None if family is None else "video" if family == cat.FAMILY_WAN else "image",
             "video": family == cat.FAMILY_WAN,
+            "state": states[f],
         })
     rank = {r: i for i, r in enumerate(_ROLE_ORDER)}
     models.sort(key=lambda m: (rank.get(m["role"], len(rank)), m["label"]))
-    return {"known": True, "models": models}
+    return {"status": "ready", "known": True, "models": models}
 
 
 def weights_gb(unet: str) -> float | None:
@@ -1766,6 +1800,9 @@ _resident_role: dict[str, str] = {}
 # it just isn't allowed to write anything down.
 _residency_known = False
 
+# The generation in progress, for the meter to read what it is loading.
+_live: "_Progress | None" = None
+
 
 def _model_inputs(graph: dict) -> set[str]:
     """Every model file this graph names."""
@@ -1939,6 +1976,8 @@ class _Progress:
 
     # -- events ------------------------------------------------------------ #
     def begin(self) -> None:
+        global _live
+        _live = self
         self._emit(force=True)
 
     def cached(self, ids) -> None:
@@ -2105,8 +2144,16 @@ def _await(graph, on_progress=None, on_status=None,
         _prompts.pop(me, None)
 
 
-def _await_prompt(pid, client_id, graph, on_progress, recv_timeout,
-                  poll_timeout) -> dict:
+def _await_prompt(*args) -> dict:
+    global _live
+    try:
+        return _await_prompt_tracked(*args)
+    finally:
+        _live = None
+
+
+def _await_prompt_tracked(pid, client_id, graph, on_progress, recv_timeout,
+                          poll_timeout) -> dict:
     prog = _Progress(graph, on_progress=on_progress)
     prog.begin()
 
