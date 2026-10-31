@@ -1263,30 +1263,34 @@ button.res-meter.open {
   flex-shrink: 0;
 }
 
-/* Manual offload: quiet until hovered, red once armed for the confirming click. */
+/* Manual offload: amber (caution) with a tinted fill so it reads as a button, not
+   a status badge; solid red once armed for the confirming click. */
 .res-offload {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
   padding: 1px 6px;
   border-radius: 8px;
-  border: 1px solid var(--border);
-  background: none;
-  color: var(--muted);
+  border: 1px solid color-mix(in srgb, var(--amber) 55%, transparent);
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+  color: var(--amber);
   font: inherit;
   font-size: 10px;
+  font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
 }
 
 .res-offload:hover:not(:disabled) {
-  color: var(--text);
-  border-color: currentColor;
+  border-color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 22%, transparent);
 }
 
-.res-offload.armed {
-  color: var(--red);
-  border-color: currentColor;
+.res-offload.armed,
+.res-offload.armed:hover:not(:disabled) {
+  color: #fff;
+  border-color: var(--red);
+  background: var(--red);
 }
 
 .res-offload:disabled {
