@@ -735,6 +735,17 @@ def running(url):
     return response.json().get("models", [])
 
 
+def unload(url, name):
+    """Ask Ollama to unload `name` now, and mark it unloading for the meter."""
+    with _activity_mu:
+        _unloading[canonical(name)] = time.time()
+    requests.post(
+        f"{url}/api/generate",
+        json={"model": name, "keep_alive": 0},
+        timeout=10,
+    )
+
+
 def unload_all(url):
     """Unload every loaded model to free VRAM. Returns the names unloaded."""
     unloaded = []
@@ -742,13 +753,7 @@ def unload_all(url):
         name = model.get("name", "")
         if not name:
             continue
-        with _activity_mu:
-            _unloading[canonical(name)] = time.time()
-        requests.post(
-            f"{url}/api/generate",
-            json={"model": name, "keep_alive": 0},
-            timeout=10,
-        )
+        unload(url, name)
         unloaded.append(name)
     return unloaded
 

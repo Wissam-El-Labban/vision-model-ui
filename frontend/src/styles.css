@@ -1258,8 +1258,40 @@ button.res-meter.open {
 
 .res-badges {
   display: flex;
+  align-items: center;
   gap: 4px;
   flex-shrink: 0;
+}
+
+/* Manual offload: quiet until hovered, red once armed for the confirming click. */
+.res-offload {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.res-offload:hover:not(:disabled) {
+  color: var(--text);
+  border-color: currentColor;
+}
+
+.res-offload.armed {
+  color: var(--red);
+  border-color: currentColor;
+}
+
+.res-offload:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* A kind of model inside an engine's section: "Vision · 1". */

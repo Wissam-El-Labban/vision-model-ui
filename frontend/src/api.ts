@@ -172,6 +172,21 @@ export async function unloadAll(ollamaUrl: string): Promise<string[]> {
   return (await res.json()).unloaded ?? [];
 }
 
+/** Unload one Ollama model now, whatever its keep_alive says. */
+export async function unloadModel(ollamaUrl: string, name: string): Promise<void> {
+  const res = await fetch(
+    `/api/models/${encodeURIComponent(name)}/unload?ollama_url=${encodeURIComponent(ollamaUrl)}`,
+    { method: "POST" }
+  );
+  if (!res.ok) throw new Error(`unload: ${res.status}`);
+}
+
+/** Free everything ComfyUI holds — it has no way to unload a single model. */
+export async function unloadGenModels(): Promise<void> {
+  const res = await fetch("/api/generate/unload", { method: "POST" });
+  if (!res.ok) throw new Error(`unload: ${res.status}`);
+}
+
 export async function deleteModel(ollamaUrl: string, name: string): Promise<void> {
   const res = await fetch(
     `/api/models/${encodeURIComponent(name)}?ollama_url=${encodeURIComponent(ollamaUrl)}`,

@@ -410,6 +410,16 @@ def unload_models(ollama_url: str = oc.DEFAULT_URL):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+@app.post("/api/models/{name:path}/unload")
+def unload_model(name: str, ollama_url: str = oc.DEFAULT_URL):
+    """Unload one model now — the resource meter's manual offload."""
+    try:
+        oc.unload(ollama_url, name)
+        return {"ok": True}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
 @app.get("/api/ps")
 def ps(ollama_url: str = oc.DEFAULT_URL):
     try:
