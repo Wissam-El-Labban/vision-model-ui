@@ -42,6 +42,7 @@ interface Props {
   onAddFiles: (files: FileList | File[]) => void;
   onRemoveImage: (i: number) => void;
   onRotateImage: (i: number) => void;
+  onFlipImage: (i: number) => void;
   onSubmit: () => void;
   onStop: () => void;
   streaming: boolean;
@@ -132,6 +133,7 @@ export default function Composer({
   onAddFiles,
   onRemoveImage,
   onRotateImage,
+  onFlipImage,
   onSubmit,
   onStop,
   streaming,
@@ -764,6 +766,9 @@ export default function Composer({
                 <div className="thumb-actions">
                   <button title="Rotate" onClick={() => onRotateImage(i)}>
                     ↻
+                  </button>
+                  <button title="Flip horizontally" onClick={() => onFlipImage(i)}>
+                    ⇋
                   </button>
                   <button title="Remove" onClick={() => onRemoveImage(i)}>
                     ✕

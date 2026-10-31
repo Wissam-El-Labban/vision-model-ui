@@ -43,7 +43,7 @@ import {
   type TurnHandlers,
   type Usage,
 } from "./api";
-import { fileToDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
+import { fileToDataUrl, flipDataUrl, resizeDataUrl, rotateDataUrl } from "./fileUtils";
 import {
   agentModels,
   guidanceFor,
@@ -429,6 +429,10 @@ export default function App() {
   async function rotatePinned(i: number) {
     const rotated = await rotateDataUrl(pinnedImages[i], 90);
     setPinnedImages((prev) => prev.map((img, idx) => (idx === i ? rotated : img)));
+  }
+  async function flipPinned(i: number) {
+    const flipped = await flipDataUrl(pinnedImages[i]);
+    setPinnedImages((prev) => prev.map((img, idx) => (idx === i ? flipped : img)));
   }
 
   // Persist settings.
@@ -1657,6 +1661,10 @@ export default function App() {
     const rotated = await rotateDataUrl(composerImages[i], 90);
     setComposerImages((prev) => prev.map((img, idx) => (idx === i ? rotated : img)));
   }
+  async function flipComposerImage(i: number) {
+    const flipped = await flipDataUrl(composerImages[i]);
+    setComposerImages((prev) => prev.map((img, idx) => (idx === i ? flipped : img)));
+  }
   /** The Ollama model that will do the rewriting: the Settings pick if the user
    *  made one, else the one in use if it can see, else any vision model. ""
    *  means none is installed/picked — skip the call entirely. */
@@ -2004,6 +2012,7 @@ export default function App() {
               onAdd={addPinned}
               onRemove={removePinned}
               onRotate={rotatePinned}
+              onFlip={flipPinned}
               onLockChange={handleLockChange}
             />
             <Chat
@@ -2037,6 +2046,7 @@ export default function App() {
             onAddFiles={addComposerFiles}
             onRemoveImage={removeComposerImage}
             onRotateImage={rotateComposerImage}
+            onFlipImage={flipComposerImage}
             onSubmit={submitComposer}
             onStop={stop}
             streaming={streaming}

@@ -5,6 +5,7 @@ interface Props {
   onAdd: (files: FileList | File[]) => void;
   onRemove: (i: number) => void;
   onRotate: (i: number) => void;
+  onFlip: (i: number) => void;
   /** Notifies the parent when the panel is "focused" (clicked). While focused, a
    *  Ctrl+V paste routes to the pinned images instead of the message composer. */
   onLockChange: (locked: boolean) => void;
@@ -17,7 +18,7 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 /** Pinned image panel down the left side. It stays put while the chat scrolls
  *  on the right, never covering it. Drag the right edge to resize its width; the
  *  images always scale to fit inside (never clipped). Click an image to zoom. */
-export default function ImageBar({ images, onAdd, onRemove, onRotate, onLockChange }: Props) {
+export default function ImageBar({ images, onAdd, onRemove, onRotate, onFlip, onLockChange }: Props) {
   const [dragOver, setDragOver] = useState(false);
   const [zoom, setZoom] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
@@ -120,6 +121,9 @@ export default function ImageBar({ images, onAdd, onRemove, onRotate, onLockChan
                   <div className="bar-img-actions">
                     <button title="Rotate" onClick={() => onRotate(i)}>
                       ↻
+                    </button>
+                    <button title="Flip horizontally" onClick={() => onFlip(i)}>
+                      ⇋
                     </button>
                     <button title="Remove" onClick={() => onRemove(i)}>
                       ✕
