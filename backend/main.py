@@ -310,20 +310,43 @@ def _relay(job: "jobs.Job", stream):
         stream.close()
 
 
+def _prompt_title(prompt: str, limit: int = 40) -> str:
+    """A model-free chat title: the prompt's first line, cut at a word boundary."""
+    line = next((ln.strip() for ln in (prompt or "").splitlines() if ln.strip()), "")
+    if len(line) <= limit:
+        return line
+    cut = line[:limit].rsplit(" ", 1)[0] or line[:limit]
+    return cut.rstrip(",.;:") + "…"
+
+
+def _loaded_or_none(ollama_url: str, model: str | None) -> str | None:
+    """`model` if Ollama already has it resident, else None. Never loads anything."""
+    if not model:
+        return None
+    try:
+        names = {oc.canonical(m.get("name", "")) for m in oc.running(ollama_url)}
+    except Exception:
+        return None
+    return model if oc.canonical(model) in names else None
+
+
 def _name_chat(job: "jobs.Job", model: str | None, ollama_url: str) -> None:
     """Title the chat after its first exchange, if nothing has titled it yet.
 
     Done here rather than by the page, so a turn that finished while the page was
     closed still names its chat. Best-effort, like the titler itself.
     """
-    if not job.chat_id or not model or job.deleted:
+    if not job.chat_id or job.deleted:
         return
     try:
         if db.get_title(job.chat_id):
             return
         exchange = db.get_first_exchange(job.chat_id)
         if exchange:
-            title = oc.generate_title(ollama_url, model, *exchange)
+            # No model means "don't load one just for a title": name the chat
+            # from its first prompt instead.
+            title = (oc.generate_title(ollama_url, model, *exchange) if model
+                     else _prompt_title(exchange[0]))
             if title and not job.deleted:
                 db.set_title(job.chat_id, title)
     except Exception:
@@ -1243,7 +1266,11 @@ def _generate_job(req: GenerateRequest) -> "jobs.Job":
             fx.release(threading.get_ident())
             if unet and not req.unload_ollama:
                 _warm_after(req.ollama_url, req.warm_model, [unet])
-        _name_chat(job, req.title_model, req.ollama_url)
+        # Generate mode runs no Ollama model of its own, so titling must not load
+        # one: use the title model only if it's still resident (e.g. the enhancer
+        # when "unload before generating" is off), else title from the prompt.
+        _name_chat(job, _loaded_or_none(req.ollama_url, req.title_model),
+                   req.ollama_url)
 
     return _start_job(req.chat_id, "generate", work, lambda: _generate_job(req))
 

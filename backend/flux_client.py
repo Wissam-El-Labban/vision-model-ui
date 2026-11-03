@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -104,6 +105,10 @@ GUIDANCE_MIN, GUIDANCE_MAX = 0.5, 10.0
 # cost of every step, which is why the default is the floor and not a midpoint.
 FLUX3_STEPS = 16
 FLUX3_GUIDANCE = 1.0
+# Ceiling for that cfg. Against FLUX 3's zeroed negative, a cfg tuned for another
+# family (FLUX.2 Klein's 3.5) burns the image into noise, so a client that sends
+# one, e.g. a stale value left over from a model switch, gets clamped here.
+FLUX3_GUIDANCE_MAX = 2.0
 # References the model was trained to take at once (BFL's model card). Edit, compose
 # and control all chain one ReferenceLatent per image, so the limit covers them all.
 FLUX3_REF_LIMIT = 10
@@ -265,6 +270,16 @@ def _guidance(v, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return g if GUIDANCE_MIN <= g <= GUIDANCE_MAX else default
+
+
+def _model_guidance(v, unet, role: str) -> float:
+    """`_guidance` with `unet`'s default, plus a family ceiling where one matters."""
+    g = _guidance(v, _default_guidance(unet, role))
+    if cat.family_of(unet) == cat.FAMILY_FLUX3 and g > FLUX3_GUIDANCE_MAX:
+        logging.warning("FLUX 3 cfg %.2f is out of family range; clamping to %.1f",
+                        g, FLUX3_GUIDANCE_MAX)
+        return FLUX3_GUIDANCE_MAX
+    return g
 
 
 def _steps(v, default: int = DEFAULT_STEPS) -> int:
@@ -2299,7 +2314,7 @@ def create(prompt, width=None, height=None, steps=None, guidance=None, seed=0,
     unet = _resolve_unet(model, ROLE_CREATE)
     w, h = _dim(width), _dim(height)
     g = _txt2img_graph(_prompt_for(prompt, enhance), w, h, _steps(steps, _default_steps(unet)),
-                       _guidance(guidance, _default_guidance(unet, ROLE_CREATE)),
+                       _model_guidance(guidance, unet, ROLE_CREATE),
                        int(seed), "flux_create", unet)
     if on_status:
         on_status(f"generating with {_label(unet)}…")
@@ -2315,7 +2330,7 @@ def img2img(pil, prompt, strength=None, steps=None, guidance=None, seed=0,
     w, h = _source_resolution(unet, pil)
     g = _img2img_graph(name, _prompt_for(prompt, enhance), _strength(strength),
                        _steps(steps, _default_steps(unet)),
-                       _guidance(guidance, _default_guidance(unet, ROLE_CREATE)),
+                       _model_guidance(guidance, unet, ROLE_CREATE),
                        int(seed), w, h, "flux_img2img", unet)
     if on_status:
         on_status(f"transforming with {_label(unet)}…")
@@ -2337,7 +2352,7 @@ def edit(pil, prompt, refs=(), steps=None, guidance=None, seed=0, model=None,
     ref_names = [_upload_image(p, f"editref{i}_{tag}.png") for i, p in enumerate(refs)]
     w, h = _source_resolution(unet, pil)
     g = _edit_graph(scene, ref_names, prompt or "", _steps(steps, _default_steps(unet)),
-                    _guidance(guidance, _default_guidance(unet, ROLE_EDIT)),
+                    _model_guidance(guidance, unet, ROLE_EDIT),
                     int(seed), w, h, "flux_edit", unet)
     if on_status:
         on_status(f"editing with {_label(unet)}…")
@@ -2355,7 +2370,7 @@ def compose(pils, prompt, steps=None, guidance=None, seed=0, model=None, on_prog
     # The new scene takes its shape from the first reference.
     width, height = _source_resolution(unet, pils[0])
     g = _compose_graph(names, prompt or "", width, height, _steps(steps, _default_steps(unet)),
-                       _guidance(guidance, _default_guidance(unet, ROLE_EDIT)),
+                       _model_guidance(guidance, unet, ROLE_EDIT),
                        int(seed), "flux_compose", unet)
     if on_status:
         on_status(f"composing with {_label(unet)}…")
@@ -2472,7 +2487,7 @@ def control(pil, kinds=(), prompt="", refs=(), maps=(), lock=None, control_stren
     g = _control_graph(map_names, ref_names, source_name, lock,
                        _control_scale(control_strength), prompt or "", w, h,
                        _steps(steps, _default_steps(unet)),
-                       _guidance(guidance, _default_guidance(unet, ROLE_EDIT)),
+                       _model_guidance(guidance, unet, ROLE_EDIT),
                        int(seed), "flux_control", unet)
     say(f"generating with {_label(unet)}…")
     lo = PREPROCESS_FRACTION if built else 0.0
@@ -2508,7 +2523,7 @@ def animate(pil, prompt, seconds=None, steps=None, guidance=None, seed=0, model=
     boundary = _wan_boundary(n_steps)
     length = _wan_length(seconds)
     g = _wan_i2v_graph(name, prompt or "", w, h, length, n_steps, boundary,
-                       _guidance(guidance, _default_guidance(unet, ROLE_ANIMATE)),
+                       _model_guidance(guidance, unet, ROLE_ANIMATE),
                        int(seed), "wan_animate", b)
     if on_status:
         on_status(f"animating with {_label(unet)} — {length} frames "

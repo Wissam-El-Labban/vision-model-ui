@@ -1330,7 +1330,12 @@ export default function Composer({
             {roleModels.length > 0 ? (
               <select
                 value={activeFlux}
-                onChange={(e) => patchGen({ fluxModel: e.target.value })}
+                onChange={(e) => {
+                  // Through pickFlux, not a bare patch: steps/guidance must follow
+                  // the model, or the new one runs on the old one's sampler tuning.
+                  const m = roleModels.find((x) => x.name === e.target.value);
+                  if (m) pickFlux(m);
+                }}
               >
                 {roleModels.map((m) => (
                   <option key={m.name} value={m.name}>

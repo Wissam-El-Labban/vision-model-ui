@@ -234,7 +234,9 @@ export default function App() {
     null
   );
   const [studioOpen, setStudioOpen] = useState(false);
-  const guidanceReady = useRef(false);
+  // The model an "auto" pick (fluxModel === "") last resolved to, so its defaults
+  // can follow it when an install/removal changes which model that is.
+  const lastAutoFlux = useRef<string | null>(null);
   const refreshFlux = useCallback(() => {
     getPreprocessors()
       .then(setPreprocessors)
@@ -245,16 +247,25 @@ export default function App() {
       .then((r) => {
         setFluxAvailable(r.available);
         setFluxModels(r.models);
-        // Guidance defaults depend on which model is installed, which we only learn
-        // here. Set it once, on the first list we see, so a value the user has since
-        // tuned by hand doesn't get reset by a later install.
-        if (!guidanceReady.current && r.models.length) {
-          guidanceReady.current = true;
-          setGen((g) => ({
-            ...g,
-            guidance: guidanceFor(genOp, r.models),
-            steps: stepsFor(genOp, r.models),
-          }));
+        // Steps/guidance defaults depend on which model will run, which we only
+        // learn here. Set them on the first list, and again whenever an "auto"
+        // pick now resolves to a different model (an install or removal changed
+        // which one sorts first). Otherwise, a hand-tuned value is kept.
+        if (r.models.length) {
+          const auto = resolveFlux("", r.models, roleFor(genOp));
+          if (auto !== lastAutoFlux.current) {
+            const first = lastAutoFlux.current === null;
+            lastAutoFlux.current = auto;
+            setGen((g) =>
+              first || g.fluxModel === ""
+                ? {
+                    ...g,
+                    guidance: guidanceFor(genOp, r.models, g.fluxModel),
+                    steps: stepsFor(genOp, r.models, g.fluxModel),
+                  }
+                : g
+            );
+          }
         }
       })
       .catch(() => {
@@ -1399,11 +1410,16 @@ export default function App() {
               ollama_url: ollamaUrl,
               // Whichever model the next prompt will hit, so the backend can reload
               // it while this image is on screen rather than on the next send.
-              warm_model:
-                (enhancerMode !== "off" ? effectiveEnhanceModel : model) || null,
+              // With the enhancer off, Generate uses no Ollama model at all, so
+              // there's nothing to warm (warming the Analyze model would load a
+              // model this mode never asked for).
+              warm_model: (enhancerMode !== "off" && effectiveEnhanceModel) || null,
               unload_ollama: unloadOllama,
-              // The backend names the chat after its first exchange, on the VLM.
-              title_model: model || null,
+              // The backend names the chat after its first exchange. Use the model
+              // that just wrote the prompt, never the Analyze pick: titling on that
+              // would load it out of nowhere. null makes the backend title from
+              // the prompt text without loading any model.
+              title_model: (enhancerMode !== "off" && effectiveEnhanceModel) || null,
             },
             t.on as GenerateHandlers,
             signal
@@ -1525,7 +1541,9 @@ export default function App() {
               doc_ids: readyDocIds,
               doc_prompts: docPrompts,
               unload_ollama: unloadOllama,
-              title_model: model || agentModel,
+              // The agent model is already loaded for this turn; titling on the
+              // Analyze pick would load a third model.
+              title_model: agentModel,
             },
             t.on as AgentHandlers,
             signal
