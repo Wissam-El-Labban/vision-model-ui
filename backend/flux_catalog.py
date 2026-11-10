@@ -59,6 +59,172 @@ _EXPERT_KEYS = ("unet", "unet_edit", "unet_low")
 STAGING_DIR = MODELS_DIR / ".shards"
 
 # --------------------------------------------------------------------------- #
+# Groups
+# --------------------------------------------------------------------------- #
+# How the Image Models panel organises the catalog: one section per model line, in
+# display order. Every bundle names its `group`. A bundle with `quant_of` is a
+# quantized build of another bundle in the same group (its *parent*, the unquantized
+# release) and is listed in a dropdown under that parent rather than beside it.
+GROUPS = [
+    {"id": "flux3-klein", "title": "FLUX 3 Image Klein",
+     "blurb": "Black Forest Labs' newest distilled model."},
+    {"id": "flux2-dev", "title": "FLUX.2 [dev]",
+     "blurb": "The full-size FLUX.2 — highest fidelity, heaviest to run."},
+    {"id": "flux2-klein-9b", "title": "FLUX.2 [klein] 9B",
+     "blurb": "Distilled 9B FLUX.2: 8 steps, conditions on Qwen3-8B. Every quantized "
+              "build takes the same LoRAs as the unquantized one."},
+    {"id": "flux2-klein-4b", "title": "FLUX.2 [klein] 4B",
+     "blurb": "The smallest FLUX.2: distilled 4B, conditions on Qwen3-4B. Its LoRAs are "
+              "not interchangeable with 9B's, but work on every 4B build."},
+    {"id": "qwen-image", "title": "Qwen-Image",
+     "blurb": "Alibaba's 20B create + edit pairs — best at legible text in images."},
+    {"id": "wan22", "title": "Wan 2.2 (video)",
+     "blurb": "Image-to-video."},
+]
+
+KLEIN_GROUPS = ("flux2-klein-9b", "flux2-klein-4b")
+
+# --------------------------------------------------------------------------- #
+# [klein] quantized builds
+# --------------------------------------------------------------------------- #
+# Every quantized FLUX.2 [klein] (9B and 4B distilled) published as a single file:
+# unsloth's GGUF conversions and BFL's own fp8. NVFP4 is left out — it only runs fast
+# on Blackwell — and so is the F16 GGUF, which is BF16's size with a narrower range.
+#
+# All of them are straight conversions: tensor names are the bf16 checkpoint's own,
+# so a LoRA trained for unquantized [klein] binds to every build of the same size
+# (`flux_client._unet_width`/`_unet_blocks` read the same numbers off a GGUF header as
+# off a safetensors one). The VAE is byte-identical across 4B and 9B (sha256
+# ca70d220…), which is why every klein bundle saves it under the one filename.
+#
+# The encoder is paired by tier: down to Q6_K the transformer gets Qwen3 at Q8_0, and
+# Q5 and below gets Q4_K_M so the pair keeps shrinking together. Either can be swapped
+# in the encoder picker afterwards.
+#
+# (quant, file in the repo, transformer GB). Quality-descending: this is also the
+# order `_default_for` picks in, so the best installed build is the default.
+_KLEIN_QUANTS = {
+    "9b": [
+        ("BF16", "flux-2-klein-9b-BF16.gguf", 18.16),
+        ("Q8_0", "flux-2-klein-9b-Q8_0.gguf", 10.25),
+        ("fp8", "flux-2-klein-9b-fp8.safetensors", 9.43),
+        ("Q6_K", "flux-2-klein-9b-Q6_K.gguf", 7.87),
+        ("Q5_K_M", "flux-2-klein-9b-Q5_K_M.gguf", 7.02),
+        ("Q5_K_S", "flux-2-klein-9b-Q5_K_S.gguf", 6.94),
+        ("Q5_1", "flux-2-klein-9b-Q5_1.gguf", 7.25),
+        ("Q5_0", "flux-2-klein-9b-Q5_0.gguf", 6.71),
+        ("Q4_K_M", "flux-2-klein-9b-Q4_K_M.gguf", 5.67),
+        ("Q4_K_S", "flux-2-klein-9b-Q4_K_S.gguf", 5.83),
+        ("Q4_1", "flux-2-klein-9b-Q4_1.gguf", 6.16),
+        ("Q4_0", "flux-2-klein-9b-Q4_0.gguf", 5.62),
+        ("Q3_K_M", "flux-2-klein-9b-Q3_K_M.gguf", 4.77),
+        ("Q3_K_S", "flux-2-klein-9b-Q3_K_S.gguf", 4.69),
+        ("Q2_K", "flux-2-klein-9b-Q2_K.gguf", 3.40),
+    ],
+    "4b": [
+        ("BF16", "flux-2-klein-4b-BF16.gguf", 7.75),
+        ("Q8_0", "flux-2-klein-4b-Q8_0.gguf", 4.30),
+        ("fp8", "flux-2-klein-4b-fp8.safetensors", 4.07),
+        ("Q6_K", "flux-2-klein-4b-Q6_K.gguf", 3.41),
+        ("Q5_K_M", "flux-2-klein-4b-Q5_K_M.gguf", 3.07),
+        ("Q5_K_S", "flux-2-klein-4b-Q5_K_S.gguf", 3.05),
+        ("Q5_1", "flux-2-klein-4b-Q5_1.gguf", 3.15),
+        ("Q5_0", "flux-2-klein-4b-Q5_0.gguf", 2.92),
+        ("Q4_K_M", "flux-2-klein-4b-Q4_K_M.gguf", 2.60),
+        ("Q4_K_S", "flux-2-klein-4b-Q4_K_S.gguf", 2.58),
+        ("Q4_1", "flux-2-klein-4b-Q4_1.gguf", 2.69),
+        ("Q4_0", "flux-2-klein-4b-Q4_0.gguf", 2.46),
+        ("Q3_K_M", "flux-2-klein-4b-Q3_K_M.gguf", 2.12),
+        ("Q3_K_S", "flux-2-klein-4b-Q3_K_S.gguf", 2.10),
+        ("Q2_K", "flux-2-klein-4b-Q2_K.gguf", 1.83),
+    ],
+}
+
+# Qwen3 encoder GGUFs per [klein] size: (high tier, low tier) as (file, GB).
+_KLEIN_ENCODERS = {
+    "9b": ("unsloth/Qwen3-8B-GGUF", ("Qwen3-8B-Q8_0.gguf", 8.71), ("Qwen3-8B-Q4_K_M.gguf", 5.03)),
+    "4b": ("unsloth/Qwen3-4B-GGUF", ("Qwen3-4B-Q8_0.gguf", 4.28), ("Qwen3-4B-Q4_K_M.gguf", 2.50)),
+}
+_KLEIN_VAE_GB = 0.17
+_HIGH_TIER = ("BF16", "Q8_0", "fp8", "Q6_K")
+
+_QUANT_NOTES = {
+    "BF16": "GGUF at bf16 — the unquantized weights, but memory-mapped read-only, so it "
+            "loads on machines with less RAM than the safetensors release needs.",
+    "Q8_0": "8-bit GGUF (blocks of 32 with a scale each).",
+    "fp8": "Black Forest Labs' own fp8 build (safetensors). Stored in 8 bits; Ampere "
+           "and older GPUs compute it in bf16.",
+    "Q6_K": "6-bit K-quant GGUF.",
+    "Q5_K_M": "5-bit K-quant GGUF, medium.",
+    "Q5_K_S": "5-bit K-quant GGUF, small.",
+    "Q5_1": "5-bit legacy GGUF (with offset).",
+    "Q5_0": "5-bit legacy GGUF.",
+    "Q4_K_M": "4-bit K-quant GGUF, medium.",
+    "Q4_K_S": "4-bit K-quant GGUF, small.",
+    "Q4_1": "4-bit legacy GGUF (with offset).",
+    "Q4_0": "4-bit legacy GGUF.",
+    "Q3_K_M": "3-bit K-quant GGUF, medium.",
+    "Q3_K_S": "3-bit K-quant GGUF, small.",
+    "Q2_K": "2-bit K-quant GGUF — the smallest build, for very small cards.",
+}
+
+
+def _resources(t_gb: float, e_gb: float, mmapped: bool) -> dict:
+    """Recommended system resources for a transformer + encoder pair. Estimates.
+
+    `vram_gb` keeps both resident (fastest); `min_vram_gb` relies on ComfyUI offloading
+    one while the other runs. A GGUF is mapped read-only into page cache, so system RAM
+    only has to hold whichever model is parked; a safetensors file is mapped privately
+    and counts in full (see the ENOMEM note on [klein] 9B Q8_0's origin, git a738e3f).
+    """
+    ram = max(t_gb, e_gb) + 6 if mmapped else t_gb + e_gb + 6
+    return {"vram_gb": round(t_gb + e_gb + 3), "min_vram_gb": round(max(t_gb, e_gb) + 2),
+            "ram_gb": round(ram)}
+
+
+def _klein_variants(size: str) -> list[dict]:
+    """Every quantized build of [klein] `size` ("9b"/"4b") as a catalog bundle."""
+    enc_repo, enc_hi, enc_lo = _KLEIN_ENCODERS[size]
+    name = size.upper()
+    out = []
+    for quant, fname, t_gb in _KLEIN_QUANTS[size]:
+        enc_file, e_gb = enc_hi if quant in _HIGH_TIER else enc_lo
+        fp8 = quant == "fp8"
+        # Q8_0 keeps the id it shipped with; settings (encoder, LoRAs) are keyed on it.
+        suffix = {"Q8_0": "q8", "BF16": "bf16-gguf"}.get(quant, quant.lower())
+        repo = (f"black-forest-labs/FLUX.2-klein-{size}-fp8" if fp8
+                else f"unsloth/FLUX.2-klein-{name}-GGUF")
+        out.append({
+            "id": f"flux2-klein-{size}-{suffix}",
+            "label": f"FLUX.2 [klein] {name} — {quant}",
+            "family": FAMILY_FLUX2,
+            "group": f"flux2-klein-{size}",
+            "quant_of": f"flux2-klein-{size}",
+            "quant": quant,
+            "roles": [ROLE_CREATE, ROLE_EDIT],
+            "blurb": _QUANT_NOTES[quant],
+            "size_gb": round(t_gb + e_gb + _KLEIN_VAE_GB, 1),
+            **_resources(t_gb, e_gb, mmapped=not fp8),
+            # BFL gates its 9B repos (the fp8 one included); its 4B and unsloth's
+            # mirrors are open.
+            "gated": fp8 and size == "9b",
+            "unet": fname,
+            # A .gguf loads through UnetLoaderGGUF and ignores this; the fp8 file is
+            # already quantized and must not be cast again.
+            "weight_dtype": "default",
+            "clip": enc_file,
+            "vae": "flux2-klein-vae.safetensors",
+            "files": [
+                (repo, fname, "unet"),
+                (enc_repo, enc_file, "text_encoders"),
+                (f"unsloth/FLUX.2-klein-{name}", "vae/diffusion_pytorch_model.safetensors",
+                 "vae", "flux2-klein-vae.safetensors"),
+            ],
+        })
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Bundles
 # --------------------------------------------------------------------------- #
 # `files` are (repo, path-in-repo, dest-dir-key) with an optional 4th element: the name
@@ -92,6 +258,7 @@ BUNDLES = [
     # variants exist for 8 GB cards and Blackwell, and on this GPU they only cost quality.
     {
         "id": "flux3-klein",
+        "group": "flux3-klein",
         "label": "FLUX 3 Image Klein — from Black Forest Labs",
         "family": FAMILY_FLUX3,
         "roles": [ROLE_CREATE, ROLE_EDIT],
@@ -101,6 +268,8 @@ BUNDLES = [
                   "save a token first. Full bf16."),
         "size_gb": 20.3,
         "vram_gb": 31,
+        "min_vram_gb": 13,
+        "ram_gb": 26,
         "gated": True,
         "unet": "flux3-image-klein-bf16.safetensors",
         "weight_dtype": "default",
@@ -119,6 +288,7 @@ BUNDLES = [
     },
     {
         "id": "flux2-dev-bfl",
+        "group": "flux2-dev",
         "label": "FLUX.2 [dev] — from Black Forest Labs",
         "family": FAMILY_FLUX2,
         "roles": [ROLE_CREATE, ROLE_EDIT],
@@ -127,6 +297,9 @@ BUNDLES = [
                   "the weights are cast to fp8 at load to fit the GPU."),
         "size_gb": 100.4,
         "vram_gb": 46,
+        # Estimate: the 64 GB transformer is mapped in full before the fp8 cast.
+        "min_vram_gb": 34,
+        "ram_gb": 96,
         "gated": True,
         "unet": "flux2-dev.safetensors",
         # 64 GB of bf16 will not fit a 46 GB card. fp8 is native on Ada/Hopper, so cast
@@ -157,6 +330,7 @@ BUNDLES = [
     },
     {
         "id": "flux2-klein-9b",
+        "group": "flux2-klein-9b",
         "label": "FLUX.2 [klein] 9B — from Black Forest Labs",
         "family": FAMILY_FLUX2,
         "roles": [ROLE_CREATE, ROLE_EDIT],
@@ -165,6 +339,8 @@ BUNDLES = [
                   "[dev] and runs in bf16 with no quantization."),
         "size_gb": 34.7,
         "vram_gb": 32,
+        "min_vram_gb": 20,
+        "ram_gb": 40,
         "gated": True,
         "unet": "flux-2-klein-9b.safetensors",
         "weight_dtype": "default",
@@ -191,42 +367,39 @@ BUNDLES = [
             },
         ],
     },
-    # The same [klein] 9B weights, 8-bit. The bf16 bundle above cannot load on a
-    # machine with less RAM than its 16.9 GiB transformer file: safetensors maps it
-    # privately, and with no swap the kernel refuses that mapping outright (ENOMEM).
-    # A GGUF is mapped read-only, so it lives in page cache and never counts against
-    # RAM. Q8_0 is 8-bit weights in blocks of 32 with a scale per block, the
-    # highest-fidelity quant short of bf16. Lower quants soften skin and fine texture.
-    #
-    # It is a straight conversion: the tensor names are the bf16 checkpoint's own, so
-    # every LoRA made for unquantized [klein] 9B binds to it unchanged, and any
-    # Qwen3-8B encoder (bf16, a GGUF quant, a fine-tune) can be swapped in. The default
-    # is Qwen3-8B at Q8_0 too, so transformer + encoder (~19 GB) fit one 24 GB card.
-    # Nothing is gated: Unsloth mirrors BFL's files, and the VAE below is byte-identical
-    # (sha256 ca70d220…) to the gated repo's, which is why the bf16 bundle's filename
-    # is reused. `delete_bundle` keeps it while the other bundle still needs it.
+    # The bf16 [klein] 9B above loads only on a machine with more RAM than its 16.9 GiB
+    # transformer: safetensors maps it privately, and with no swap the kernel refuses
+    # the mapping outright (ENOMEM). Its GGUF builds below are mapped read-only, so they
+    # live in page cache and don't count against RAM — Q8_0 runs on 16 GB.
+    *_klein_variants("9b"),
+    # [klein] 4B, unquantized. ComfyUI's single-file packaging: the transformer and a
+    # ready-to-load Qwen3-4B encoder, so unlike 9B nothing needs stitching. Ungated.
     {
-        "id": "flux2-klein-9b-q8",
-        "label": "FLUX.2 [klein] 9B — Q8_0",
+        "id": "flux2-klein-4b",
+        "label": "FLUX.2 [klein] 4B — from Black Forest Labs",
         "family": FAMILY_FLUX2,
+        "group": "flux2-klein-4b",
         "roles": [ROLE_CREATE, ROLE_EDIT],
-        "blurb": ("The distilled 9B FLUX.2 in 8-bit GGUF: near-identical to bf16 at "
-                  "half the memory, so it runs on a 24 GB card with 16 GB of RAM. Takes "
-                  "the same LoRAs and Qwen3-8B text encoders as the bf16 [klein] 9B."),
-        "size_gb": 19.1,
-        "vram_gb": 22,
+        "blurb": ("The distilled 4B FLUX.2 in full bf16 — the lightest FLUX.2, still "
+                  "creating and editing with multiple reference images. Ungated — no "
+                  "HuggingFace token needed."),
+        "size_gb": 16.0,
+        **_resources(7.75, 8.04, mmapped=False),
         "gated": False,
-        "unet": "flux-2-klein-9b-Q8_0.gguf",
-        "weight_dtype": "default",  # unused: a .gguf loads through UnetLoaderGGUF
-        "clip": "Qwen3-8B-Q8_0.gguf",
+        "unet": "flux-2-klein-4b.safetensors",
+        "weight_dtype": "default",
+        "clip": "qwen_3_4b.safetensors",
         "vae": "flux2-klein-vae.safetensors",
         "files": [
-            ("unsloth/FLUX.2-klein-9B-GGUF", "flux-2-klein-9b-Q8_0.gguf", "unet"),
-            ("unsloth/Qwen3-8B-GGUF", "Qwen3-8B-Q8_0.gguf", "text_encoders"),
-            ("unsloth/FLUX.2-klein-9B", "vae/diffusion_pytorch_model.safetensors",
+            ("Comfy-Org/Flux-2-Klein-4B",
+             "split_files/diffusion_models/flux-2-klein-4b.safetensors", "unet"),
+            ("Comfy-Org/Flux-2-Klein-4B",
+             "split_files/text_encoders/qwen_3_4b.safetensors", "text_encoders"),
+            ("unsloth/FLUX.2-klein-4B", "vae/diffusion_pytorch_model.safetensors",
              "vae", "flux2-klein-vae.safetensors"),
         ],
     },
+    *_klein_variants("4b"),
     # Qwen splits create and edit across two separately fine-tuned checkpoints of one
     # 20B architecture — the same shape FLUX.1 had, where dev created and Kontext
     # edited. So a Qwen bundle ships both: `unet` creates, `unet_edit` edits, and
@@ -255,6 +428,7 @@ BUNDLES = [
     # reason `flux_client.REF_METHOD` is: an upgrade must not silently change it.
     {
         "id": "qwen-image-2512",
+        "group": "qwen-image",
         "label": "Qwen-Image 2512 + Edit 2511 — fp8",
         "family": FAMILY_QWEN,
         "roles": [ROLE_CREATE, ROLE_EDIT],
@@ -269,6 +443,8 @@ BUNDLES = [
         # before loading the edit half — and the 9.4 GB encoder is a separate load it
         # evicts too. Measure on real hardware and correct this.
         "vram_gb": 28,
+        "min_vram_gb": 23,
+        "ram_gb": 36,
         "gated": False,
         "unet": "qwen_image_2512_fp8_e4m3fn.safetensors",
         "unet_edit": "qwen_image_edit_2511_fp8mixed.safetensors",
@@ -304,6 +480,7 @@ BUNDLES = [
     },
     {
         "id": "qwen-image",
+        "group": "qwen-image",
         "label": "Qwen-Image + Edit — fp8",
         "family": FAMILY_QWEN,
         "roles": [ROLE_CREATE, ROLE_EDIT],
@@ -315,6 +492,8 @@ BUNDLES = [
         # the button shows only what is actually outstanding.
         "size_gb": 50.5,
         "vram_gb": 28,
+        "min_vram_gb": 23,
+        "ram_gb": 36,
         "gated": False,
         "unet": "qwen_image_fp8_e4m3fn.safetensors",
         "unet_edit": "qwen_image_edit_fp8_e4m3fn.safetensors",
@@ -342,6 +521,7 @@ BUNDLES = [
     },
     {
         "id": "wan22-i2v-a14b-fp16",
+        "group": "wan22",
         "label": "Wan 2.2 I2V A14B — fp16",
         "family": FAMILY_WAN,
         "roles": [ROLE_ANIMATE],
@@ -353,6 +533,8 @@ BUNDLES = [
         # one before loading the low-noise one) + the 11.4 GB encoder + activations for
         # 81 frames at 720p. Measure on real hardware and correct this.
         "vram_gb": 80,
+        "min_vram_gb": 31,
+        "ram_gb": 75,
         "gated": False,
         # The two experts run in one graph, so `unet_low` is not `unet_edit`: that key
         # means "the transformer for the *edit role*" and `_default_for` reads it as a
@@ -451,6 +633,20 @@ def get_preprocessor(pid: str) -> dict:
         if p["id"] == pid:
             return p
     raise ValueError(f"Unknown control preprocessor '{pid}'.")
+
+
+def is_klein(bundle: dict | None) -> bool:
+    """Whether a bundle is any build of FLUX.2 [klein] (9B or 4B, any precision) —
+    they share the distilled step count and guidance."""
+    return bool(bundle) and bundle.get("group") in KLEIN_GROUPS
+
+
+def lora_base(bundle: dict | None) -> str | None:
+    """The bundle id LoRAs are made for: a quantized build's parent, else itself.
+    Every build sharing one `lora_base` takes the same adapters."""
+    if not bundle:
+        return None
+    return bundle.get("quant_of") or bundle["id"]
 
 
 def get(bundle_id: str) -> dict:

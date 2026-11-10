@@ -25,6 +25,7 @@ import {
   setHfToken,
 } from "../api";
 import type {
+  FluxBundle,
   FluxCatalog,
   FluxLoraPick,
   FluxLoras,
@@ -475,6 +476,121 @@ export default function ImageModels({ models, onChanged }: Props) {
     }
   }
 
+  // Which collapsible menus are open. Keys: `g:<group>`, `q:<parent>` (its quantized
+  // builds), `r:<bundle>` (its resources). Unset means "use the default", which opens
+  // whatever holds an installed or downloading model — so the model in use is never
+  // hidden behind a click, and the 30 builds nobody installed stay folded away.
+  const [openMenus, setOpenMenus] = useState<Record<string, boolean>>({});
+  const isOpen = (key: string, auto: boolean) => openMenus[key] ?? auto;
+  const toggle = (key: string, current: boolean) =>
+    setOpenMenus((o) => ({ ...o, [key]: !current }));
+
+  /** Install/remove button, name and in-card progress — shared by a parent card and
+   *  each of its quantized builds. Progress lives in the card you clicked: a 50 GB
+   *  download that reports somewhere else reads as a hang. */
+  function bundleHead(b: FluxBundle, name: string) {
+    return (
+      <>
+        <div className="bundle-head">
+          <span className="bundle-name" title={b.label}>
+            {name}
+            {b.quant && <span className="muted small"> · {b.size_gb} GB</span>}
+          </span>
+          {b.installed ? (
+            <button
+              className="btn danger small"
+              onClick={() => remove(b.id, b.label)}
+              disabled={busy !== null}
+            >
+              Remove
+            </button>
+          ) : (
+            <button className="btn small" onClick={() => install(b.id)} disabled={busy !== null}>
+              {busy === b.id ? "Installing…" : `⬇ ${b.needed_gb} GB`}
+            </button>
+          )}
+        </div>
+        {busy === b.id && (
+          <div className="bundle-progress">
+            <div className="progress">
+              <div className="progress-bar" style={{ width: `${pct ?? 0}%` }} />
+            </div>
+            <div className="muted small">{status ?? "starting…"}</div>
+          </div>
+        )}
+      </>
+    );
+  }
+
+  /** Whether this machine meets a model's recommendation, its bare minimum, or
+   *  neither. Unknown hardware gives no verdict rather than a wrong one. */
+  function fit(b: FluxBundle): { cls: string; text: string } | null {
+    const vram = cat?.machine.vram_gb;
+    const ram = cat?.machine.ram_gb;
+    if (vram == null) return null;
+    // The machine reports GiB and the catalog rounds GB estimates; a few percent of
+    // slack keeps a 22.5 GiB card from failing a "22 GB" recommendation.
+    const ok = (have: number | null | undefined, need: number | null) =>
+      have == null || need == null || have * 1.05 >= need;
+    if (ok(vram, b.vram_gb) && ok(ram, b.ram_gb))
+      return { cls: "fit-ok", text: "✓ fits this machine" };
+    if (ok(vram, b.min_vram_gb ?? b.vram_gb))
+      return { cls: "fit-tight", text: "⚠ tight here — runs with offloading" };
+    return { cls: "fit-no", text: "✗ needs more VRAM than this machine has" };
+  }
+
+  function resourceMenu(b: FluxBundle, title: string) {
+    const key = `r:${b.id}`;
+    const open = isOpen(key, false);
+    const f = fit(b);
+    return (
+      <div className="res-menu">
+        <button className="res-toggle" onClick={() => toggle(key, open)}>
+          {open ? "▾" : "▸"} {title}
+          {f && <span className={`fit-badge ${f.cls}`}>{f.text}</span>}
+        </button>
+        {open && (
+          <table className="res-table">
+            <tbody>
+              <tr>
+                <th>GPU VRAM</th>
+                <td>
+                  {b.vram_gb} GB recommended
+                  {b.min_vram_gb != null && ` · ${b.min_vram_gb} GB minimum (offloading)`}
+                </td>
+              </tr>
+              {b.ram_gb != null && (
+                <tr>
+                  <th>System RAM</th>
+                  <td>{b.ram_gb} GB</td>
+                </tr>
+              )}
+              <tr>
+                <th>Disk</th>
+                <td>{b.size_gb} GB</td>
+              </tr>
+              {b.clip && (
+                <tr>
+                  <th>Text encoder</th>
+                  <td className="res-mono">{b.clip}</td>
+                </tr>
+              )}
+              {cat?.machine.vram_gb != null && (
+                <tr>
+                  <th>This machine</th>
+                  <td>
+                    {cat.machine.vram_gb.toFixed(0)} GB VRAM
+                    {cat.machine.ram_gb != null && ` · ${cat.machine.ram_gb.toFixed(0)} GB RAM`}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        )}
+      </div>
+    );
+  }
+
   const extras = models.filter((m) => m.bundle === null);
   // One row per *transformer*, not per bundle — FLUX.1 installs dev and Kontext
   // together and each takes its own adapter. Wan is excluded — its graph can't
@@ -508,52 +624,98 @@ export default function ImageModels({ models, onChanged }: Props) {
             <>
               {!cat.available && (
                 <div className="muted small note">
-                  No image model installed yet — pick one below to enable Create, Edit and
-                  Combine.
+                  No image model installed yet — pick one below to enable Create, Edit and Combine.
                 </div>
               )}
 
-              <ul className="bundle-list">
-                {cat.bundles.map((b) => (
-                  <li key={b.id} className={b.installed ? "installed" : ""}>
-                    <div className="bundle-head">
-                      <span className="bundle-name">{b.label}</span>
-                      {b.installed ? (
-                        <button
-                          className="btn danger small"
-                          onClick={() => remove(b.id, b.label)}
-                          disabled={busy !== null}
-                        >
-                          Remove
-                        </button>
-                      ) : (
-                        <button
-                          className="btn small"
-                          onClick={() => install(b.id)}
-                          disabled={busy !== null}
-                        >
-                          {busy === b.id ? "Installing…" : `⬇ ${b.needed_gb} GB`}
-                        </button>
-                      )}
-                    </div>
-                    <div className="muted small">{b.blurb}</div>
-                    <div className="muted small">
-                      {b.roles.join(" + ")} · needs ~{b.vram_gb} GB VRAM
-                      {b.gated && " · gated (needs a token)"}
-                    </div>
-                    {/* Progress lives in the card you clicked — a 50 GB download that
-                        reports somewhere else reads as a hang. */}
-                    {busy === b.id && (
-                      <div className="bundle-progress">
-                        <div className="progress">
-                          <div className="progress-bar" style={{ width: `${pct ?? 0}%` }} />
-                        </div>
-                        <div className="muted small">{status ?? "starting…"}</div>
-                      </div>
+              {cat.groups.map((g) => {
+                const inGroup = cat.bundles.filter((b) => b.group === g.id);
+                if (!inGroup.length) return null;
+                const parents = inGroup.filter((b) => !b.quant_of);
+                const nInstalled = inGroup.filter((b) => b.installed).length;
+                const groupOpen = isOpen(
+                  `g:${g.id}`,
+                  nInstalled > 0 || inGroup.some((b) => b.id === busy)
+                );
+                return (
+                  <div key={g.id} className="bundle-group">
+                    <button
+                      className="bundle-group-head"
+                      onClick={() => toggle(`g:${g.id}`, groupOpen)}
+                    >
+                      <span>{g.title}</span>
+                      <span className="bundle-group-meta">
+                        {nInstalled > 0 && (
+                          <span className="section-status on">{nInstalled} installed</span>
+                        )}
+                        <span className="chev">{groupOpen ? "▾" : "▸"}</span>
+                      </span>
+                    </button>
+                    {groupOpen && (
+                      <>
+                        <div className="muted small bundle-group-blurb">{g.blurb}</div>
+                        <ul className="bundle-list">
+                          {parents.map((b) => {
+                            const quants = inGroup.filter((q) => q.quant_of === b.id);
+                            const quantsOpen = isOpen(
+                              `q:${b.id}`,
+                              quants.some((q) => q.installed || q.id === busy)
+                            );
+                            return (
+                              <li key={b.id} className={b.installed ? "installed" : ""}>
+                                {bundleHead(b, b.label)}
+                                <div className="muted small">{b.blurb}</div>
+                                <div className="muted small">
+                                  {b.roles.join(" + ")}
+                                  {b.gated && " · gated (needs a token)"}
+                                </div>
+                                {resourceMenu(b, "Preferred system resources")}
+                                {quants.length > 0 && (
+                                  <div className="quant-menu">
+                                    <button
+                                      className="res-toggle"
+                                      onClick={() => toggle(`q:${b.id}`, quantsOpen)}
+                                    >
+                                      {quantsOpen ? "▾" : "▸"} Quantized versions ({quants.length})
+                                      {quants.some((q) => q.installed) &&
+                                        ` · ${quants.filter((q) => q.installed).length} installed`}
+                                    </button>
+                                    {quantsOpen && (
+                                      <>
+                                        <div className="muted small quant-note">
+                                          The same weights in other formats — every build takes the
+                                          LoRAs made for {b.label.split(" — ")[0]}.
+                                        </div>
+                                        <ul className="quant-list">
+                                          {quants.map((q) => (
+                                            <li
+                                              key={q.id}
+                                              className={q.installed ? "installed" : ""}
+                                            >
+                                              {bundleHead(q, q.quant ?? q.label)}
+                                              <div className="muted small">{q.blurb}</div>
+                                              {q.gated && (
+                                                <div className="muted small">
+                                                  gated (needs a token)
+                                                </div>
+                                              )}
+                                              {resourceMenu(q, "System resources")}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </>
+                                    )}
+                                  </div>
+                                )}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </>
                     )}
-                  </li>
-                ))}
-              </ul>
+                  </div>
+                );
+              })}
 
               {busy !== "repo" && status && !busy && (
                 <div className="muted small note">{status}</div>
@@ -564,8 +726,8 @@ export default function ImageModels({ models, onChanged }: Props) {
               <div className="muted small">
                 {cat.hf_token === "saved" && "✓ A token is saved. "}
                 {cat.hf_token === "env" && "✓ Using HF_TOKEN from the environment. "}
-                Needed for the gated models — accept the licence on their HuggingFace page
-                first, or the download 401s.
+                Needed for the gated models — accept the licence on their HuggingFace page first, or
+                the download 401s.
               </div>
               <div className="row">
                 <input
@@ -651,9 +813,9 @@ export default function ImageModels({ models, onChanged }: Props) {
                     </div>
                   ))}
                   <div className="muted small">
-                    A model loads the encoder it was trained against, so each list holds
-                    only the encoders that fit that model. Another checkpoint of the same
-                    architecture works too — a smaller quant, say.
+                    A model loads the encoder it was trained against, so each list holds only the
+                    encoders that fit that model. Another checkpoint of the same architecture works
+                    too — a smaller quant, say.
                   </div>
                   {(tes?.encoders ?? []).map((e) => (
                     <div key={e.name} className="row extra-model">
@@ -676,7 +838,11 @@ export default function ImageModels({ models, onChanged }: Props) {
                       onChange={(e) => setTeRepo(e.target.value)}
                       placeholder="owner/repo (HuggingFace)"
                     />
-                    <button className="btn" onClick={() => addTextEncoder()} disabled={busy !== null}>
+                    <button
+                      className="btn"
+                      onClick={() => addTextEncoder()}
+                      disabled={busy !== null}
+                    >
                       {busy === "te" ? "Adding…" : "⬇ Add"}
                     </button>
                   </div>
@@ -697,10 +863,9 @@ export default function ImageModels({ models, onChanged }: Props) {
                     <div className="muted small note te-status">{teStatus}</div>
                   )}
                   <div className="muted small">
-                    A bare repo works even in the sharded transformers layout — the shards
-                    are stitched into the single file ComfyUI loads. Add{" "}
-                    <code>:file</code> to name one checkpoint in a repo that holds several.
-                    Gated repos use your token.
+                    A bare repo works even in the sharded transformers layout — the shards are
+                    stitched into the single file ComfyUI loads. Add <code>:file</code> to name one
+                    checkpoint in a repo that holds several. Gated repos use your token.
                   </div>
                 </>
               )}
@@ -711,6 +876,13 @@ export default function ImageModels({ models, onChanged }: Props) {
               {loraModels.length > 0 && (
                 <>
                   <label className="lbl">LoRA adapters</label>
+                  <div className="muted small note">
+                    A LoRA made for a model works on every quantized build of it — each [klein] 9B
+                    build takes [klein] 9B LoRAs, each 4B build takes 4B ones. A newly installed
+                    build starts with the LoRAs of one you already have. On a GGUF build that
+                    doesn't fit in VRAM, ComfyUI's offloading can leave part of a LoRA unapplied
+                    (ComfyUI-GGUF issue #33); if one looks weak there, raise its strength.
+                  </div>
                   {loraModels.map((m) => {
                     const picks = m.loras;
                     const attached = new Set(picks.map((p) => p.name));
@@ -822,15 +994,14 @@ export default function ImageModels({ models, onChanged }: Props) {
                     );
                   })}
                   <div className="muted small">
-                    A LoRA is a small patch over the transformer — it changes what the
-                    model renders without replacing the checkpoint. Several can stack
-                    on the same model at once, each at its own weight. Models pick
-                    separately, because adapters are trained against one base: a
-                    FLUX.2 [dev] LoRA won't bind to klein, and a FLUX.1 dev one won't
-                    bind to Kontext. Start around 0.6-0.8. If one of them is a control
-                    adapter — trained to make the model follow a pose or depth map —
-                    tick <em>control adapter</em> on it, and the Control tab's strength
-                    dial will drive that one.
+                    A LoRA is a small patch over the transformer — it changes what the model renders
+                    without replacing the checkpoint. Several can stack on the same model at once,
+                    each at its own weight. Models pick separately, because adapters are trained
+                    against one base: a FLUX.2 [dev] LoRA won't bind to klein, and a FLUX.1 dev one
+                    won't bind to Kontext. Start around 0.6-0.8. If one of them is a control adapter
+                    — trained to make the model follow a pose or depth map — tick{" "}
+                    <em>control adapter</em> on it, and the Control tab's strength dial will drive
+                    that one.
                   </div>
                   {(loras?.loras ?? []).map((l) => (
                     <div key={l.name} className="row extra-model">
@@ -909,17 +1080,16 @@ export default function ImageModels({ models, onChanged }: Props) {
                   <div className="muted small">
                     {loraSource === "civitai" ? (
                       <>
-                        Paste the adapter's page URL — a <code>?modelVersionId=</code> in
-                        it picks that exact version, otherwise the newest one is taken.
-                        Most CivitAI downloads need an API key (civitai.com → Account
-                        settings → API Keys); it's stored server-side and never sent back
-                        to the browser.
+                        Paste the adapter's page URL — a <code>?modelVersionId=</code> in it picks
+                        that exact version, otherwise the newest one is taken. Most CivitAI
+                        downloads need an API key (civitai.com → Account settings → API Keys); it's
+                        stored server-side and never sent back to the browser.
                       </>
                     ) : (
                       <>
-                        <code>owner/repo</code> on its own works when the repo holds
-                        exactly one adapter; name the file otherwise. Most FLUX.2
-                        adapters are published on CivitAI — switch the source above.
+                        <code>owner/repo</code> on its own works when the repo holds exactly one
+                        adapter; name the file otherwise. Most FLUX.2 adapters are published on
+                        CivitAI — switch the source above.
                       </>
                     )}
                   </div>
@@ -962,12 +1132,12 @@ export default function ImageModels({ models, onChanged }: Props) {
                   )}
                   <div className="muted small">
                     These turn a reference photo into the control map the{" "}
-                    <strong>🕹️ Control</strong> tab conditions on, so you can copy a pose
-                    words can't describe. <strong>Depth</strong> is the one to install
-                    first: it carries the whole scene, so it can say a subject is
+                    <strong>🕹️ Control</strong> tab conditions on, so you can copy a pose words
+                    can't describe. <strong>Depth</strong> is the one to install first: it carries
+                    the whole scene, so it can say a subject is
                     <em> sitting on</em> a chair rather than floating near one.{" "}
-                    <strong>Pose</strong> adds a skeleton on top, which is what pins
-                    which limb is which in a hard pose. Edges needs no download.
+                    <strong>Pose</strong> adds a skeleton on top, which is what pins which limb is
+                    which in a hard pose. Edges needs no download.
                   </div>
                 </>
               )}

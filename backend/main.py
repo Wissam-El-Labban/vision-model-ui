@@ -608,6 +608,11 @@ def flux_catalog():
         "available": fx.available(),
         "disk_free_gb": cat.free_gb(),
         "bundles": fx.catalog(),
+        # Display sections, in order; each bundle names its `group`.
+        "groups": cat.GROUPS,
+        # This machine's totals (GiB), so each model can say whether it fits here.
+        "machine": {"vram_gb": (system.gpu() or {}).get("total_gb"),
+                    "ram_gb": (system.ram() or {}).get("total_gb")},
         "hf_token": settings.hf_token_source(),
         # A download survives the request that started it, so a reloaded page can find
         # it again here instead of assuming nothing is happening.

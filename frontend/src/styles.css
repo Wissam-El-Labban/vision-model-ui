@@ -41,6 +41,8 @@ body {
 
 /* ---------- Sidebar ---------- */
 .sidebar {
+  /* Width is set inline by Sidebar.tsx (drag the edge to resize); this is the
+     fallback before it renders. */
   width: 320px;
   flex-shrink: 0;
   background: var(--panel);
@@ -1318,6 +1320,9 @@ button.res-meter.open {
 
 @media (max-width: 700px) {
   .res-meter {
+    display: none;
+  }
+  .sidebar-resizer {
     display: none;
   }
 }
@@ -3168,4 +3173,168 @@ button.docs-pill.docs-pill-prompts.on {
 
 .lbl .swatch.video {
   background: var(--video);
+}
+
+/* ---------- Resizable sidebar ---------- */
+/* The handle is a zero-width flex item between the sidebar and the chat, its 6 px
+   hit area straddling the border, so it is full height and never scrolls away. */
+.sidebar-resizer {
+  position: relative;
+  flex: 0 0 6px;
+  margin: 0 -3px;
+  align-self: stretch;
+  cursor: col-resize;
+  z-index: 5;
+  touch-action: none;
+  transition: background 0.15s;
+}
+
+.sidebar-resizer:hover,
+body.resizing .sidebar-resizer {
+  background: var(--accent);
+  opacity: 0.6;
+}
+
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/* ---------- Image model groups (sidebar → Image Models) ---------- */
+.bundle-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 8px 0;
+  overflow: hidden;
+}
+
+.bundle-group-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--panel-2);
+  border: none;
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.bundle-group-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bundle-group-blurb {
+  padding: 6px 10px 0;
+}
+
+.bundle-group .bundle-list {
+  padding: 0 8px 8px;
+}
+
+/* A collapsible line inside a card: "▸ Quantized versions", "▸ System resources". */
+.res-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 4px 0;
+  margin-top: 4px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.res-toggle:hover {
+  text-decoration: underline;
+}
+
+.fit-badge {
+  font-weight: 500;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+
+.fit-ok {
+  color: var(--green);
+}
+
+.fit-tight {
+  color: var(--amber);
+}
+
+.fit-no {
+  color: var(--red);
+}
+
+.res-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 2px 0 4px;
+}
+
+.res-table th,
+.res-table td {
+  text-align: left;
+  vertical-align: top;
+  padding: 3px 6px;
+  border-top: 1px solid var(--border);
+}
+
+.res-table th {
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+  width: 1%;
+}
+
+.res-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+}
+
+.quant-menu {
+  border-top: 1px solid var(--border);
+  margin-top: 6px;
+}
+
+.quant-note {
+  margin: 2px 0 6px;
+}
+
+/* One column in the default sidebar; widen the sidebar and the builds tile out. */
+.quant-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr));
+  gap: 6px;
+}
+
+.quant-list li {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: var(--panel);
+  min-width: 0;
+}
+
+.quant-list li.installed {
+  border-color: rgba(47, 129, 247, 0.5);
+  background: rgba(47, 129, 247, 0.08);
 }

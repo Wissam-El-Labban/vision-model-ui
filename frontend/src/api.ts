@@ -389,6 +389,10 @@ export interface FluxModel {
   label: string;
   roles: FluxRole[];
   bundle: string | null; // catalog id, or null for a user-added model
+  group: string | null; // catalog section (e.g. "flux2-klein-9b"); null if user-added
+  /** The bundle LoRAs are made for: a quantized build's unquantized parent, else its
+   *  own bundle. Every model sharing one takes the same adapters. */
+  lora_base: string | null;
   family: string;
   size_gb: number;
   /** The text encoder the graph will actually load — the backend's `encoder_for`,
@@ -405,11 +409,24 @@ export interface FluxBundle {
   blurb: string;
   family: string;
   roles: FluxRole[];
-  size_gb: number;
-  vram_gb: number;
+  size_gb: number; // disk
+  vram_gb: number; // recommended: transformer + encoder both resident
+  min_vram_gb: number | null; // with ComfyUI offloading one while the other runs
+  ram_gb: number | null; // recommended system RAM
+  group: string | null; // which FluxGroup it's listed under
+  quant_of: string | null; // a quantized build of this bundle id (its parent)
+  quant: string | null; // "Q4_K_M", "fp8", … — set on quantized builds
+  clip: string | null; // the text encoder it ships with
   gated: boolean;
   installed: boolean;
   needed_gb: number; // still to download (a part-finished install counts what it has)
+}
+
+/** A section of the Image Models panel: one model line and its builds. */
+export interface FluxGroup {
+  id: string;
+  title: string;
+  blurb: string;
 }
 
 export interface FluxInstalling {
@@ -428,6 +445,8 @@ export interface FluxCatalog {
   available: boolean; // ...and a model installed, so we can actually generate
   disk_free_gb: number;
   bundles: FluxBundle[];
+  groups: FluxGroup[]; // display sections, in order
+  machine: { vram_gb: number | null; ram_gb: number | null };
   hf_token: "saved" | "env" | null;
   /** A download running on the server right now — it outlives the page that started
    *  it, so a reload can find it here rather than assuming nothing is happening. */

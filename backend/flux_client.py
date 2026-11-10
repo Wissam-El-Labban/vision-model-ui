@@ -95,9 +95,8 @@ KONTEXT_GUIDANCE = 2.5
 CREATE_GUIDANCE = 3.5
 FLUX2_GUIDANCE = 2.5
 KLEIN_GUIDANCE = 3.5
-# Both [klein] 9B installs: bf16 and its Q8_0 GGUF are the same distilled weights,
-# so they share its step count and guidance.
-KLEIN_BUNDLES = ("flux2-klein-9b", "flux2-klein-9b-q8")
+# Every [klein] build — 9B or 4B, bf16 or any quant — is the same distilled model and
+# shares its step count and guidance; `cat.is_klein` says which bundles those are.
 GUIDANCE_MIN, GUIDANCE_MAX = 0.5, 10.0
 
 # FLUX 3 Image Klein, from BFL's model card and ComfyUI's own templates for it
@@ -435,7 +434,7 @@ def _default_guidance(unet, role: str) -> float:
         return FLUX3_GUIDANCE
     if fam == cat.FAMILY_FLUX2:
         bundle = cat.bundle_of_unet(unet)
-        if bundle and bundle["id"] in KLEIN_BUNDLES:
+        if cat.is_klein(bundle):
             return KLEIN_GUIDANCE
         return FLUX2_GUIDANCE
     return KONTEXT_GUIDANCE if role == ROLE_EDIT else CREATE_GUIDANCE
@@ -443,7 +442,7 @@ def _default_guidance(unet, role: str) -> float:
 
 def _default_steps(unet) -> int:
     bundle = cat.bundle_of_unet(unet)
-    if bundle and bundle["id"] in KLEIN_BUNDLES:
+    if cat.is_klein(bundle):
         return KLEIN_STEPS
     if cat.family_of(unet) == cat.FAMILY_FLUX3:
         return FLUX3_STEPS
@@ -2655,6 +2654,8 @@ def list_unets() -> list[dict]:
                     "label": _label(p.name),
                     "roles": cat.roles_of(p.name),
                     "bundle": b["id"] if b else None,
+                    "group": b.get("group") if b else None,
+                    "lora_base": cat.lora_base(b),
                     "family": cat.family_of(p.name),
                     "size_gb": round(p.stat().st_size / 1e9, 2),
                     "encoder": encoder_for(p.name),
@@ -3296,6 +3297,12 @@ def catalog() -> list[dict]:
             "roles": b["roles"],
             "size_gb": b["size_gb"],
             "vram_gb": b["vram_gb"],
+            "min_vram_gb": b.get("min_vram_gb"),
+            "ram_gb": b.get("ram_gb"),
+            "group": b.get("group"),
+            "quant_of": b.get("quant_of"),
+            "quant": b.get("quant"),
+            "clip": b.get("clip"),
             "gated": b["gated"],
             "installed": cat.installed(b),
             "needed_gb": cat.needed_gb(b),
@@ -3489,10 +3496,33 @@ def install_bundle(bundle_id: str, on_status=None, on_progress=None) -> None:
             _merge_shards([cat.shard_path(m, s) for s in m["shards"]], out,
                           embed=embed, on_progress=progress)
             shutil.rmtree(cat.staging_dir(m), ignore_errors=True)  # shards served their purpose
+        _inherit_loras(b)
         say(f"{b['label']} installed.")
     finally:
         _install_state = None
         _install_mu.release()
+
+
+def _inherit_loras(bundle: dict) -> None:
+    """Give a freshly installed build the LoRA stack of an installed sibling.
+
+    Every build of one model (bf16 and each quant) shares a `lora_base` and takes the
+    same adapters, so moving from [klein] 9B bf16 to its Q4 shouldn't mean attaching
+    them all over again. Only when the new build has no picks of its own, and only
+    from a sibling that has some — the best-ranked one, as BUNDLES is quality order.
+    """
+    base = cat.lora_base(bundle)
+    targets = [u for u in cat.unets_of(bundle) if _takes_lora(u) and not _lora_picks(u)]
+    if not base or not targets:
+        return
+    for other in cat.installed_bundles():
+        if other["id"] == bundle["id"] or cat.lora_base(other) != base:
+            continue
+        picks = _lora_picks(other["unet"])
+        if picks:
+            for u in targets:
+                settings.set_loras(u, picks)
+            return
 
 
 def delete_bundle(bundle_id: str) -> None:
@@ -3676,14 +3706,20 @@ def _gguf_header(path, tensor: str | None = None):
                 out[key] = read_value(vtype)
             shape = None
             if tensor is not None:
+                # `tensor == "*"` asks for every tensor name instead of one shape.
+                names = [] if tensor == "*" else None
                 for _ in range(n_tensors):
                     tname = read_str()
                     n_dims = struct.unpack("<I", fh.read(4))[0]
                     dims = struct.unpack(f"<{n_dims}Q", fh.read(8 * n_dims))
                     fh.read(12)                      # type (u32) + data offset (u64)
-                    if tname == tensor:
+                    if names is not None:
+                        names.append(tname)
+                    elif tname == tensor:
                         shape = [int(d) for d in reversed(dims)]
                         break
+                if names is not None:
+                    return out, names
             return out, shape
     except (OSError, ValueError, struct.error, KeyError, UnicodeDecodeError):
         return None
@@ -3756,6 +3792,51 @@ def _lora_width(name: str) -> int | None:
         if shape and len(shape) == 2:
             return int(shape[1])
     return None
+
+
+# Width alone can't separate every base: [klein] 4B is 3072 wide, the same as FLUX.1,
+# so a FLUX.1 LoRA looked like a fit for it (and binds to almost nothing). Depth can:
+# 4B has 5 double / 20 single blocks, [klein] 9B 8 / 24, FLUX.1 19 / 38 (read off the
+# headers, not assumed). A LoRA may skip blocks, so it fits when the deepest block it
+# names exists in the model — never by equality. Quantizing keeps tensor names, so a
+# GGUF or fp8 build reports its unquantized parent's depth and takes its LoRAs.
+_BLOCK_RE = re.compile(r"(single|double)_blocks[._](\d+)[._]")
+
+
+def _block_depth(keys) -> tuple[int, int] | None:
+    """(double, single) block count implied by tensor names — the highest index + 1."""
+    depth = {"double": 0, "single": 0}
+    for k in keys:
+        m = _BLOCK_RE.search(k)
+        if m:
+            depth[m.group(1)] = max(depth[m.group(1)], int(m.group(2)) + 1)
+    return (depth["double"], depth["single"]) if any(depth.values()) else None
+
+
+def _unet_blocks(unet: str) -> tuple[int, int] | None:
+    path = UNET_DIR / os.path.basename(unet or "")
+    if not path.exists():
+        return None
+    if path.suffix.lower() == ".gguf":
+        out = _gguf_header(path, "*")
+        return _block_depth(out[1]) if out else None
+    return _block_depth((_safetensors_header(path) or {}).keys())
+
+
+def _lora_blocks(name: str) -> tuple[int, int] | None:
+    path = cat.LORA_DIR / os.path.basename(name or "")
+    if not path.exists() or path.suffix.lower() == ".pt":
+        return None
+    return _block_depth(k for k in (_safetensors_header(path) or {}) if k != "__metadata__")
+
+
+def _lora_fits(lora: str, unet: str) -> bool:
+    """Width must match and the LoRA's deepest block must exist in the model. Each
+    test fails open on an unreadable file, like `_fits`."""
+    if not _fits(_lora_width(lora), _unet_width(unet)):
+        return False
+    lb, ub = _lora_blocks(lora), _unet_blocks(unet)
+    return lb is None or ub is None or (lb[0] <= ub[0] and lb[1] <= ub[1])
 
 
 def _fits(add_on: int | None, model: int | None) -> bool:
@@ -4034,16 +4115,21 @@ def list_loras() -> list[dict]:
     only those, because attaching a klein adapter to [dev] binds to nothing and looks
     like a LoRA that simply does very little rather than like a mistake.
     """
-    widths = {m["name"]: _unet_width(m["name"]) for m in list_unets() if _takes_lora(m["name"])}
+    shapes = {m["name"]: (_unet_width(m["name"]), _unet_blocks(m["name"]))
+              for m in list_unets() if _takes_lora(m["name"])}
     out = []
     if cat.LORA_DIR.is_dir():
         for p in sorted(cat.LORA_DIR.iterdir()):
             if p.is_file() and p.suffix.lower() in LORA_EXTS:
-                width = _lora_width(p.name)
+                width, blocks = _lora_width(p.name), _lora_blocks(p.name)
                 out.append({
                     "name": p.name,
                     "size_mb": round(p.stat().st_size / 1e6, 1),
-                    "fits": [u for u, w in widths.items() if _fits(width, w)],
+                    # Same test as `_lora_fits`, with the model side read once.
+                    "fits": [u for u, (w, ub) in shapes.items()
+                             if _fits(width, w) and (blocks is None or ub is None
+                                                     or (blocks[0] <= ub[0]
+                                                         and blocks[1] <= ub[1]))],
                 })
     return out
 
@@ -4075,7 +4161,7 @@ def set_loras(model: str, picks: list[dict]) -> None:
             raise FileNotFoundError(safe)
         # Same guard, and for the same reason, as `set_text_encoder`'s: the browser's
         # list can be stale, and this is the only path that writes the attachment.
-        if not _fits(_lora_width(safe), _unet_width(target)):
+        if not _lora_fits(safe, target):
             raise ValueError(
                 f"{safe} was trained against a different transformer than "
                 f"{label(target)}. It would bind to almost none of the layers it "
