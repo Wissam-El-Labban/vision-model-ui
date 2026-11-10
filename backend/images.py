@@ -100,7 +100,7 @@ def normalize_for_store(raw: bytes) -> bytes:
 
     Deterministic, so re-uploading a file still dedupes to the same hash.
     """
-    from PIL import Image  # PLC0415
+    from PIL import Image, ImageOps  # PLC0415
 
     # Explicit, though the `except` below would return `raw` anyway: that path is the
     # last resort for bytes nothing can identify, and a first-class format shouldn't
@@ -111,7 +111,11 @@ def normalize_for_store(raw: bytes) -> bytes:
         img = Image.open(io.BytesIO(raw))
         if img.format in _FMT_TO_MIME_EXT and max(img.size) <= MAX_STORE_DIM:
             return raw
-        img = img.convert("RGB")
+        # Re-encoding drops the EXIF block, and with it the Orientation tag that
+        # `main.py:_resolve` would otherwise apply on read. So bake the rotation in
+        # here, before it's lost — a 4032x3024 phone photo always takes this path,
+        # and without this it was stored (and edited) sideways.
+        img = ImageOps.exif_transpose(img).convert("RGB")
         if max(img.size) > MAX_STORE_DIM:
             img.thumbnail((MAX_STORE_DIM, MAX_STORE_DIM), Image.LANCZOS)
         buf = io.BytesIO()
