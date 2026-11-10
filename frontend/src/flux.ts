@@ -117,6 +117,10 @@ const QWEN_CFG: Record<string, number> = {
  * distilled guidance embedding. Mirrors the backend's `_default_guidance`.
  * Resolves through `resolveFlux` so the guidance follows the model that will
  * actually run, not whichever one happens to sort first. */
+// Both [klein] 9B installs (bf16 and its Q8_0 GGUF): same distilled weights, same
+// defaults. Mirrors the backend's KLEIN_BUNDLES.
+const KLEIN_BUNDLES = ["flux2-klein-9b", "flux2-klein-9b-q8"];
+
 export function guidanceFor(op: GenOp, models: FluxModel[], picked = ""): number {
   const role = roleFor(op);
   const name = resolveFlux(picked, models, role);
@@ -127,7 +131,7 @@ export function guidanceFor(op: GenOp, models: FluxModel[], picked = ""): number
   if (pickedModel?.family === "flux3") return 1;
   if (pickedModel?.family === "qwen") return QWEN_CFG[pickedModel.name] ?? 4;
   if (pickedModel?.family === "flux2") {
-    return pickedModel.bundle === "flux2-klein-9b" ? 3.5 : 2.5;
+    return KLEIN_BUNDLES.includes(pickedModel.bundle ?? "") ? 3.5 : 2.5;
   }
   return op === "create" ? 3.5 : 2.5;
 }
@@ -142,7 +146,7 @@ export function guidanceFor(op: GenOp, models: FluxModel[], picked = ""): number
 export function stepsFor(op: GenOp, models: FluxModel[], picked = ""): number {
   const name = resolveFlux(picked, models, roleFor(op));
   const pickedModel = models.find((m) => m.name === name);
-  if (pickedModel?.bundle === "flux2-klein-9b") return 8;
+  if (KLEIN_BUNDLES.includes(pickedModel?.bundle ?? "")) return 8;
   if (pickedModel?.family === "flux3") return 16;
   if (pickedModel?.family === "qwen") return QWEN_STEPS[pickedModel.name] ?? 50;
   if (pickedModel?.family === "flux2") return 35;

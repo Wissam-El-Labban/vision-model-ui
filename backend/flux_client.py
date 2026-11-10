@@ -95,6 +95,9 @@ KONTEXT_GUIDANCE = 2.5
 CREATE_GUIDANCE = 3.5
 FLUX2_GUIDANCE = 2.5
 KLEIN_GUIDANCE = 3.5
+# Both [klein] 9B installs: bf16 and its Q8_0 GGUF are the same distilled weights,
+# so they share its step count and guidance.
+KLEIN_BUNDLES = ("flux2-klein-9b", "flux2-klein-9b-q8")
 GUIDANCE_MIN, GUIDANCE_MAX = 0.5, 10.0
 
 # FLUX 3 Image Klein, from BFL's model card and ComfyUI's own templates for it
@@ -432,7 +435,7 @@ def _default_guidance(unet, role: str) -> float:
         return FLUX3_GUIDANCE
     if fam == cat.FAMILY_FLUX2:
         bundle = cat.bundle_of_unet(unet)
-        if bundle and bundle["id"] == "flux2-klein-9b":
+        if bundle and bundle["id"] in KLEIN_BUNDLES:
             return KLEIN_GUIDANCE
         return FLUX2_GUIDANCE
     return KONTEXT_GUIDANCE if role == ROLE_EDIT else CREATE_GUIDANCE
@@ -440,7 +443,7 @@ def _default_guidance(unet, role: str) -> float:
 
 def _default_steps(unet) -> int:
     bundle = cat.bundle_of_unet(unet)
-    if bundle and bundle["id"] == "flux2-klein-9b":
+    if bundle and bundle["id"] in KLEIN_BUNDLES:
         return KLEIN_STEPS
     if cat.family_of(unet) == cat.FAMILY_FLUX3:
         return FLUX3_STEPS
@@ -678,10 +681,11 @@ def free() -> None:
         return
     # Nothing is loaded after this, so the next run pays the cold price again and the
     # progress bar should expect it (see `_resident`).
-    global _residency_known
+    global _residency_known, _last_patch
     _resident.clear()
     _resident_role.clear()
     _residency_known = True
+    _last_patch = None
     try:
         _post("/free", {"unload_models": True, "free_memory": True})
     except Exception:
@@ -2133,6 +2137,94 @@ class _Progress:
 # --------------------------------------------------------------------------- #
 # Run
 # --------------------------------------------------------------------------- #
+# The transformer + LoRA stack the previous graph ran, for `_make_room_for`.
+_last_patch: tuple | None = None
+
+
+def _patch_signature(graph: dict) -> tuple | None:
+    """(transformer files, LoRA stack) a graph samples with; None if it loads no
+    transformer (a preprocessor graph), which leaves the resident model alone."""
+    unets, loras = [], []
+    for node in graph.values():
+        ct, inp = node.get("class_type"), node.get("inputs", {})
+        if ct in ("UNETLoader", "UnetLoaderGGUF"):
+            unets.append(inp.get("unet_name", ""))
+        elif ct in ("LoraLoaderModelOnly", "LoraLoader"):
+            loras.append((inp.get("lora_name", ""), inp.get("strength_model")))
+    return (tuple(sorted(unets)), tuple(loras)) if unets else None
+
+
+def _mem_available_gb() -> float | None:
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 2**20
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _make_room_for(graph: dict, on_status=None) -> None:
+    """Unload ComfyUI before a graph that swaps the transformer or its LoRAs, when
+    system RAM can't take the one going out.
+
+    ComfyUI makes room on the GPU by moving the outgoing model to system RAM rather
+    than dropping it, and a re-patched transformer counts as a new model. After an
+    image, the encoder is already parked there (~5.5 GB of Qwen3-8B Q8_0), so on a
+    16 GB machine adding the 10 GB transformer ran it out of memory and the kernel
+    killed the engine (measured: MemAvailable fell to 335 MB on a LoRA toggle).
+    ComfyUI's own `/free` can't prevent that: it unloads by moving weights to the
+    offload device (system RAM) before dropping them, which is the same spike, and it
+    runs on the worker thread after whatever prompt is already queued. So the engine
+    is restarted instead: a process exit frees its memory at once. That costs a boot
+    and a reload from page cache. Machines with the RAM to hold the outgoing
+    transformer keep it warm, as before.
+    """
+    global _last_patch
+    sig = _patch_signature(graph)
+    if sig is None:
+        return
+    prev, _last_patch = _last_patch, sig
+    if prev is None or prev == sig or not _server_up():
+        return
+    outgoing = sum((UNET_DIR / os.path.basename(u)).stat().st_size
+                   for u in prev[0] if (UNET_DIR / os.path.basename(u)).is_file()) / 2**30
+    avail = _mem_available_gb()
+    if avail is not None and avail < outgoing + 2:
+        logging.info("Restarting FLUX before a model/LoRA swap: %.1f GiB free RAM, "
+                     "%.1f GiB transformer going out", avail, outgoing)
+        _restart_server(on_status)
+        _last_patch = sig  # the restart forgets it; this graph is what loads next
+
+
+def _restart_server(on_status=None) -> None:
+    """Stop the ComfyUI sidecar and start a fresh one, with nothing loaded."""
+    global _proc, _residency_known, _last_patch
+    if on_status:
+        on_status("Restarting the FLUX engine to free RAM for the new model or LoRA…")
+    _resident.clear()
+    _resident_role.clear()
+    _residency_known = True
+    _last_patch = None
+    if _proc is not None and _proc.poll() is None:
+        _proc.terminate()
+        try:
+            _proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            _proc.kill()
+            _proc.wait(timeout=10)
+    else:
+        # A sidecar this backend didn't start (it outlived a backend restart).
+        subprocess.run(["pkill", "-f", "main.py --listen 127.0.0.1 --port 8188"],
+                       check=False)
+    for _ in range(40):  # until the port is released
+        if not _server_up():
+            break
+        time.sleep(0.5)
+    ensure_server(on_status)
+
+
 def _await(graph, on_progress=None, on_status=None,
            recv_timeout=600, poll_timeout=900) -> dict:
     """Submit a graph, relay progress, and return its history entry once it finishes.
@@ -2152,6 +2244,7 @@ def _await(graph, on_progress=None, on_status=None,
     job still running fine.
     """
     _check_stop()
+    _make_room_for(graph, on_status)
     client_id = uuid.uuid4().hex
     pid = _post("/prompt", {"prompt": graph, "client_id": client_id})["prompt_id"]
     me = threading.get_ident()
@@ -3524,12 +3617,30 @@ def _gguf_metadata(path) -> dict | None:
     are the scalars and strings this needs; arrays are skipped by computing their
     length, since the tokenizer's vocabulary is one of them and is enormous.
     """
+    out = _gguf_header(path)
+    return out[0] if out else None
+
+
+def _gguf_tensor_shape(path, name: str) -> list[int] | None:
+    """One tensor's shape from a GGUF's tensor table, in PyTorch order (outermost
+    first), or None if the file or the tensor isn't there. Reads only the header."""
+    out = _gguf_header(path, name)
+    return out[1] if out else None
+
+
+def _gguf_header(path, tensor: str | None = None):
+    """(metadata, shape of `tensor` or None), or None if `path` isn't a readable GGUF.
+
+    The tensor table follows the key-value block: per tensor a name, a dim count, the
+    dims (innermost first, the reverse of PyTorch's order), a type and an offset. It is
+    walked only when a tensor is asked for.
+    """
     try:
         with open(path, "rb") as fh:
             if fh.read(4) != b"GGUF":
                 return None
             struct.unpack("<I", fh.read(4))  # format version
-            fh.read(8)                       # tensor count
+            n_tensors = struct.unpack("<Q", fh.read(8))[0]
             n_kv = struct.unpack("<Q", fh.read(8))[0]
 
             def read_str() -> str:
@@ -3563,7 +3674,17 @@ def _gguf_metadata(path) -> dict | None:
                 key = read_str()
                 vtype = struct.unpack("<I", fh.read(4))[0]
                 out[key] = read_value(vtype)
-            return out
+            shape = None
+            if tensor is not None:
+                for _ in range(n_tensors):
+                    tname = read_str()
+                    n_dims = struct.unpack("<I", fh.read(4))[0]
+                    dims = struct.unpack(f"<{n_dims}Q", fh.read(8 * n_dims))
+                    fh.read(12)                      # type (u32) + data offset (u64)
+                    if tname == tensor:
+                        shape = [int(d) for d in reversed(dims)]
+                        break
+            return out, shape
     except (OSError, ValueError, struct.error, KeyError, UnicodeDecodeError):
         return None
 
@@ -3599,8 +3720,13 @@ def _unet_width(unet: str) -> int | None:
     """A transformer's hidden width, off its own header — the number both kinds of
     add-on have to match."""
     path = UNET_DIR / os.path.basename(unet or "")
-    if not path.exists() or path.suffix.lower() == ".gguf":
+    if not path.exists():
         return None
+    if path.suffix.lower() == ".gguf":
+        # Same tensor as below. A straight GGUF conversion keeps the checkpoint's
+        # tensor names, so a quant reports the width of the model it was made from.
+        shape = _gguf_tensor_shape(path, "double_blocks.0.img_attn.proj.weight")
+        return int(shape[1]) if shape and len(shape) > 1 else None
     header = _safetensors_header(path) or {}
     for key, dim in (("double_blocks.0.img_attn.proj.weight", 1), ("img_in.weight", 0)):
         shape = (header.get(key) or {}).get("shape")

@@ -191,6 +191,42 @@ BUNDLES = [
             },
         ],
     },
+    # The same [klein] 9B weights, 8-bit. The bf16 bundle above cannot load on a
+    # machine with less RAM than its 16.9 GiB transformer file: safetensors maps it
+    # privately, and with no swap the kernel refuses that mapping outright (ENOMEM).
+    # A GGUF is mapped read-only, so it lives in page cache and never counts against
+    # RAM. Q8_0 is 8-bit weights in blocks of 32 with a scale per block, the
+    # highest-fidelity quant short of bf16. Lower quants soften skin and fine texture.
+    #
+    # It is a straight conversion: the tensor names are the bf16 checkpoint's own, so
+    # every LoRA made for unquantized [klein] 9B binds to it unchanged, and any
+    # Qwen3-8B encoder (bf16, a GGUF quant, a fine-tune) can be swapped in. The default
+    # is Qwen3-8B at Q8_0 too, so transformer + encoder (~19 GB) fit one 24 GB card.
+    # Nothing is gated: Unsloth mirrors BFL's files, and the VAE below is byte-identical
+    # (sha256 ca70d220…) to the gated repo's, which is why the bf16 bundle's filename
+    # is reused. `delete_bundle` keeps it while the other bundle still needs it.
+    {
+        "id": "flux2-klein-9b-q8",
+        "label": "FLUX.2 [klein] 9B — Q8_0",
+        "family": FAMILY_FLUX2,
+        "roles": [ROLE_CREATE, ROLE_EDIT],
+        "blurb": ("The distilled 9B FLUX.2 in 8-bit GGUF: near-identical to bf16 at "
+                  "half the memory, so it runs on a 24 GB card with 16 GB of RAM. Takes "
+                  "the same LoRAs and Qwen3-8B text encoders as the bf16 [klein] 9B."),
+        "size_gb": 19.1,
+        "vram_gb": 22,
+        "gated": False,
+        "unet": "flux-2-klein-9b-Q8_0.gguf",
+        "weight_dtype": "default",  # unused: a .gguf loads through UnetLoaderGGUF
+        "clip": "Qwen3-8B-Q8_0.gguf",
+        "vae": "flux2-klein-vae.safetensors",
+        "files": [
+            ("unsloth/FLUX.2-klein-9B-GGUF", "flux-2-klein-9b-Q8_0.gguf", "unet"),
+            ("unsloth/Qwen3-8B-GGUF", "Qwen3-8B-Q8_0.gguf", "text_encoders"),
+            ("unsloth/FLUX.2-klein-9B", "vae/diffusion_pytorch_model.safetensors",
+             "vae", "flux2-klein-vae.safetensors"),
+        ],
+    },
     # Qwen splits create and edit across two separately fine-tuned checkpoints of one
     # 20B architecture — the same shape FLUX.1 had, where dev created and Kontext
     # edited. So a Qwen bundle ships both: `unet` creates, `unet_edit` edits, and
