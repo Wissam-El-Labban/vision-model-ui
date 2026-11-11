@@ -414,6 +414,17 @@ _ENHANCE_SYSTEM = {
         "lighting, framing.\n"
         "If the image shows people, say that their face, identity and natural skin "
         "texture must stay unchanged.\n"
+        "When the instruction brings a person or object INTO the image (usually from "
+        "an extra reference photo), that is ADDING, not replacing: everyone already in "
+        "the scene stays, and the newcomers join them. Only say replace or swap if "
+        "the user said so. Name each newcomer by a short description and say exactly "
+        "where they go.\n"
+        "For anything added, the scene's lighting stays unchanged but the newcomer "
+        "must be relit to match it, or it looks pasted on like a sticker. Say so "
+        "explicitly: the scene's light falls on them from the same direction and with "
+        "the same colour, they cast a natural shadow and contact shadow onto the "
+        "ground or furniture they touch, they match the scene's perspective, camera "
+        "angle, focus and depth of field, and they share its grain and colour grade.\n"
         "Do not add camera, lens or style language unless the user asked to change "
         "those.\n"
         "Return the instruction only: no preamble, no quotes, no commentary."
@@ -427,6 +438,17 @@ _ENHANCE_SYSTEM = {
         "Identify each reference's subject explicitly and say what it contributes, so "
         "the model knows which is which and reproduces each faithfully rather than "
         "blending them into someone new.\n"
+        "Every person in every reference appears as their own separate person. Never "
+        "merge two people into one, never drop anyone, and never have one replace "
+        "another unless the user said so.\n"
+        "This image is generated from scratch, so describe it as one real photograph: "
+        "camera and lens, lighting, composition and mood, with natural skin texture "
+        "and fine detail rather than a smooth render.\n"
+        "Make everyone belong to the same photograph, or they look pasted on like "
+        "stickers: one light source falling on every subject from the same direction "
+        "and with the same colour, natural shadows and contact shadows where they "
+        "touch the ground or furniture, one consistent perspective, focus and depth "
+        "of field, and one shared grain and colour grade.\n"
         "Keep every concrete detail the user specified. Invent only what they left "
         "open.\n"
         "Return the prompt only: no preamble, no quotes, no commentary."
@@ -499,6 +521,18 @@ _CONTACT_BRIEF = (
 )
 
 
+# Which edit attachment is which. The composer sends the scene first and the subject
+# references after it (`imagesFor` in frontend/src/flux.ts), but the vision model just
+# sees several photos. Untold, a scene plus two portraits reads as "swap someone for
+# these people", and "place these two in the scene" came back as "replace this person".
+_EDIT_REFS_NOTE = (
+    "\nImage 1 is the scene being edited. {refs} the people or things the "
+    "instruction brings into image 1. Refer to them by image "
+    "number and a short description. Unless the user said replace or swap, keep "
+    "everyone already in image 1 and add the newcomers alongside them."
+)
+
+
 def _subject_note(subjects: int, contact: bool) -> str:
     if subjects < 2:
         return ""
@@ -560,7 +594,11 @@ def enhance_prompt(url, model, prompt, mode, images_b64=(), subjects=1, contact=
     system = _ENHANCE_SYSTEM[template]
     if template == "control":
         system += _subject_note(subjects, contact)
-    content = f"{reference}\n\nPrompt to rewrite:\n{prompt}" if reference else prompt
+    elif template == "edit" and len(images_b64) > 1:
+        n = len(images_b64)
+        refs = "Image 2 is a reference:" if n == 2 else f"Images 2 to {n} are references:"
+        system += _EDIT_REFS_NOTE.format(refs=refs)
+    content =f"{reference}\n\nPrompt to rewrite:\n{prompt}" if reference else prompt
     user = {"role": "user", "content": content}
     if images_b64:
         user["images"] = list(images_b64)
