@@ -1069,7 +1069,7 @@ export default function Composer({
                     </label>
                     <input
                       className="control-slider"
-                      type="range" min={0} max={1.5} step={0.05}
+                      type="range" min={0} max={3} step={0.05}
                       value={gen.controlStrength}
                       onChange={(e) => patchGen({ controlStrength: +e.target.value })}
                     />

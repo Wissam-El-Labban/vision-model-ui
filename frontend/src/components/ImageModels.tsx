@@ -929,7 +929,7 @@ export default function ImageModels({ models, onChanged }: Props) {
                               <input
                                 type="range"
                                 min="0"
-                                max="1.5"
+                                max="3.0"
                                 step="0.05"
                                 value={
                                   draftStrength[strengthKey(m.name, pick.name)] ?? pick.strength

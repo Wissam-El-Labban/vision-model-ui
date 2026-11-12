@@ -325,7 +325,7 @@ def _control_scale(v) -> float | None:
         s = float(v)
     except (TypeError, ValueError):
         return None
-    return min(max(s, 0.0), 2.0)
+    return min(max(s, 0.0), 3.0)
 
 
 def _canny_edge(v, default: float) -> float:
@@ -4171,7 +4171,7 @@ def set_loras(model: str, picks: list[dict]) -> None:
         # or overwhelms the base weights into noise. Clamp rather than reject: the
         # slider can't produce an out-of-range value, so anything here came from a
         # hand-made request and silently doing the sane thing beats a 400.
-        strength = max(-2.0, min(2.0, float(pick.get("strength", 1.0))))
+        strength = max(-3.0, min(3.0, float(pick.get("strength", 1.0))))
         # Last write for a repeated name wins, but keeps its original position —
         # attaching the same adapter twice is a no-op, not a stack of itself.
         seen[safe] = {"name": safe, "strength": strength}
